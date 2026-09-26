@@ -1,0 +1,26 @@
+# ai-harness guard patterns. Harness-owned: replaced on upgrade.
+# Add project patterns in .agents/guard.patterns (same format). Lines: <rule><TAB><ERE><TAB><fix hint>
+suppression	NOLINT	fix the finding; if it is a real false positive, stop and ask the human
+suppression	cppcheck-suppress	fix the finding; if it is a real false positive, stop and ask the human
+suppression	#[[:space:]]*pragma[[:space:]]+(GCC|clang)[[:space:]]+diagnostic[[:space:]]+ignored	fix the warning instead of silencing it
+suppression	#[[:space:]]*pragma[[:space:]]+warning[[:space:]]*\([[:space:]]*disable	fix the warning instead of silencing it
+suppression	-Wno-[a-z]	fix the warning instead of disabling it
+suppression	coverity\[	fix the finding; if it is a real false positive, stop and ask the human
+suppression	eslint-disable	fix the lint finding instead of disabling the rule
+suppression	@ts-(ignore|nocheck|expect-error)	fix the type error instead of suppressing it
+suppression	#[[:space:]]*(noqa|nosec)	fix the finding instead of suppressing it
+suppression	#[[:space:]]*type:[[:space:]]*ignore	fix the type error instead of suppressing it
+suppression	#[[:space:]]*pylint:[[:space:]]*disable	fix the finding instead of disabling it
+suppression	@SuppressWarnings	fix the warning instead of suppressing it
+suppression	#\[allow\(	fix the lint instead of allowing it
+suppression	//[[:space:]]*nolint	fix the lint instead of suppressing it
+suppression	NOSONAR	fix the finding instead of suppressing it
+suppression	LCOV_EXCL	cover the code with a test instead of excluding it
+skipped-test	GTEST_SKIP	make the test pass or explain why it cannot run; do not skip it
+skipped-test	TEST(_F|_P)?[[:space:]]*\([^,]*,[[:space:]]*DISABLED_	make the test pass instead of disabling it
+skipped-test	@pytest\.mark\.(skip|xfail)|pytest\.skip\(|unittest\.skip	make the test pass instead of skipping it
+skipped-test	(^|[^A-Za-z0-9_])(it|test|describe)\.(skip|todo)\(|(^|[^A-Za-z0-9_])x(it|describe|test)\(	make the test pass instead of skipping it
+skipped-test	(^|[^A-Za-z0-9_])(it|test|describe)\.only\(	remove .only; it silently skips every other test
+skipped-test	@(Disabled|Ignore)([^A-Za-z]|$)	make the test pass instead of disabling it
+skipped-test	#\[ignore\]	make the test pass instead of ignoring it
+skipped-test	t\.Skip\(	make the test pass instead of skipping it

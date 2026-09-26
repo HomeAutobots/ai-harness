@@ -1,0 +1,23 @@
+# Curated clang-tidy profile for agent feedback (ai-harness cpp-cmake pack).
+# Used only when the repo has no .clang-tidy of its own. Bug-finding checks with low false
+# positive rates, not style: noisy checks train agents to suppress, which the guard blocks.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  cert-err33-c,
+  cert-err34-c,
+  cert-flp30-c,
+  concurrency-mt-unsafe,
+  misc-redundant-expression,
+  misc-misplaced-const,
+  performance-*,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  readability-misleading-indentation
+WarningsAsErrors: ''
+FormatStyle: none

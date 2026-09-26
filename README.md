@@ -1,0 +1,220 @@
+# ai-harness
+
+A provider-agnostic harness for AI coding agents. Install it into any repo, have an agent tailor it to that repo, and upgrade every project from this one place.
+
+It gives every agent the same three things, whatever tool it runs in: a short set of instructions, deterministic feedback on its work, and hard limits on what it can touch.
+
+## Why it's built this way
+
+The design follows what the evidence says actually moves agent results:
+
+- **Deterministic feedback beats prose rules.** The strongest gains come from putting compiler, test, lint, and sanitizer output in the loop, and from gating on it. So the core of the harness is a feedback layer (`check`, `verify`, `guard`) that hooks run automatically, not paragraphs asking the agent to be careful.
+- **Context costs more than it helps unless it's non-inferable.** Studies of AGENTS.md-style files found little or no success gain and a real token cost, and model-written ones hurt. The always-on rules are about 20 lines, the tailored part has a ~25 line budget, and everything else loads on demand.
+- **Tool output is context too.** Feedback is quiet on success, deduplicated and capped on failure, and the full log stays on disk. No timestamps in agent-visible output, so it doesn't churn the prompt cache.
+- **Harness choices move cost more than success.** Measure on your own history before trusting any of this. `eval` replays real fixes from git and compares arms.
+- **One source of truth.** `AGENTS.md` and `.agents/skills/` are open standards most agents read natively. Adapters exist only where a tool still needs one.
+- **Upgrades that don't clobber.** Every file is harness-owned (replaced on upgrade) or project-owned (created once, never touched). Re-running the installer is the upgrade.
+
+## Tool support
+
+| Tool | Instructions | Skills | Hooks: policy / edit / turn | Native deny rules |
+|---|---|---|---|---|
+| Claude Code | `CLAUDE.md` with `@AGENTS.md` | `.claude/skills` mirror | all three, plus questions, `.claude/settings.json` | yes, `permissions.deny` |
+| GitHub Copilot (CLI, cloud agent, VS Code) | native | native | all three, plus questions, `.github/hooks/harness.json` | no, the hook enforces |
+| Cursor | native | native | policy and turn; edit findings arrive at the stop gate; no question tool to hook | no, the hook enforces |
+| OpenAI Codex | native | native | not yet | `.codex/rules/harness.rules` (opt in) |
+| Gemini CLI | `.gemini/settings.json` (opt in) | native | not yet | no |
+
+Notes:
+- **Why keep CLAUDE.md?** Claude Code reads AGENTS.md on its own only when no CLAUDE.md exists, and not on Bedrock, Vertex, or Foundry. The one-line import works everywhere.
+- **Copilot CLI also reads `.claude/settings.json` hooks**, so with both adapters on, some hooks fire twice there. `verify` caches by tree state, so the second run costs nothing.
+- **Cursor ignores `afterFileEdit` output.** The edit check still runs (and warms the cache), but Cursor sees findings when the stop gate sends them back as a follow-up.
+- **Hooks are guardrails, not a sandbox.** Timeouts fail open, some tool versions don't run hooks for subagents, and a determined agent can write a script that does what a blocked command would. For unattended runs, use a sandboxed devcontainer with an egress allowlist as well.
+
+## Quick start
+
+```sh
+git clone <your-remote>/ai-harness.git ~/code/ai-harness
+~/code/ai-harness/install.sh ~/code/my-project
+~/code/ai-harness/install.sh --stack cpp-cmake ~/code/my-cpp-project   # with a stack pack
+~/code/ai-harness/install.sh --workflow req-driven ~/code/my-project    # with a workflow pack
+```
+
+Then open the project in any agent and say:
+
+> Use the harness-tailor skill to tailor the AI harness for this repo.
+
+It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing lint findings. Review the diff and commit. In CI:
+
+```sh
+.agents/bin/sync --check && .agents/bin/verify --tier=full
+```
+
+## The feedback loop
+
+Three tiers, each a project-owned script in `.agents/checks/`, all run through one orchestrator:
+
+| Tier | Runs | Typical content | Budget |
+|---|---|---|---|
+| edit | after every file edit (hook), `check <files>` | formatter check, per-file lint, syntax check | `EDIT_BUDGET` (15s) |
+| turn | when the agent finishes a turn that changed files (stop hook), `verify` | incremental build, affected tests, lint on changed code | `TURN_BUDGET` (300s) |
+| full | commit gate, CI, `verify --tier=full` | everything CI runs, sanitizers, slow analyzers | none |
+
+- **Output contract.** `ok verify turn` on success. On failure: `path:line` findings (deduplicated, max 5 per file, 30 total), test failure markers, sanitizer reports trimmed to repo frames, and `full log: <path>`.
+- **Exit codes.** 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 out of budget. Hooks block only on 1 and 2; anything else fails open with a note.
+- **Stop gate.** Blocks at most `TURN_MAX_BLOCKS` (3) times per turn, then hands back to you instead of looping. Turns that didn't change the tree aren't gated.
+- **Caching.** Results are keyed by tree state. Repeat calls with no changes return instantly.
+- **Baselines.** `verify --tier=full --update-baseline` records current findings so only new ones count. Tier scripts opt in with `agents_lint <name> <cmd>`.
+
+## Guard and policy
+
+**Guard** scans only lines added in the working tree and blocks the ways to get green without fixing anything: new suppressions (NOLINT, cppcheck-suppress, pragma ignores, `-Wno-`, noqa, eslint-disable, ts-ignore, and friends), skipped or disabled tests, `.only`, deleted test files, and removed test cases. A human can approve an exception with `guard allow <file-glob> <text> <reason>`; the policy blocks agents from running that.
+
+**Policy** lives in `.agents/policy.conf`: `deny-cmd` (command prefix, checked per segment of chains and pipelines, including inside `bash -c`), `deny-arg`, `deny-regex`, `deny-read` and `allow-read` (paths, also when named in a shell command). Defaults block `reset --hard`, `clean -f`, history rewrites, `--no-verify`, piping downloads into a shell, `sudo`, and reads of `.env` files, key material, and credential directories. Git workflow rules (pushes, PRs, merges, branch and commit formats) live in `.agents/git.conf`.
+
+## Validation gates
+
+The built-in `validate` skill checks work at three gates: the plan before any tests or code, the tests before implementation, and the implementation before hand-back. Each gate runs the deterministic checks first, judges what they can't, and returns PASS, REVISE (specific findings back to the producer, at most two rounds), or ASK (questions only the human can answer). Gates listed in `VALIDATE_ASK` always end with a check-in with you.
+
+Questions and answers live in a **question ledger** per plan (`.agents/plans/<slug>/questions.json`, or `_general/` outside a plan):
+
+- `tasks ask` records a question (with its gate) and blocks the task. It refuses a question the ledger already answered, so you don't get asked the same thing twice across sessions or tools.
+- `tasks answer` records your answer, adds it to the plan's Decisions, and resumes the task once nothing is open.
+- `tasks questions <words>` searches every question and answer across all plans.
+- A task waiting on you pauses the stop gate, which matters at the test gate, where tests are deliberately red.
+
+With the `questions` hook feature on (default), the hooks keep the ledger honest without relying on the agent to remember: before the agent asks through its question tool (AskUserQuestion in Claude Code, ask_user in Copilot), an earlier answer to the same question is shown to it instead, once per session; after you answer, the question and answer are recorded; and a new session starts with a reminder of anything still waiting on you. When roles land, `validate` becomes the validator role's instructions; until then, run it in a subagent with a fresh context where your tool supports one.
+
+## Git workflow
+
+Every repo's git workflow is described in config and carried out by one CLI, `.agents/bin/gitflow`, so it's generic in the harness and tailored per project:
+
+- **Settings layer**, last wins: harness defaults, then your personal `~/.config/ai-harness/git.conf` (your workflow follows you across repos), then the project's `.agents/git.conf`. `gitflow config` shows the result.
+- **Templates do double duty.** `GIT_BRANCH="{type}/{ticket}-{slug}"` and `GIT_COMMIT="{ticket}: {summary}"` both build names and messages (`gitflow start`, `gitflow commit`) and validate them. Extra rules go in `GIT_COMMIT_PATTERN`, required trailers in `GIT_COMMIT_TRAILERS`.
+- **Commit templates.** A project can define the whole message in one file (`GIT_COMMIT_TEMPLATE`, or the repo's own `commit.template`): subject, sections like `Why:` and `Testing:`, and trailers. Sections are required unless marked `(optional)`. Humans get the editor prefilled (ticket and trailers already in), agents fill sections with `gitflow commit --section Why=...`, `gitflow template` shows what's expected, and the `commit-msg` hook checks everyone's messages against it.
+- **The steps:** `start`, `commit`, `update` (merge or rebase the base in), `check`, `push` (runs a verify tier first), `pr` (gh, glab, or printed text; base forced to `GIT_BASE`; body from `.agents/git/pr.md`), `review`, `merge`.
+- **Who does what:** `GIT_AGENT_MAY` lists the steps agents may take (default `branch commit`); the rest are yours.
+- **Protected branches are the project's call.** Nothing is protected by default, which suits solo and trunk-based repos. Set any names or globs, such as `GIT_PROTECTED="dev/main release/*"`; `{base}` stands for whatever `GIT_BASE` is.
+- **Plans link to branches only if you want.** `tasks link <slug>` records a plan's branch so `gitflow pr` can include it. Plans work without branches, and branches without plans.
+- **Enforcement:**
+  - Local git hooks (`commit-msg`, `pre-push`, and `prepare-commit-msg` when there's a commit template) apply to you and to every tool: message format, trailers, protected branches, force pushes. They're installed only once git.conf has something for them to enforce (`sync` adds them when it does). An existing `core.hooksPath` (husky, pre-commit) is left alone, with the lines to add.
+  - The policy hook checks agent commands before they run: protected pushes, force pushes, branch names, PR base, rebase vs merge, steps outside `GIT_AGENT_MAY`, and approving PRs, which agents never do.
+  - When the project's git.conf sets `GIT_AGENT_MAY` explicitly, the forbidden steps are also rendered as native deny rules (Claude Code, Codex). Personal settings never land in committed files, so CI and every developer render the same thing.
+
+**Safety is universal; process is opt-in.** Safety rules (no `reset --hard`, no `--no-verify`, no secrets, no force-pushing shared work) live in policy.conf and hold regardless of flow. Process rules (protected branches, branch and commit formats, trailers, dev workflows) apply only when configured. With nothing configured, each is a no-op, so a repo with no flow, or a developer who ignores the flow, still works. The smoke suite has "absence" tests that hold this in place: a zero-config trunk repo, gitflow with no plan or ticket, a plan with no workflow, and a workflow with no git config.
+
+The `git-workflow` skill covers the judgment: commit granularity, PR descriptions worth reading, and handling every review comment (fix it, explain it, or ask the human). A `deny-cmd` in policy.conf always wins, if a project wants to forbid agent pushes outright.
+
+## Plans that survive sessions and tools
+
+`plan-task` keeps a ledger per piece of work in `.agents/plans/<slug>/`: `plan.md` for intent, questions, and decisions, `tasks.json` for steps, `progress.log` for session notes. Agents edit it only through `.agents/bin/tasks` (`new`, `add`, `next`, `set`, `ask`, `answer`, `log`), so it stays valid JSON. Any agent in any tool resumes with `tasks next <slug>` and `git log`.
+
+## Evals
+
+```sh
+.agents/bin/eval new tls-expiry <fix-commit>     # then edit PROMPT and CHECK
+.agents/bin/eval run --arms=A,B,C --runs=3
+.agents/bin/eval report
+```
+
+Each task starts the agent at the commit before a real fix; success means that fix's own tests pass. Arm A has no harness, B has the harness with hooks off, C is the full harness. Token and turn numbers come from Claude Code's JSON output. The decision rule: adopt a change only if success doesn't drop, tokens per success stay within 1.1x, and wall time within 1.25x. Run evals in a disposable environment; the agent runs unattended.
+
+## Stack packs
+
+`install.sh --stack <name>` copies `stacks/<name>` into `.agents/stacks/<name>` (harness-owned, refreshed on upgrade) and seeds the tier scripts if they're still stubs. Tailored tier scripts are never replaced.
+
+- **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only, affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. See `stacks/cpp-cmake/README.md`.
+
+## Workflow packs
+
+Stack packs answer "how do we build and test this language." Workflow packs answer "in what order, and with what evidence, do we change things." They're independent, so a project can combine `cpp-cmake` with `req-driven`.
+
+`install.sh --workflow <name>` copies `workflows/<name>` into `.agents/workflows/<name>` (harness-owned), installs its skill, and appends its settings to `.agents/harness.conf` once. `verify` then runs the pack's checks for each tier after the project's own tier scripts, so nothing in `.agents/checks/` has to change.
+
+- **req-driven**: every change starts from a requirement ID in any exported requirements source (CSV, JSON, Markdown, text). Deterministic checks: IDs must exist, new tests must name the requirement they verify, changes in scope must reference one (in code, tests, or the plan task in progress), and the full tier writes a requirement to code to tests trace with optional untested-requirement gating. Standard-agnostic. See `workflows/req-driven/README.md`.
+
+The skill's phases (pin the requirement, tests first, implement, report) each end at a `validate` gate, so they map onto planner, tester, implementer, and validator roles when roles land.
+
+## Integrity
+
+`sync --check` fails when:
+- a managed block or adapter config drifted from what sync would render,
+- a pinned third-party skill changed (`sync --lock-skill <name> <source> <ref>` pins by SHA-256 content hash),
+- any instruction or config file an agent reads contains invisible Unicode (zero-width, bidi controls, tag characters).
+
+Also add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
+
+## What lands in a project
+
+```
+my-project/
+├── AGENTS.md                    project-owned, except the two harness:* blocks
+├── CLAUDE.md                    @AGENTS.md stub                          (claude)
+├── .claude/settings.json        hooks + deny rules merged in             (claude)
+├── .claude/skills/*             mirrors of .agents/skills/*              (claude)
+├── .github/hooks/harness.json   hooks                                    (copilot)
+├── .cursor/hooks.json           hooks merged in                          (cursor)
+└── .agents/
+    ├── core/                    harness: core rules, guard patterns
+    ├── bin/                     harness: sync, verify, check, guard, tasks, eval
+    ├── lib/, hooks/             harness: shell library, renderer, hook adapter
+    ├── stacks/<name>/           harness: installed stack packs
+    ├── workflows/<name>/        harness: installed workflow packs
+    ├── skills/                  harness built-ins + your skills
+    ├── checks/{edit,turn,full}.sh   project: what each tier runs
+    ├── harness.conf, policy.conf    project: adapters, hooks, budgets; limits
+    ├── git.conf, git/               project: git workflow, PR template, commit template
+    ├── guard.allow, baselines/      project: approved exceptions, known findings
+    ├── context/, evals/             project: on-demand docs, eval tasks
+    ├── plans/                   project: ledgers (gitignored by default)
+    ├── generated.lock           sync: what it added to shared config files
+    └── cache/                   local: logs, verify cache, hook state (gitignored)
+```
+
+Merged config files keep everything that isn't the harness's. Harness entries are recognized by their `.agents/hooks/` command path, and deny rules by `generated.lock`, so a re-render replaces exactly what the harness added.
+
+## Upgrading projects
+
+Change the harness here, bump `VERSION`, add a CHANGELOG entry, then per project:
+
+```sh
+~/code/ai-harness/install.sh ~/code/my-project
+```
+
+## Requirements
+
+- bash 3.2+ (stock macOS works), git, POSIX tools (any awk: tested with gawk, mawk, one-true-awk).
+- python3 3.8+ for hooks, JSON config rendering, evals, and the cpp-cmake helpers. Without it, sync warns and hooks step aside rather than wedging the agent.
+
+## Windows
+
+Symlinked skills need Developer Mode plus `git config core.symlinks true`. Otherwise set `LINK_MODE="copy"` in `.agents/harness.conf`. Hooks need Git Bash on PATH.
+
+## Working on the harness
+
+Never install the harness into this repo; try changes in a scratch repo under /tmp instead.
+
+```sh
+bash tests/lint.sh       # seconds: syntax, shellcheck, portability, ownership lists, budgets, docs voice
+bash tests/smoke.sh      # ~40s, ~270 checks; the C++ section runs when cmake and a compiler exist
+bash tests/all.sh        # lint, then smoke under every awk on the machine (the release gate)
+bash scripts/package.sh  # dist/ai-harness-<version>.zip plus its SHA-256
+```
+
+CI (`.github/workflows/ci.yml`) runs lint and `tests/all.sh` on Ubuntu and on macOS with Apple's bash 3.2.
+
+Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in every session of every project, and lint fails past 25 lines.
+
+## Known gaps
+
+- Codex and Gemini CLI hooks aren't rendered yet; their formats need verifying first. Codex execpolicy rule syntax is also unverified against a live Codex.
+- Hooks were tested with recorded payload shapes, not yet inside live Claude Code, Copilot, and Cursor sessions. Watch `.agents/cache/hook-events.log` on first use. The question-tool payloads (AskUserQuestion input and answers, Copilot ask_user) are the least certain; the capture falls back to recording the raw answer text.
+- `gitflow` was tested against a local bare remote and a stand-in `gh`, not live GitHub, GitLab, or Jira. `gitflow review` lists all PR comments (inline ones as `path:line`), not only unresolved threads.
+- Duplicate-question detection is word overlap with light stemming, not semantics. It catches rewordings of the same question; it can miss a paraphrase and, rarely, flag two different questions that share most words (`--force` overrides).
+- No sandbox profile ships with the harness. Pair it with a devcontainer that allowlists egress for unattended runs.
+
+## Roadmap
+
+- **0.3** Workflow packs (req-driven first, in progress), Codex and Gemini hooks once verified, more stack packs (Python, TypeScript).
+- **0.4** Roles: planner, tester, implementer, and validator (plus a read-only explorer), defined once and rendered per tool, with one writer at a time and the validator gating each phase.
+- **0.5** MCP config rendered from one `.agents/mcp.json`, off by default.

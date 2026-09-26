@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# ai-harness: guard. Harness-owned: replaced on upgrade.
+# Blocks the ways an agent can get to green without fixing anything: new suppressions,
+# skipped or disabled tests, deleted test files, and removed test cases. It only looks at
+# lines added in the working tree (vs HEAD), so existing code never trips it.
+#
+#   .agents/bin/guard [files...]                      scan the whole diff, or just these files
+#   .agents/bin/guard allow <file-glob> <text> <reason...>   record an approved exception
+#   .agents/bin/guard list                            show approved exceptions
+#
+# Approving an exception is a human decision: policy.conf blocks agents from running
+# `guard allow`, and .agents/guard.allow should be covered by CODEOWNERS.
+# Exit: 0 clean, 2 blocked.
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT" || exit 3
+ALLOW=".agents/guard.allow"
+
+case "${1:-}" in
+  allow)
+    [ $# -ge 4 ] || { echo "usage: guard allow <file-glob> <text> <reason...>" >&2; exit 3; }
+    glob="$2" text="$3"; shift 3
+    printf '%s\t%s\t%s\n' "$glob" "$text" "$*" >> "$ALLOW"
+    echo "allowed: $glob contains '$text' ($*). Recorded in $ALLOW for review."
+    exit 0 ;;
+  list)
+    [ -f "$ALLOW" ] && cat "$ALLOW" || echo "(no exceptions)"
+    exit 0 ;;
+  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+HAS_HEAD=1
+git rev-parse -q --verify HEAD >/dev/null 2>&1 || HAS_HEAD=0
+
+PATTERNS="$(mktemp)"; ADDED="$(mktemp)"; OUT="$(mktemp)"
+trap 'rm -f "$PATTERNS" "$ADDED" "$OUT"' EXIT
+grep -v '^#' .agents/core/guard.patterns 2>/dev/null | grep -v '^[[:space:]]*$' > "$PATTERNS"
+[ -f .agents/guard.patterns ] && grep -v '^#' .agents/guard.patterns | grep -v '^[[:space:]]*$' >> "$PATTERNS"
+
+# Paths the guard never scans: harness files and docs talk about suppressions on purpose.
+skip_path() {
+  case "$1" in
+    .agents/*|AGENTS.md|CLAUDE.md|GEMINI.md|.claude/*|.cursor/*|.github/hooks/*|.codex/*|.gemini/*) return 0 ;;
+    *.md|*.markdown|*.rst|*.txt) return 0 ;;
+  esac
+  return 1
+}
+
+# Collect added lines as: path<TAB>line<TAB>text
+{
+  if [ "$HAS_HEAD" -eq 1 ]; then
+    git diff -U0 --no-color --no-ext-diff HEAD -- "$@" 2>/dev/null | awk -v OFS='\t' '
+      /^\+\+\+ / { path = substr($0, 5); sub(/^b\//, "", path); next }
+      /^@@ / { split($3, a, ","); ln = substr(a[1], 2) + 0; next }
+      /^\+/ { if (path != "/dev/null") print path, ln, substr($0, 2); ln++ }'
+  fi
+  git ls-files -o --exclude-standard -- "$@" 2>/dev/null | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    grep -Iq . "$f" 2>/dev/null || continue
+    awk -v OFS='\t' -v p="$f" '{ print p, NR, $0 }' "$f"
+  done
+} > "$ADDED"
+
+# One awk pass: patterns, then approved exceptions, then added lines.
+ALLOWF="$ALLOW"; [ -f "$ALLOWF" ] || ALLOWF=/dev/null
+awk -F '\t' -v OFS='\t' '
+  function skip(p) {
+    return p ~ /^(\.agents|\.claude|\.cursor|\.codex|\.gemini)\// || p ~ /^\.github\/hooks\// ||
+           p ~ /^(AGENTS|CLAUDE|GEMINI)\.md$/ || p ~ /\.(md|markdown|rst|txt)$/
+  }
+  function glob2re(g,   r, i, c) {
+    r = "^"
+    for (i = 1; i <= length(g); i++) {
+      c = substr(g, i, 1)
+      if (c == "*") r = r ".*"; else if (c == "?") r = r "."
+      else if (c ~ /[.+^$(){}|\[\]\\]/) r = r "\\" c
+      else r = r c
+    }
+    return r "$"
+  }
+  FILENAME == ARGV[1] { rule[++np] = $1; re[np] = $2; hint[np] = $3; next }
+  FILENAME == ARGV[2] { if ($1 != "") { ag[++na] = glob2re($1); at[na] = $2 }; next }
+  {
+    path = $1; ln = $2; text = $0; sub(/^[^\t]*\t[^\t]*\t/, "", text)
+    if (skip(path)) next
+    for (i = 1; i <= np; i++) {
+      if (text ~ re[i]) {
+        ok = 0
+        for (j = 1; j <= na; j++) if (path ~ ag[j] && index(text, at[j]) > 0) { ok = 1; break }
+        if (ok) break
+        s = text; sub(/^[ \t]+/, "", s); s = substr(s, 1, 80)
+        printf "%s:%s: block: [%s] %s\n  fix: %s\n", path, ln, rule[i], s, hint[i]
+        break
+      }
+    }
+  }' "$PATTERNS" "$ALLOWF" "$ADDED" >> "$OUT"
+
+# Deleted test files and removed test cases (tracked files only).
+if [ "$HAS_HEAD" -eq 1 ]; then
+  git diff --name-only --diff-filter=D HEAD -- "$@" 2>/dev/null | while IFS= read -r f; do
+    skip_path "$f" && continue
+    case "$f" in
+      */test/*|*/tests/*|test/*|tests/*|*/spec/*|*_test.*|*.test.*|*_spec.*|*Test.java|*Tests.cs|*/test_*.py|test_*.py)
+        printf '%s:1: block: [deleted-test] test file deleted\n  fix: restore it; deleting tests needs explicit human approval\n' "$f" >> "$OUT" ;;
+    esac
+  done
+  git diff -U0 --no-color --no-ext-diff HEAD -- "$@" 2>/dev/null | awk '
+    function skip(p) {
+      return p ~ /^(\.agents|\.claude|\.cursor|\.codex|\.gemini)\// || p ~ /^\.github\/hooks\// ||
+             p ~ /^(AGENTS|CLAUDE|GEMINI)\.md$/ || p ~ /\.(md|markdown|rst|txt)$/
+    }
+    function flush() {
+      if (path != "" && !skip(path) && rem > add)
+        printf "%s:1: block: [removed-test] %d test case(s) removed\n  fix: restore them; removing tests needs explicit human approval\n", path, rem - add
+    }
+    /^\+\+\+ / { flush(); path = substr($0, 5); sub(/^b\//, "", path); rem = 0; add = 0; next }
+    /^--- / { next }
+    { t = substr($0, 2) }
+    /^-/ && t ~ /^[ \t]*(TEST|TEST_F|TEST_P|TYPED_TEST)[ \t]*\(|^[ \t]*def test_|^[ \t]*(it|test)\(["'\''`]|@Test([^A-Za-z]|$)|^[ \t]*fn test_/ { rem++ }
+    /^\+/ && t ~ /^[ \t]*(TEST|TEST_F|TEST_P|TYPED_TEST)[ \t]*\(|^[ \t]*def test_|^[ \t]*(it|test)\(["'\''`]|@Test([^A-Za-z]|$)|^[ \t]*fn test_/ { add++ }
+    END { flush() }' >> "$OUT"
+fi
+
+if [ -s "$OUT" ]; then
+  cat "$OUT"
+  exit 2
+fi
+exit 0

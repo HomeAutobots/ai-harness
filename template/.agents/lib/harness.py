@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""ai-harness adapter renderer and skills lock. Harness-owned: replaced on upgrade.
+
+Called by .agents/bin/sync. Renders the harness hooks and policy into each tool's native
+config, merging into files the project may already own. Harness entries are recognized by
+their command path (.agents/hooks/) or, for permission rules, by .agents/generated.lock, so a
+re-render replaces exactly what the harness added and never touches anything else.
+
+  harness.py render [--check]                        write (or just diff) adapter configs
+  harness.py lock-skill <name> <source> <ref>        pin a third-party skill by content hash
+  harness.py check-skills                            verify pinned skills are unchanged
+"""
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import sys
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+LOCK = os.path.join(ROOT, ".agents", "generated.lock")
+SKILLS_LOCK = os.path.join(ROOT, ".agents", "skills.lock")
+BUILTIN_SKILLS = {"harness-tailor", "plan-task", "review-diff", "validate", "git-workflow"}
+
+
+def load_conf():
+    conf = {"ADAPTERS": "claude", "HOOKS": "policy edit turn questions", "EDIT_BUDGET": "15", "TURN_BUDGET": "300"}
+    try:
+        with open(os.path.join(ROOT, ".agents", "harness.conf"), encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r'^\s*([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|\'([^\']*)\'|([^\s#]*))', line)
+                if m:
+                    conf[m.group(1)] = next(g for g in m.groups()[1:] if g is not None)
+    except OSError:
+        pass
+    return conf
+
+
+def load_policy():
+    rules = []
+    try:
+        with open(os.path.join(ROOT, ".agents", "policy.conf"), encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                reason = ""
+                if " #" in line:
+                    line, reason = [x.strip() for x in line.split(" #", 1)]
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    rules.append((parts[0], parts[1].strip(), reason))
+    except OSError:
+        pass
+    return rules
+
+
+GIT_STEP_RULES = {
+    "push": [["git", "push"], [".agents/bin/gitflow", "push"]],
+    "pr": [["gh", "pr", "create"], ["glab", "mr", "create"], [".agents/bin/gitflow", "pr"]],
+    "merge": [["gh", "pr", "merge"], ["glab", "mr", "merge"], [".agents/bin/gitflow", "merge"]],
+}
+
+
+def git_denied_prefixes():
+    """Command prefixes for git steps the project's own git.conf keeps from agents. Only an
+    explicit GIT_AGENT_MAY in .agents/git.conf counts: personal settings (~/.config) never land
+    in committed files, so CI and every developer render the same thing. Everything else about
+    the git workflow is enforced by the policy hook and the git hooks."""
+    may = None
+    try:
+        with open(os.path.join(ROOT, ".agents", "git.conf"), encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r'^\s*GIT_AGENT_MAY=(?:"([^"]*)"|\'([^\']*)\'|(\S*))', line)
+                if m:
+                    may = (m.group(1) or m.group(2) or m.group(3) or "").split()
+    except OSError:
+        pass
+    out = [["glab", "mr", "approve"]]
+    if may is not None:
+        for step, prefixes in GIT_STEP_RULES.items():
+            if step not in may:
+                out += prefixes
+    return out
+
+
+def ours(cmd):
+    return isinstance(cmd, str) and ".agents/hooks/" in cmd
+
+
+def hook_cmd(tool, event):
+    if tool == "claude":
+        return '"$CLAUDE_PROJECT_DIR"/.agents/hooks/run %s --tool=claude' % event
+    return ".agents/hooks/run %s --tool=%s" % (event, tool)
+
+
+def budgets(conf):
+    def num(k, d):
+        try:
+            return int(conf.get(k, d))
+        except ValueError:
+            return d
+    return num("EDIT_BUDGET", 15) + 20, num("TURN_BUDGET", 300) + 60
+
+
+# ------------------------------------------------------------------ per-tool renderers
+
+def claude_render(existing, conf, rules, enabled, prev_deny):
+    feats = set(conf.get("HOOKS", "").split()) if enabled else set()
+    edit_t, turn_t = budgets(conf)
+    want = {}
+
+    def group(event, timeout, matcher=None):
+        g = {"hooks": [{"type": "command", "command": hook_cmd("claude", event), "timeout": timeout}]}
+        if matcher:
+            g = {"matcher": matcher, **g}
+        return g
+    pre = (["Bash|Read|Grep|Glob"] if "policy" in feats else []) + (["AskUserQuestion"] if "questions" in feats else [])
+    post = (["Edit|Write|MultiEdit|NotebookEdit"] if "edit" in feats else []) + (["AskUserQuestion"] if "questions" in feats else [])
+    if pre:
+        want["PreToolUse"] = [group("pre-tool", 10, "|".join(pre))]
+    if post:
+        want["PostToolUse"] = [group("post-edit", edit_t, "|".join(post))]
+    if "questions" in feats:
+        want["SessionStart"] = [group("session-start", 10)]
+    if "turn" in feats:
+        want["UserPromptSubmit"] = [group("turn-start", 10)]
+        want["Stop"] = [group("stop-gate", turn_t)]
+    deny = []
+    if enabled:
+        deny += ["Bash(%s:*)" % " ".join(p) for p in git_denied_prefixes()]
+        allows = [p for k, p, _ in rules if k == "allow-read"]
+        for kind, pat, _ in rules:
+            if kind == "deny-cmd":
+                deny.append("Bash(%s:*)" % pat)
+            elif kind == "deny-read":
+                # Claude's deny rules can't carve out exceptions, so a deny that an allow-read
+                # overlaps (./**/.env* vs ./**/.env.example) is left to the pre-tool hook.
+                if not any(fnmatch.fnmatchcase(a, pat) for a in allows):
+                    deny.append("Read(%s)" % pat)
+
+    obj = dict(existing or {})
+    hooks = {}
+    for name, groups in (obj.get("hooks") or {}).items():
+        kept = []
+        for g in groups if isinstance(groups, list) else []:
+            if not isinstance(g, dict):
+                kept.append(g)
+                continue
+            inner = g.get("hooks") or []
+            left = [h for h in inner if not (isinstance(h, dict) and ours(h.get("command")))]
+            if left:
+                kept.append(dict(g, hooks=left))
+            elif not inner:
+                kept.append(g)
+        if kept:
+            hooks[name] = kept
+    for name, groups in want.items():
+        hooks.setdefault(name, []).extend(groups)
+    if hooks:
+        obj["hooks"] = hooks
+    else:
+        obj.pop("hooks", None)
+
+    perms = dict(obj.get("permissions") or {})
+    rules_now = [d for d in perms.get("deny", []) if d not in prev_deny]
+    rules_now += [d for d in deny if d not in rules_now]
+    if rules_now:
+        perms["deny"] = rules_now
+    else:
+        perms.pop("deny", None)
+    if perms:
+        obj["permissions"] = perms
+    else:
+        obj.pop("permissions", None)
+    return obj, deny
+
+
+def copilot_render(conf, enabled):
+    if not enabled:
+        return None
+    feats = set(conf.get("HOOKS", "").split())
+    edit_t, turn_t = budgets(conf)
+
+    def entry(event, timeout):
+        return [{"type": "command", "bash": hook_cmd("copilot", event), "cwd": ".", "timeoutSec": timeout}]
+    hooks = {}
+    if "policy" in feats or "questions" in feats:
+        hooks["PreToolUse"] = entry("pre-tool", 10)
+    if "edit" in feats or "questions" in feats:
+        hooks["PostToolUse"] = entry("post-edit", edit_t)
+    if "questions" in feats:
+        hooks["SessionStart"] = entry("session-start", 10)
+    if "turn" in feats:
+        hooks["UserPromptSubmit"] = entry("turn-start", 10)
+        hooks["Stop"] = entry("stop-gate", turn_t)
+    return {"version": 1, "hooks": hooks} if hooks else None
+
+
+def cursor_render(existing, conf, enabled):
+    feats = set(conf.get("HOOKS", "").split()) if enabled else set()
+    edit_t, turn_t = budgets(conf)
+
+    def entry(event, timeout):
+        return [{"command": hook_cmd("cursor", event), "timeout": timeout}]
+    want = {}
+    if "policy" in feats:
+        want["beforeShellExecution"] = entry("pre-tool", 10)
+        want["beforeReadFile"] = entry("pre-tool", 10)
+    if "edit" in feats:
+        want["afterFileEdit"] = entry("post-edit", edit_t)
+    if "turn" in feats:
+        want["beforeSubmitPrompt"] = entry("turn-start", 10)
+        want["stop"] = entry("stop-gate", turn_t)
+    obj = dict(existing or {})
+    hooks = {}
+    for name, entries in (obj.get("hooks") or {}).items():
+        kept = [e for e in (entries or []) if not (isinstance(e, dict) and ours(e.get("command")))]
+        if kept:
+            hooks[name] = kept
+    for name, entries in want.items():
+        hooks.setdefault(name, []).extend(entries)
+    if not hooks and set(obj) <= {"version", "hooks"}:
+        return None
+    obj.setdefault("version", 1)
+    obj["hooks"] = hooks
+    return obj
+
+
+def gemini_render(existing, enabled):
+    obj = dict(existing or {})
+    if not enabled:
+        return obj if existing is not None else None
+    ctx = dict(obj.get("context") or {})
+    fn = ctx.get("fileName")
+    names = [fn] if isinstance(fn, str) else list(fn or [])
+    if "AGENTS.md" not in names:
+        names.insert(0, "AGENTS.md")
+    if "GEMINI.md" not in names:
+        names.append("GEMINI.md")
+    ctx["fileName"] = names
+    obj["context"] = ctx
+    return obj
+
+
+def codex_rules(rules, enabled):
+    if not enabled:
+        return None
+    lines = [
+        "# Generated by ai-harness from .agents/policy.conf. Don't edit: change policy.conf,",
+        "# then run .agents/bin/sync. Codex loads project rules only for trusted projects.",
+        "",
+    ]
+    n = 0
+    git_rules = [("deny-cmd", " ".join(p), "blocked by this repo's git workflow (.agents/git.conf)")
+                 for p in git_denied_prefixes()]
+    for kind, pat, reason in list(rules) + git_rules:
+        if kind != "deny-cmd":
+            continue
+        try:
+            toks = shlex.split(pat)
+        except ValueError:
+            continue
+        n += 1
+        lines += ["prefix_rule(",
+                  "    pattern = [%s]," % ", ".join(json.dumps(t) for t in toks),
+                  '    decision = "forbidden",',
+                  "    justification = %s," % json.dumps(reason or "blocked by ai-harness policy"),
+                  ")", ""]
+    return "\n".join(lines) if n else None
+
+
+# ------------------------------------------------------------------ io
+
+def read_json(path):
+    """Returns (obj, error). obj is None when the file doesn't exist."""
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        return (json.loads(text) if text.strip() else {}), None
+    except (OSError, ValueError) as e:
+        return None, str(e)
+
+
+def dump_json(obj):
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
+def render(check):
+    conf = load_conf()
+    rules = load_policy()
+    adapters = set(conf.get("ADAPTERS", "").split())
+    lock, _ = read_json(LOCK)
+    lock = lock or {}
+    prev_deny = lock.get("claude_deny", [])
+    drift, errors, wrote = [], [], []
+    new_lock = {"claude_deny": prev_deny}
+
+    def settle_json(rel, new_obj, old_obj):
+        path = os.path.join(ROOT, rel)
+        if new_obj is None:
+            if old_obj is not None and os.path.exists(path):
+                if check:
+                    drift.append(rel + " (remove)")
+                else:
+                    os.remove(path)
+                    wrote.append("removed " + rel)
+            return
+        if old_obj == new_obj:
+            return
+        if check:
+            drift.append(rel)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(dump_json(new_obj))
+        wrote.append("wrote " + rel)
+
+    # Claude Code
+    rel = os.path.join(".claude", "settings.json")
+    old, err = read_json(os.path.join(ROOT, rel))
+    if err:
+        errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+    elif old is not None or "claude" in adapters:
+        new, deny = claude_render(old, conf, rules, "claude" in adapters, prev_deny)
+        if old is None and not new:
+            new = None
+        settle_json(rel, new, old)
+        new_lock["claude_deny"] = deny
+
+    # GitHub Copilot (CLI, cloud agent, VS Code): a file the harness owns outright
+    rel = os.path.join(".github", "hooks", "harness.json")
+    old, err = read_json(os.path.join(ROOT, rel))
+    settle_json(rel, copilot_render(conf, "copilot" in adapters), old if not err else {"invalid": True})
+
+    # Cursor
+    rel = os.path.join(".cursor", "hooks.json")
+    old, err = read_json(os.path.join(ROOT, rel))
+    if err:
+        errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+    elif old is not None or "cursor" in adapters:
+        settle_json(rel, cursor_render(old, conf, "cursor" in adapters), old)
+
+    # Gemini CLI (context file only; hooks not rendered yet)
+    rel = os.path.join(".gemini", "settings.json")
+    old, err = read_json(os.path.join(ROOT, rel))
+    if err:
+        errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+    elif old is not None or "gemini" in adapters:
+        settle_json(rel, gemini_render(old, "gemini" in adapters), old)
+
+    # Codex execpolicy rules: a file the harness owns outright
+    rel = os.path.join(".codex", "rules", "harness.rules")
+    path = os.path.join(ROOT, rel)
+    want = codex_rules(rules, "codex" in adapters)
+    have = open(path, encoding="utf-8").read() if os.path.exists(path) else None
+    if want is None and have is not None:
+        if check:
+            drift.append(rel + " (remove)")
+        else:
+            os.remove(path)
+            wrote.append("removed " + rel)
+    elif want is not None and want != have:
+        if check:
+            drift.append(rel)
+        else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(want)
+            wrote.append("wrote " + rel)
+
+    # Lock
+    if new_lock != lock:
+        if check:
+            drift.append(os.path.relpath(LOCK, ROOT))
+        else:
+            with open(LOCK, "w", encoding="utf-8") as fh:
+                fh.write(dump_json(new_lock))
+            wrote.append("wrote " + os.path.relpath(LOCK, ROOT))
+
+    for w in wrote:
+        print("sync: " + w)
+    for d in drift:
+        print("sync: out of date: " + d)
+    for e in errors:
+        print("sync: error: " + e, file=sys.stderr)
+    if errors:
+        return 2
+    return 1 if drift else 0
+
+
+# ------------------------------------------------------------------ skills lock
+
+def dir_hash(path):
+    h = hashlib.sha256()
+    for base, dirs, files in os.walk(path):
+        dirs.sort()
+        for name in sorted(files):
+            if name == ".harness-copy":
+                continue
+            full = os.path.join(base, name)
+            h.update(os.path.relpath(full, path).replace(os.sep, "/").encode() + b"\0")
+            with open(full, "rb") as fh:
+                h.update(fh.read())
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def read_skills_lock():
+    entries = {}
+    if os.path.exists(SKILLS_LOCK):
+        with open(SKILLS_LOCK, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 4 and not line.startswith("#"):
+                    entries[parts[0]] = (parts[1], parts[2], parts[3])
+    return entries
+
+
+def lock_skill(name, source, ref):
+    path = os.path.join(ROOT, ".agents", "skills", name)
+    if not os.path.isfile(os.path.join(path, "SKILL.md")):
+        print("no skill at .agents/skills/%s" % name, file=sys.stderr)
+        return 1
+    entries = read_skills_lock()
+    entries[name] = (dir_hash(path), source, ref)
+    with open(SKILLS_LOCK, "w", encoding="utf-8") as fh:
+        fh.write("# ai-harness skills lock: third-party skills pinned by content hash.\n")
+        fh.write("# sync --check fails if a pinned skill changes. Re-pin after reviewing an update:\n")
+        fh.write("#   .agents/bin/sync --lock-skill <name> <source> <ref>\n")
+        fh.write("# <name> <sha256> <source> <ref>\n")
+        for n in sorted(entries):
+            fh.write("%s %s %s %s\n" % (n, entries[n][0], entries[n][1], entries[n][2]))
+    print("locked %s at %s (%s)" % (name, ref, entries[name][0][:12]))
+    return 0
+
+
+def check_skills():
+    entries = read_skills_lock()
+    bad = 0
+    skills_dir = os.path.join(ROOT, ".agents", "skills")
+    for name, (digest, source, ref) in sorted(entries.items()):
+        path = os.path.join(skills_dir, name)
+        if not os.path.isdir(path):
+            print("sync: pinned skill '%s' is missing" % name)
+            bad = 1
+        elif dir_hash(path) != digest:
+            print("sync: skill '%s' changed since it was pinned (%s @ %s). Review the diff, then "
+                  "re-pin with: .agents/bin/sync --lock-skill %s %s <ref>" % (name, source, ref, name, source))
+            bad = 1
+    if os.path.isdir(skills_dir):
+        for name in sorted(os.listdir(skills_dir)):
+            path = os.path.join(skills_dir, name)
+            if name in entries or name in BUILTIN_SKILLS or not os.path.isdir(path):
+                continue
+            scripts = [f for b, _, fs in os.walk(path) for f in fs
+                       if f.endswith((".sh", ".py", ".js", ".ts", ".rb", ".pl")) or
+                       os.access(os.path.join(b, f), os.X_OK)]
+            if scripts:
+                print("sync: warning: skill '%s' ships scripts but isn't pinned in .agents/skills.lock. "
+                      "If it came from outside this repo, pin it." % name, file=sys.stderr)
+    return bad
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "render":
+        return render("--check" in argv[2:])
+    if cmd == "lock-skill" and len(argv) == 5:
+        return lock_skill(argv[2], argv[3], argv[4])
+    if cmd == "check-skills":
+        return check_skills()
+    print(__doc__.strip().split("\n\n")[-1], file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

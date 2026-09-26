@@ -1,0 +1,8 @@
+# Example eval task. Rename to <id>.task to enable. Replays commit FIX from its parent.
+FIX=0000000000000000000000000000000000000000
+BASE=0000000000000000000000000000000000000000^
+# Taken from FIX at scoring time, hidden from the agent while it works.
+TESTS="tests/cert_store_test.cpp"
+# Exit 0 means success. Runs in the scored worktree.
+CHECK=".agents/bin/verify --tier=turn --no-cache && ctest --test-dir build-agent -R CertStore --output-on-failure"
+PROMPT="CertStore::load accepts certificates whose notAfter is in the past. Expired certs must be rejected with CertError::Expired, matching how notBefore is handled."

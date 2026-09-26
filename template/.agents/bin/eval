@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# ai-harness: eval. Harness-owned: replaced on upgrade.
+# Measures whether the harness actually helps on this repo. Each task replays a real fix from
+# git history: the agent starts at the parent commit, and success means the fix's own tests pass.
+#
+#   eval new <id> <fix-commit>          scaffold .agents/evals/tasks/<id>.task from a commit
+#   eval run [--arms=A,B,C] [--runs=3] [--tasks=id,id] [--keep]
+#   eval report [results-dir]           summarize a run (default: the latest)
+#
+# Arms: A = no harness, B = harness with hooks off, C = full harness.
+# Agent command: EVAL_AGENT_CMD in harness.conf; the prompt is appended as the last argument.
+# The agent runs unattended, so run evals in a disposable environment (devcontainer or VM).
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+export AGENTS_ROOT="$ROOT"
+# shellcheck source=../lib/feedback.sh
+. "$ROOT/.agents/lib/feedback.sh"
+agents_load_conf
+cd "$ROOT" || exit 3
+
+EVAL_AGENT_CMD="${EVAL_AGENT_CMD:-claude -p --output-format json --permission-mode acceptEdits}"
+EVAL_TIMEOUT="${EVAL_TIMEOUT:-1800}"
+TASKS_DIR="$ROOT/.agents/evals/tasks"
+RESULTS_DIR="$ROOT/.agents/evals/results"
+HARNESS_PATHS="AGENTS.md CLAUDE.md .agents .claude .cursor .github/hooks .codex .gemini"
+
+die() { echo "eval: $*" >&2; exit 1; }
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+PY="$(command -v python3 || true)"
+[ -n "$PY" ] || die "python3 is required for evals"
+
+cmd_new() {
+  local id="${1:-}" fix tests prompt
+  [ -n "$id" ] && [ -n "${2:-}" ] || die "usage: eval new <id> <fix-commit>"
+  fix="$(git rev-parse --verify "$2^{commit}" 2>/dev/null)" || die "not a commit: $2"
+  mkdir -p "$TASKS_DIR"
+  [ -e "$TASKS_DIR/$id.task" ] && die "task '$id' exists"
+  tests="$(git diff-tree --no-commit-id --name-only -r "$fix" | grep -E '(^|/)(test|tests|spec)/|_test\.|\.test\.|_spec\.|(^|/)test_[^/]*\.py$|Test\.java$' | tr '\n' ' ' | sed 's/ *$//')"
+  prompt="$(git log -1 --format=%B "$fix")"
+  {
+    echo "# Eval task. Replays commit $fix. Edit PROMPT so it describes the problem, not the fix."
+    printf 'FIX=%s\n' "$fix"
+    printf 'BASE=%s\n' "$fix^"
+    printf '# Files taken from FIX at scoring time (hidden from the agent while it works)\n'
+    printf 'TESTS=%s\n' "$(shq "$tests")"
+    printf '# Must exit 0 for the run to count as a success. Runs in the scored worktree.\n'
+    printf 'CHECK=%s\n' "$(shq "TODO: e.g. .agents/bin/verify --tier=turn --no-cache && ctest --test-dir build-agent -R <name>")"
+    printf 'PROMPT=%s\n' "$(shq "$prompt")"
+  } > "$TASKS_DIR/$id.task"
+  echo "created .agents/evals/tasks/$id.task (tests: ${tests:-none found}). Edit CHECK and PROMPT."
+}
+
+copy_harness() {  # copy_harness <dest>: this repo's harness files into a worktree
+  local paths=() p
+  for p in $HARNESS_PATHS; do [ -e "$ROOT/$p" ] && paths+=("$p"); done
+  [ ${#paths[@]} -gt 0 ] || return 0
+  (cd "$ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/plans "${paths[@]}") | tar -C "$1" -xf -
+}
+
+hook_count() {  # hook_count <events-log> <event> <awk-condition-on-decision>
+  [ -f "$1" ] || { echo 0; return; }
+  awk -F '\t' -v ev="$2" -v c="$3" '$3 == ev && ($4 ~ c) { n++ } END { print n + 0 }' "$1"
+}
+
+cmd_run() {
+  local arms="A,B,C" runs=3 only="" keep=0 a
+  for a in "$@"; do
+    case "$a" in
+      --arms=*) arms="${a#--arms=}" ;;
+      --runs=*) runs="${a#--runs=}" ;;
+      --tasks=*) only="${a#--tasks=}" ;;
+      --keep) keep=1 ;;
+      *) die "unknown option $a" ;;
+    esac
+  done
+  ls "$TASKS_DIR"/*.task >/dev/null 2>&1 || die "no tasks in .agents/evals/tasks (see: eval new)"
+  local out
+  out="$RESULTS_DIR/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$out/wt" "$out/runs"
+  echo "task,arm,run,success,verify_full,agent_rc,turns,input_tokens,cache_read,cache_write,output_tokens,cost_usd,wall_s,edit_blocks,stop_blocks,policy_denies,guard_blocks" > "$out/results.csv"
+  local tf id FIX BASE TESTS CHECK PROMPT arm r wt tag start end rc succ vf guardn p
+  for tf in "$TASKS_DIR"/*.task; do
+    id="$(basename "$tf" .task)"
+    if [ -n "$only" ]; then case ",$only," in *",$id,"*) ;; *) continue ;; esac; fi
+    FIX="" BASE="" TESTS="" CHECK="" PROMPT=""
+    # shellcheck source=/dev/null
+    . "$tf"
+    BASE="${BASE:-$FIX^}"
+    case "$CHECK" in TODO*|"") echo "eval: skipping $id: CHECK not set" >&2; continue ;; esac
+    for arm in $(echo "$arms" | tr ',' ' '); do
+      r=1
+      while [ "$r" -le "$runs" ]; do
+        tag="$id-$arm-$r"; wt="$out/wt/$tag"
+        echo "eval: $tag"
+        git worktree add --detach -q "$wt" "$BASE" 2>/dev/null || { echo "eval: worktree failed for $tag" >&2; r=$((r + 1)); continue; }
+        for p in $HARNESS_PATHS; do rm -rf "${wt:?}/$p"; done
+        [ "$arm" != A ] && copy_harness "$wt"
+        local hooks=on
+        [ "$arm" = B ] && hooks=off
+        start="$(date +%s)"
+        rc=0
+        # shellcheck disable=SC2086
+        agents_budget_run "$EVAL_TIMEOUT" "$out/runs/$tag.out" env AGENTS_HOOKS="$hooks" AGENTS_TOOL="eval-$arm" \
+          bash -c 'cd "$1" && shift && exec "$@"' _ "$wt" $EVAL_AGENT_CMD "$PROMPT" || rc=$?
+        end="$(date +%s)"
+        # Score with the harness present in every arm (arm A gets it only after the agent is done).
+        [ "$arm" = A ] && copy_harness "$wt"
+        guardn="$( (cd "$wt" && .agents/bin/guard 2>/dev/null) | grep -c ': block: ' || true)"
+        # shellcheck disable=SC2086
+        [ -n "$TESTS" ] && git -C "$wt" checkout -q "$FIX" -- $TESTS 2>/dev/null
+        succ=0; agents_budget_run "$EVAL_TIMEOUT" "$out/runs/$tag.check" bash -c 'cd "$1" && eval "$2"' _ "$wt" "$CHECK" && succ=1
+        vf=0; (cd "$wt" && AGENTS_HOOKS=off .agents/bin/verify --tier=full --no-cache >"$out/runs/$tag.verify" 2>&1) && vf=1
+        local ev="$wt/.agents/cache/hook-events.log"
+        "$PY" - "$out/runs/$tag.out" >> "$out/results.csv" <<PYEOF
+import json, sys
+m = {}
+try:
+    for line in reversed(open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                m = json.loads(line); break
+            except ValueError:
+                pass
+except OSError:
+    pass
+u = m.get("usage") or {}
+row = ["$id", "$arm", "$r", "$succ", "$vf", "$rc", m.get("num_turns", ""),
+       u.get("input_tokens", ""), u.get("cache_read_input_tokens", ""), u.get("cache_creation_input_tokens", ""),
+       u.get("output_tokens", ""), m.get("total_cost_usd", ""), $((end - start)),
+       "$(hook_count "$ev" post-edit '^[12]$')", "$(hook_count "$ev" stop-gate '^[12]$')",
+       "$(hook_count "$ev" pre-tool '^deny$')", "$guardn"]
+print(",".join(str(x) for x in row))
+PYEOF
+        [ "$keep" -eq 1 ] || git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+        r=$((r + 1))
+      done
+    done
+  done
+  git worktree prune 2>/dev/null
+  echo "eval: results in ${out#"$ROOT"/}/results.csv"
+  cmd_report "$out"
+}
+
+cmd_report() {
+  local dir="${1:-}"
+  if [ -z "$dir" ]; then dir="$(ls -d "$RESULTS_DIR"/*/ 2>/dev/null | sort | tail -1)"; fi
+  [ -n "$dir" ] && [ -f "$dir/results.csv" ] || die "no results found"
+  "$PY" - "$dir/results.csv" <<'PYEOF'
+import csv, statistics, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+def num(v):
+    try: return float(v)
+    except (TypeError, ValueError): return None
+def med(xs):
+    xs = [x for x in xs if x is not None]
+    return statistics.median(xs) if xs else None
+arms = {}
+for r in rows:
+    arms.setdefault(r["arm"], []).append(r)
+print("%-4s %4s %8s %8s %16s %7s %7s %6s %6s %6s" % ("arm", "runs", "success", "verify", "tokens/success", "turns", "wall_s", "edit", "stop", "guard"))
+summary = {}
+for arm in sorted(arms):
+    rs = arms[arm]
+    n = len(rs); ok = sum(int(r["success"]) for r in rs); vf = sum(int(r["verify_full"]) for r in rs)
+    toks = [sum(num(r[k]) or 0 for k in ("input_tokens", "cache_read", "cache_write", "output_tokens")) for r in rs]
+    tps = (sum(toks) / ok) if ok and any(toks) else None
+    wall = med([num(r["wall_s"]) for r in rs])
+    summary[arm] = (ok / n if n else 0, tps, wall)
+    print("%-4s %4d %7.0f%% %7.0f%% %16s %7s %7s %6d %6d %6d" % (
+        arm, n, 100.0 * ok / n, 100.0 * vf / n, "%.0f" % tps if tps else "-",
+        "%.0f" % med([num(r["turns"]) for r in rs]) if med([num(r["turns"]) for r in rs]) else "-",
+        "%.0f" % wall if wall is not None else "-",
+        sum(int(r["edit_blocks"]) for r in rs), sum(int(r["stop_blocks"]) for r in rs), sum(int(r["guard_blocks"]) for r in rs)))
+if "A" in summary and "C" in summary:
+    (sa, ta, wa), (sc, tc, wc) = summary["A"], summary["C"]
+    ok = sc >= sa and (not ta or not tc or tc <= 1.1 * ta) and (not wa or not wc or wc <= 1.25 * wa)
+    print("\ndecision (C vs A): %s" % ("adopt" if ok else "don't adopt as-is"))
+    print("  rule: success C >= A, tokens/success C <= 1.1x A, median wall C <= 1.25x A")
+if "B" in summary and "C" in summary and abs(summary["B"][0] - summary["C"][0]) < 1e-9:
+    print("  note: B and C succeed equally often; hooks may not be earning their cost here")
+PYEOF
+}
+
+case "${1:-}" in
+  new) shift; cmd_new "$@" ;;
+  run) shift; cmd_run "$@" ;;
+  report) shift; cmd_report "$@" ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

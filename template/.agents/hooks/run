@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# ai-harness hook shim. Harness-owned: replaced on upgrade.
+#   .agents/hooks/run <pre-tool|post-edit|turn-start|stop-gate> --tool=<claude|copilot|cursor>
+# Finds python3 and hands off to hook.py. Without python3 it steps aside (exit 0, with a
+# permissive answer where the tool requires one) so the agent is never wedged.
+d="$(cd "$(dirname "$0")" && pwd)"
+py="$(command -v python3 || command -v python || true)"
+if [ -z "$py" ]; then
+  echo "ai-harness: python3 not found; hooks are inactive" >&2
+  case "$1 $*" in
+    pre-tool*--tool=cursor*|turn-start*--tool=cursor*) echo '{"continue":true,"permission":"allow"}' ;;
+    stop-gate*--tool=cursor*) echo '{}' ;;
+  esac
+  exit 0
+fi
+exec "$py" "$d/hook.py" "$@"

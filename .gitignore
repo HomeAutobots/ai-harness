@@ -1,0 +1,13 @@
+dist/
+__pycache__/
+*.pyc
+.claude/settings.local.json
+
+# Local AI dev tooling for working on this repo. Anchored to the root so the
+# product files under template/, stacks/, and workflows/ stay tracked.
+/.claude/
+/CLAUDE.md
+/CLAUDE.local.md
+/.mcp.json
+/docs/
+/CHANGELOG.md

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# ai-harness: check. Harness-owned. Fast per-file checks on the files you just edited.
+#   .agents/bin/check <files...>      same as: verify --tier=edit <files...>
+# The post-edit hook runs this automatically in tools that support hooks.
+exec "$(dirname "$0")/verify" --tier=edit "$@"

@@ -1,0 +1,41 @@
+# CI for the ai-harness source repo: lint, then the smoke suite under every awk available.
+# The macOS job runs with Apple's /bin/bash 3.2 first on PATH, so bash 3.2 compatibility is tested
+# for real rather than assumed.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck gawk mawk original-awk cmake ninja-build \
+            clang-tidy clang-format cppcheck ccache
+
+      - name: Tools (macOS), with stock bash 3.2 first on PATH
+        if: runner.os == 'macOS'
+        run: |
+          brew install shellcheck cmake ninja
+          mkdir -p "$RUNNER_TEMP/stockbash"
+          ln -s /bin/bash "$RUNNER_TEMP/stockbash/bash"
+          echo "$RUNNER_TEMP/stockbash" >> "$GITHUB_PATH"
+
+      - name: Show versions
+        run: bash --version | head -1; awk --version 2>&1 | head -1 || true; python3 --version
+
+      - name: Lint
+        run: bash tests/lint.sh
+
+      - name: Smoke suite (default awk, then gawk, mawk, one-true-awk where present)
+        run: bash tests/all.sh

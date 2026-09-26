@@ -1,0 +1,877 @@
+#!/usr/bin/env bash
+# ai-harness: gitflow. Harness-owned: replaced on upgrade.
+# This repo's git workflow, driven entirely by config. Settings layer, last wins:
+#   harness defaults < ~/.config/ai-harness/git.conf (personal) < .agents/git.conf (project)
+# Humans and agents both use it. Which steps an agent may take itself is GIT_AGENT_MAY; the
+# policy hook enforces that, and the git hooks enforce the rest for everyone.
+#
+#   gitflow config                                   effective settings and where they came from
+#   gitflow status                                   branch, ticket, base, and the next step
+#   gitflow start [<ticket>] <summary...> [--type=<t>]  branch from the base with the right name
+#   gitflow commit <summary...> [--type=<t>] [--section <Label>=<text>]... [--body=<text>] [-a]
+#                                                    commit staged changes, formatted
+#   gitflow template                                 the commit template in effect and what it asks for
+#   gitflow update                                   catch up with the base (GIT_UPDATE: merge|rebase)
+#   gitflow check                                    ready to push? branch, commit messages, verify
+#   gitflow push [--lease]                           check, then push the branch
+#   gitflow pr [--title=<t>] [--draft]               open the PR/MR against the base, or print it
+#   gitflow review                                   review comments on this branch's PR/MR
+#   gitflow merge                                    merge the PR/MR (GIT_MERGE_METHOD)
+#   gitflow install-hooks [--quiet]                  commit-msg and pre-push git hooks (when needed)
+# Internal: check-branch <name>, check-msg <file>, check-cmd <command>, hook-commit-msg <file>,
+#           hook-prepare-commit-msg <file> [source], hook-pre-push.
+# Exit: 0 ok, 1 problem, 2 blocked by the workflow (check-cmd).
+set -uo pipefail
+set -f   # patterns in config (release/*) are matched, never expanded against files
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT" || exit 3
+TAB="$(printf '\t')"
+die() { echo "gitflow: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------- config
+
+GIT_BASE=""                     # empty: the remote's default branch, else main, else master
+GIT_PROTECTED=""                # branches (globs) never committed or pushed to directly, e.g. "main",
+                                # "dev/main release/*", or "{base}" for whatever the base is. Empty: none
+GIT_TICKET=""                   # ticket ID regex, e.g. [A-Z][A-Z0-9]+-[0-9]+ ; empty: no tickets
+GIT_TICKET_URL=""               # e.g. https://jira.example.com/browse/{ticket}
+GIT_BRANCH=""                   # branch name template; empty: any name that isn't protected
+GIT_BRANCH_TYPES="feature bugfix hotfix chore"
+GIT_COMMIT=""                   # commit subject template; empty: any subject
+GIT_COMMIT_TYPES="feat fix refactor perf test docs build ci chore"
+GIT_COMMIT_PATTERN=""           # extra regex the subject must match (rules a template can't say)
+GIT_COMMIT_TRAILERS=""          # "Key: template" entries separated by |
+GIT_COMMIT_TEMPLATE=""          # whole-message template file; empty: the repo's local git commit.template,
+                                # if it has one. When a template is in effect it is the single source for
+                                # the message, and GIT_COMMIT and GIT_COMMIT_TRAILERS are not used
+GIT_REMOTE="origin"
+GIT_UPDATE="merge"              # merge | rebase
+GIT_FORCE="lease-own"           # lease-own: --force-with-lease on your own branch only | never
+GIT_PR_TOOL="none"              # gh | glab | none (print the PR text for the human)
+GIT_PR_TITLE=""                 # template; empty: the branch's first commit subject
+GIT_PR_TEMPLATE=".agents/git/pr.md"
+GIT_PR_DRAFT="0"
+GIT_MERGE_METHOD="squash"       # squash | rebase | merge
+GIT_AGENT_MAY="branch commit"   # steps agents may take: branch commit push pr merge
+GIT_PUSH_REQUIRES="full"        # verify tier that must pass before gitflow push: edit|turn|full|off
+GIT_LOCAL_HOOKS="auto"          # commit-msg and pre-push git hooks: auto (only when something here needs
+                                # enforcing), on, or off
+
+USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ai-harness/git.conf"
+PROJECT_CONF="$ROOT/.agents/git.conf"
+SOURCES="defaults"
+
+load_conf() {  # KEY="value" lines only; the file is parsed, never executed
+  [ -f "$1" ] || return 0
+  local k v
+  while IFS="$TAB" read -r k v; do
+    case "$k" in GIT_[A-Z_]*) printf -v "$k" '%s' "$v" ;; esac
+  done < <(awk '
+    /^[[:space:]]*GIT_[A-Z_]+=/ {
+      line = $0; sub(/^[[:space:]]*/, "", line)
+      k = line; sub(/=.*/, "", k); v = substr(line, length(k) + 2)
+      if (v ~ /^"/) { v = substr(v, 2); sub(/"[[:space:]]*(#.*)?$/, "", v) }
+      else if (v ~ /^\047/) { v = substr(v, 2); sub(/\047[[:space:]]*(#.*)?$/, "", v) }
+      else { sub(/[[:space:]]+#.*$/, "", v); sub(/[[:space:]]+$/, "", v) }
+      printf "%s\t%s\n", k, v
+    }' "$1")
+  SOURCES="$SOURCES, $1"
+}
+load_conf "$USER_CONF"
+load_conf "$PROJECT_CONF"
+
+if [ -z "$GIT_BASE" ]; then
+  GIT_BASE="$(git symbolic-ref -q --short "refs/remotes/$GIT_REMOTE/HEAD" 2>/dev/null)"
+  GIT_BASE="${GIT_BASE#"$GIT_REMOTE"/}"
+  if [ -z "$GIT_BASE" ]; then
+    if git show-ref -q --verify refs/heads/main; then GIT_BASE=main
+    elif git show-ref -q --verify refs/heads/master; then GIT_BASE=master
+    else GIT_BASE=main; fi
+  fi
+fi
+
+# ---------------------------------------------------------------- helpers
+
+may() { case " $GIT_AGENT_MAY " in *" $1 "*) return 0 ;; esac; return 1; }
+current_branch() { git symbolic-ref -q --short HEAD 2>/dev/null; }
+ticket_re() { printf '%s' "${GIT_TICKET:-[A-Z][A-Z0-9]+-[0-9]+}"; }
+branch_ticket() { printf '%s' "${1:-}" | grep -oE -- "$(ticket_re)" | head -1; }
+types_re() { printf '(%s)' "$(printf '%s' "$1" | tr -s ' ' '|')"; }
+matches() { printf '%s\n' "$1" | grep -Eq -- "$2"; }
+first_word() { set -- $1; printf '%s' "${1:-}"; }
+zeros() { case "$1" in *[!0]*) return 1 ;; esac; return 0; }
+
+protected() {  # nothing is protected unless configured; "{base}" means the base branch
+  local p
+  for p in $GIT_PROTECTED; do
+    [ "$p" = "{base}" ] && p="$GIT_BASE"
+    # shellcheck disable=SC2254
+    case "$1" in $p) return 0 ;; esac
+  done
+  return 1
+}
+
+hooks_needed() {  # is there anything for the local git hooks to enforce?
+  [ -n "$GIT_PROTECTED$GIT_BRANCH$GIT_COMMIT$GIT_COMMIT_PATTERN$GIT_COMMIT_TRAILERS$(commit_template)" ] || [ "$GIT_FORCE" = never ]
+}
+
+# ---------------------------------------------------------------- commit template
+# A template is a plain commit message with placeholders:
+#   first line          subject template, e.g. {ticket}: {summary}
+#   # lines             guidance (stripped); "(optional)" in one marks the next section optional
+#   Label: {x}          a section; required unless marked optional. Placeholders the harness knows
+#                       ({ticket} {type} {summary} {author} {branch} {user}) fill themselves; any
+#                       other value is written by the author (agents: --section Label=text)
+#   anything else       kept as written
+
+commit_template() {  # path of the template in effect, or nothing
+  local t="$GIT_COMMIT_TEMPLATE"
+  [ -n "$t" ] || t="$(git config --local commit.template 2>/dev/null)"
+  [ -n "$t" ] || return 0
+  # shellcheck disable=SC2088  # matching a literal ~/ in the setting, then expanding it by hand
+  case "$t" in "~/"*) t="$HOME/${t#"~/"}" ;; /*) ;; *) t="$ROOT/$t" ;; esac
+  [ -f "$t" ] && printf '%s' "$t"
+  return 0
+}
+
+template_model() {  # kind<TAB>optional<TAB>label<TAB>value per template line ("-" = no label)
+  awk '
+    { sub(/\r$/, "") }
+    /^#/ { if ($0 ~ /\(optional\)/) opt = 1; printf "guide\t0\t-\t%s\n", $0; next }
+    !subj { if ($0 ~ /^[ \t]*$/) next; subj = 1; printf "subject\t0\t-\t%s\n", $0; next }
+    /^[ \t]*$/ { print "blank\t0\t-\t"; next }
+    /^[A-Za-z][A-Za-z0-9 _-]*:([ \t]|$)/ {
+      i = index($0, ":"); label = substr($0, 1, i - 1); v = substr($0, i + 1); sub(/^[ \t]+/, "", v)
+      printf "field\t%d\t%s\t%s\n", opt, label, v; opt = 0; next
+    }
+    { printf "text\t0\t-\t%s\n", $0; opt = 0 }' "$1"
+}
+
+# render_template <agent|human> <template> <out>: env TICKET TYPE SUMMARY AUTHOR BRANCH USERNAME SECTIONS
+# SECTIONS holds Label=text entries separated by \036. Prints unmet requirements; exit 1 if any.
+render_template() {
+  template_model "$2" | MODE="$1" OUT="$3" awk -F '\t' '
+    function fillv(t, mode,   out, i, j, name, v, ok) {
+      out = ""; ok = 1
+      while ((i = index(t, "{")) > 0) {
+        j = index(substr(t, i), "}"); if (j < 3) break
+        name = substr(t, i + 1, j - 2)
+        if (name in auto) v = auto[name]; else if (tolower(name) in sec) v = sec[tolower(name)]; else v = ""
+        if (v == "") { ok = 0; v = (mode == "human" && (name in auto) && name != "summary") ? "{" name "}" : "" }
+        out = out substr(t, 1, i - 1) v; t = substr(t, i + j)
+      }
+      FILLOK = ok
+      return out t
+    }
+    BEGIN {
+      mode = ENVIRON["MODE"]; outf = ENVIRON["OUT"]
+      auto["ticket"] = ENVIRON["TICKET"]; auto["type"] = ENVIRON["TYPE"]; auto["summary"] = ENVIRON["SUMMARY"]
+      auto["author"] = ENVIRON["AUTHOR"]; auto["branch"] = ENVIRON["BRANCH"]; auto["user"] = ENVIRON["USERNAME"]
+      n = split(ENVIRON["SECTIONS"], ents, "\036")
+      for (k = 1; k <= n; k++) { e = ents[k]; if ((p = index(e, "=")) > 0) sec[tolower(substr(e, 1, p - 1))] = substr(e, p + 1) }
+      nout = 0
+    }
+    $1 == "subject" {
+      v = fillv($4, mode)
+      if (mode == "agent" && !FILLOK) { print "the subject template (" $4 ") needs a value it could not fill: pass the summary, and --type if it has {type}"; bad = 1 }
+      line[++nout] = v; next
+    }
+    $1 == "guide" { if (mode == "human") line[++nout] = $4; next }
+    $1 == "blank" { line[++nout] = ""; next }
+    $1 == "text" { line[++nout] = fillv($4, mode); next }
+    $1 == "field" {
+      lab = $3
+      if (tolower(lab) in sec) { v = sec[tolower(lab)]; FILLOK = (v != "") }
+      else v = fillv($4, mode)
+      if (!FILLOK || v ~ /^[ \t]*$/) {
+        if (mode == "human") { line[++nout] = lab ": " v; next }
+        if ($2 == 1) next
+        print "missing section \"" lab "\": add --section \"" lab "=<text>\""; bad = 1; next
+      }
+      line[++nout] = lab ": " v; next
+    }
+    END {
+      blank = 0; last = 0
+      for (i = 1; i <= nout; i++) if (line[i] !~ /^[ \t]*$/) last = i
+      for (i = 1; i <= last; i++) {
+        if (line[i] ~ /^[ \t]*$/) { if (blank) continue; blank = 1 } else blank = 0
+        print line[i] > outf
+      }
+      exit bad
+    }'
+}
+
+check_msg_template() {  # check_msg_template <message file> <branch> <template>
+  local f="$1" b="$2" t="$3" tk subj msg kind opt label val got bad=0
+  tk="$(branch_ticket "$b")"
+  msg="$(grep -v '^#' "$f")"
+  subj="$(printf '%s\n' "$msg" | sed -n '/[^[:space:]]/{p;q;}')"
+  while IFS="$TAB" read -r kind opt label val; do
+    case "$kind" in
+      subject)
+        matches "$subj" "$(tpl_regex "$val" "${tk:-$(ticket_re)}" commit)" \
+          || { echo "subject doesn't match the commit template ($val)${tk:+ for ticket $tk}: $subj"; bad=1; } ;;
+      field)
+        got="$(printf '%s\n' "$msg" | awk -v l="$label" 'index($0, l ":") == 1 { v = substr($0, length(l) + 2); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v); print v; exit }')"
+        if ! printf '%s\n' "$msg" | grep -q "^$label:"; then
+          [ "$opt" = 1 ] || { echo "missing section \"$label:\" (commit template)"; bad=1; }
+        elif [ -z "$got" ]; then
+          [ "$opt" = 1 ] || { echo "section \"$label:\" is empty (commit template)"; bad=1; }
+        elif ! matches "$got" "$(tpl_regex "$val" "${tk:-$(ticket_re)}" commit)"; then
+          echo "section \"$label:\" doesn't match the commit template ($label: $val): $got"; bad=1
+        fi ;;
+    esac
+  done < <(template_model "$t")
+  return $bad
+}
+
+linked_plan() {  # plan.md whose "Branch:" line names this branch (tasks link), if any
+  find .agents/plans -name plan.md 2>/dev/null | while IFS= read -r f; do
+    awk -v b="$1" '/^Branch:/ { v = $0; sub(/^Branch:[ \t]*/, "", v); sub(/[ \t]+$/, "", v); if (v == b) found = 1 } END { exit found ? 0 : 1 }' "$f" \
+      && { echo "$f"; break; }
+  done
+}
+
+# tpl_regex <template> <ticket regex> <branch|commit>: a template as an anchored regex
+tpl_regex() {
+  T="$1" TK="$2" KIND="$3" BT="$(types_re "$GIT_BRANCH_TYPES")" CT="$(types_re "$GIT_COMMIT_TYPES")" awk 'BEGIN {
+    t = ENVIRON["T"]; tk = ENVIRON["TK"]; kind = ENVIRON["KIND"]; bt = ENVIRON["BT"]; ct = ENVIRON["CT"]
+    out = ""; n = length(t); i = 1
+    while (i <= n) {
+      c = substr(t, i, 1)
+      if (c == "{") {
+        j = index(substr(t, i), "}")
+        if (j > 2) {
+          name = substr(t, i + 1, j - 2)
+          if (name == "ticket") r = "(" tk ")"
+          else if (name == "slug") r = "[a-z0-9]+(-[a-z0-9]+)*"
+          else if (name == "type") r = (kind == "branch" ? bt : ct)
+          else if (name == "user") r = "[A-Za-z0-9._-]+"
+          else r = ".+"
+          out = out r; i += j; continue
+        }
+      }
+      if (index(".^$*+?()[]{}|\\", c) > 0) out = out "\\" c; else out = out c
+      i++
+    }
+    print "^" out "$"
+  }'
+}
+
+# fill <template>: placeholders from TICKET, SLUG, TYPE, SUMMARY, AUTHOR, USERNAME in the environment
+fill() {
+  TPL="$1" awk 'BEGIN {
+    t = ENVIRON["TPL"]; out = ""
+    split("ticket slug type summary author user", names, " ")
+    split("TICKET SLUG TYPE SUMMARY AUTHOR USERNAME", vars, " ")
+    while ((i = index(t, "{")) > 0) {
+      j = index(substr(t, i), "}"); if (j == 0) break
+      name = substr(t, i + 1, j - 2); v = "{" name "}"
+      for (k = 1; k <= 6; k++) if (names[k] == name) v = ENVIRON[vars[k]]
+      out = out substr(t, 1, i - 1) v; t = substr(t, i + j)
+    }
+    print out t
+  }'
+}
+
+slugify() { printf '%s' "$*" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//' | cut -c1-40 | sed 's/-$//'; }
+
+example_branch() {
+  TICKET="ABC-123" SLUG="short-summary" TYPE="$(first_word "$GIT_BRANCH_TYPES")" fill "$GIT_BRANCH"
+}
+
+check_branch() {  # prints why a branch name is not allowed
+  local b="$1"
+  if protected "$b"; then
+    echo "$b is protected (GIT_PROTECTED); work on a branch: .agents/bin/gitflow start <ticket> <summary>"
+    return 1
+  fi
+  if [ -n "$GIT_BRANCH" ] && ! matches "$b" "$(tpl_regex "$GIT_BRANCH" "$(ticket_re)" branch)"; then
+    echo "branch '$b' doesn't match GIT_BRANCH ($GIT_BRANCH), e.g. $(example_branch); create it with .agents/bin/gitflow start"
+    return 1
+  fi
+  return 0
+}
+
+check_msg() {  # check_msg <message file> <branch>: prints what's wrong with a commit message
+  local f="$1" b="${2:-}" subj tk bad=0 t key tmpl
+  subj="$(grep -v '^#' "$f" | sed -n '/[^[:space:]]/{p;q;}')"
+  case "$subj" in "Merge "*|"fixup! "*|"squash! "*|"amend! "*|"Revert \""*) return 0 ;; esac
+  if [ -z "$subj" ]; then echo "empty commit message"; return 1; fi
+  tmpl="$(commit_template)"
+  if [ -n "$tmpl" ]; then
+    check_msg_template "$f" "$b" "$tmpl" || bad=1
+    if [ -n "$GIT_COMMIT_PATTERN" ] && ! matches "$subj" "$GIT_COMMIT_PATTERN"; then
+      echo "commit subject doesn't match GIT_COMMIT_PATTERN ($GIT_COMMIT_PATTERN): $subj"; bad=1
+    fi
+    return $bad
+  fi
+  tk="$(branch_ticket "$b")"
+  if [ -n "$GIT_COMMIT" ] && ! matches "$subj" "$(tpl_regex "$GIT_COMMIT" "${tk:-$(ticket_re)}" commit)"; then
+    echo "commit subject doesn't match GIT_COMMIT ($GIT_COMMIT)${tk:+ for ticket $tk}: $subj"
+    bad=1
+  fi
+  if [ -n "$GIT_COMMIT_PATTERN" ] && ! matches "$subj" "$GIT_COMMIT_PATTERN"; then
+    echo "commit subject doesn't match GIT_COMMIT_PATTERN ($GIT_COMMIT_PATTERN): $subj"
+    bad=1
+  fi
+  if [ -n "$GIT_COMMIT_TRAILERS" ]; then
+    while IFS= read -r t; do
+      key="${t%%:*}"
+      [ -n "$key" ] || continue
+      grep -q "^$key: " "$f" || { echo "commit is missing the '$key:' trailer (GIT_COMMIT_TRAILERS)"; bad=1; }
+    done < <(printf '%s\n' "$GIT_COMMIT_TRAILERS" | tr '|' '\n')
+  fi
+  return $bad
+}
+
+target_ref() {  # where the base lives: remote-tracking if present, else local
+  if git rev-parse -q --verify "refs/remotes/$GIT_REMOTE/$GIT_BASE" >/dev/null; then echo "$GIT_REMOTE/$GIT_BASE"
+  elif git rev-parse -q --verify "refs/heads/$GIT_BASE" >/dev/null; then echo "$GIT_BASE"
+  fi
+}
+
+branch_commits() {  # commits on this branch beyond the base, oldest first
+  local t mb
+  t="$(target_ref)"
+  if [ -n "$t" ] && mb="$(git merge-base "$t" HEAD 2>/dev/null)"; then
+    git rev-list --reverse "$mb..HEAD"
+  else
+    git rev-list --reverse HEAD
+  fi
+}
+
+check_commits() {  # check_commits <branch> <rev-list args...>
+  local b="$1" c bad=0 tmp out
+  shift
+  tmp="$(mktemp)"
+  for c in $(git rev-list --reverse "$@" 2>/dev/null); do
+    git log -1 --format=%B "$c" > "$tmp"
+    out="$(check_msg "$tmp" "$b")" || { printf '%s\n' "$out" | sed "s/^/commit $(git rev-parse --short "$c"): /"; bad=1; }
+  done
+  rm -f "$tmp"
+  return $bad
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_config() {
+  local v
+  for v in GIT_BASE GIT_PROTECTED GIT_TICKET GIT_TICKET_URL GIT_BRANCH GIT_BRANCH_TYPES GIT_COMMIT \
+           GIT_COMMIT_TYPES GIT_COMMIT_PATTERN GIT_COMMIT_TRAILERS GIT_COMMIT_TEMPLATE GIT_REMOTE GIT_UPDATE GIT_FORCE \
+           GIT_PR_TOOL GIT_PR_TITLE GIT_PR_TEMPLATE GIT_PR_DRAFT GIT_MERGE_METHOD GIT_AGENT_MAY \
+           GIT_PUSH_REQUIRES GIT_LOCAL_HOOKS; do
+    printf '%-20s %s\n' "$v" "${!v}"
+  done
+  echo "sources: $SOURCES"
+  local ct; ct="$(commit_template)"; [ -n "$ct" ] && echo "commit template in effect: ${ct#"$ROOT"/}"
+  [ -n "$GIT_BRANCH" ] && echo "example branch: $(example_branch)"
+  return 0
+}
+
+cmd_start() {
+  local type="" ticket="" summary name start
+  while [ $# -gt 0 ]; do
+    case "$1" in --type=*) type="${1#--type=}"; shift ;; *) break ;; esac
+  done
+  case "$GIT_BRANCH" in *"{ticket}"*)
+    ticket="${1:-}"; [ $# -gt 0 ] && shift
+    matches "$ticket" "^($(ticket_re))$" || die "'$ticket' isn't a ticket ID (GIT_TICKET: $(ticket_re)). Usage: gitflow start <ticket> <summary>" ;;
+  esac
+  summary="$*"
+  [ -n "$summary" ] || die "usage: gitflow start ${ticket:+$ticket }<summary...> [--type=<t>]"
+  type="${type:-$(first_word "$GIT_BRANCH_TYPES")}"
+  case " $GIT_BRANCH_TYPES " in *" $type "*) ;; *) die "type '$type' isn't one of: $GIT_BRANCH_TYPES" ;; esac
+  if [ -n "$GIT_BRANCH" ]; then
+    name="$(TICKET="$ticket" SLUG="$(slugify "$summary")" TYPE="$type" SUMMARY="$summary" USERNAME="$(git config user.name | tr ' ' '.')" fill "$GIT_BRANCH")"
+  else
+    name="$(slugify "$summary")"
+  fi
+  check_branch "$name" >&2 || exit 1
+  git show-ref -q --verify "refs/heads/$name" && die "branch $name exists; switch to it with: git checkout $name"
+  git fetch -q "$GIT_REMOTE" "$GIT_BASE" 2>/dev/null || true
+  start="$(target_ref)"
+  if [ -n "$start" ]; then git checkout -q -b "$name" "$start" || exit 1
+  else git checkout -q -b "$name" || exit 1; fi
+  echo "on $name (from ${start:-HEAD})"
+}
+
+cmd_commit() {
+  local type="" body="" all=0 b tk subj msg t tmpl sections="" RS
+  RS="$(printf '\036')"
+  local words=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --type=*) type="${1#--type=}"; shift ;;
+      --body=*) body="${1#--body=}"; shift ;;
+      --section) [ $# -ge 2 ] || die "--section needs Label=text"; sections="$sections$2$RS"; shift 2 ;;
+      --section=*) sections="$sections${1#--section=}$RS"; shift ;;
+      -a|--all) all=1; shift ;;
+      --) shift; words="$words${words:+ }$*"; break ;;
+      *) words="$words${words:+ }$1"; shift ;;
+    esac
+  done
+  set -f; set -- $words
+  [ $# -gt 0 ] || die "usage: gitflow commit <summary...> [--type=<t>] [--section <Label>=<text>]... [--body=<text>] [-a]"
+  b="$(current_branch)"; [ -n "$b" ] || die "not on a branch (detached HEAD)"
+  check_branch "$b" >&2 || exit 1
+  tk="$(branch_ticket "$b")"
+  tmpl="$(commit_template)"
+  if [ -n "$tmpl" ]; then
+    [ -z "$body" ] || die "this repo uses a commit template; fill its sections with --section (see: gitflow template)"
+    if [ -n "$type" ]; then
+      case " $GIT_COMMIT_TYPES " in *" $type "*) ;; *) die "type '$type' isn't one of: $GIT_COMMIT_TYPES" ;; esac
+    fi
+    msg="$(mktemp)"
+    local problems
+    problems="$(TICKET="$tk" TYPE="$type" SUMMARY="$*" BRANCH="$b" USERNAME="$(git config user.name | tr ' ' '.')" \
+      AUTHOR="$(git config user.name) <$(git config user.email)>" SECTIONS="$sections" render_template agent "$tmpl" "$msg")" || {
+      rm -f "$msg"
+      echo "gitflow: the commit template ($(basename "$tmpl")) needs more:" >&2
+      printf '%s\n' "$problems" | sed 's/^/  /' >&2
+      exit 1
+    }
+    [ "$all" -eq 1 ] && git add -u
+    if git diff --cached --quiet; then rm -f "$msg"; die "nothing staged; git add the files first (or -a for all tracked changes)"; fi
+    git commit -q -F "$msg" || { rm -f "$msg"; exit 1; }
+    rm -f "$msg"
+    git log -1 --format='%h %s'
+    return 0
+  fi
+  case "$GIT_COMMIT" in *"{ticket}"*) [ -n "$tk" ] || die "the commit format needs a ticket, and branch '$b' has none" ;; esac
+  case "$GIT_COMMIT" in *"{type}"*)
+    [ -n "$type" ] || die "the commit format needs --type=<one of: $GIT_COMMIT_TYPES>"
+    case " $GIT_COMMIT_TYPES " in *" $type "*) ;; *) die "type '$type' isn't one of: $GIT_COMMIT_TYPES" ;; esac ;;
+  esac
+  export TICKET="$tk" TYPE="$type" SUMMARY="$*" AUTHOR
+  AUTHOR="$(git config user.name) <$(git config user.email)>"
+  subj="$*"
+  [ -n "$GIT_COMMIT" ] && subj="$(fill "$GIT_COMMIT")"
+  msg="$(mktemp)"
+  printf '%s\n' "$subj" > "$msg"
+  [ -n "$body" ] && printf '\n%s\n' "$body" >> "$msg"
+  if [ -n "$GIT_COMMIT_TRAILERS" ]; then
+    echo >> "$msg"
+    printf '%s\n' "$GIT_COMMIT_TRAILERS" | tr '|' '\n' | while IFS= read -r t; do [ -n "$t" ] && fill "$t"; done >> "$msg"
+  fi
+  [ "$all" -eq 1 ] && git add -u
+  if git diff --cached --quiet; then rm -f "$msg"; die "nothing staged; git add the files first (or -a for all tracked changes)"; fi
+  git commit -q -F "$msg" || { rm -f "$msg"; exit 1; }
+  rm -f "$msg"
+  git log -1 --format='%h %s'
+}
+
+cmd_update() {
+  local b t
+  b="$(current_branch)"; [ -n "$b" ] || die "not on a branch"
+  protected "$b" && die "$b is protected; update your own branch instead"
+  git fetch -q "$GIT_REMOTE" "$GIT_BASE" 2>/dev/null || true
+  t="$(target_ref)"; [ -n "$t" ] || die "can't find base $GIT_BASE"
+  case "$GIT_UPDATE" in
+    rebase) git rebase "$t" || die "rebase stopped; resolve, then git rebase --continue (or --abort)" ;;
+    *) git merge --no-edit "$t" || die "merge stopped; resolve the conflicts, then commit" ;;
+  esac
+  echo "$b is up to date with $t ($GIT_UPDATE)"
+}
+
+cmd_check() {
+  local b rc=0 out
+  b="$(current_branch)"; [ -n "$b" ] || die "not on a branch"
+  out="$(check_branch "$b")" || { echo "$out"; rc=1; }
+  local list
+  list="$(branch_commits)"
+  if [ -z "$list" ]; then echo "no commits on $b beyond $GIT_BASE"; rc=1
+  else
+    # shellcheck disable=SC2086
+    check_commits "$b" --no-walk $list || rc=1
+  fi
+  if [ "$GIT_PUSH_REQUIRES" != off ] && [ -x "$ROOT/.agents/bin/verify" ]; then
+    local vrc=0
+    out="$("$ROOT/.agents/bin/verify" --tier="$GIT_PUSH_REQUIRES" 2>&1)" || vrc=$?
+    case "$vrc" in
+      0) ;;
+      1|2) echo "$out"; rc=1 ;;
+      *) echo "note: verify --tier=$GIT_PUSH_REQUIRES couldn't run (exit $vrc), so this push isn't verified: $(printf '%s\n' "$out" | tail -1)" ;;
+    esac
+  fi
+  if [ "$rc" -eq 0 ]; then echo "ok gitflow check: $b is ready to push"; else echo "FAIL gitflow check"; fi
+  return $rc
+}
+
+cmd_push() {
+  local lease=0 b
+  [ "${1:-}" = --lease ] && lease=1
+  cmd_check || exit 1
+  b="$(current_branch)"
+  if [ "$lease" -eq 1 ]; then
+    [ "$GIT_FORCE" = lease-own ] || die "force pushes are off in this repo (GIT_FORCE=$GIT_FORCE)"
+    git push --force-with-lease -u "$GIT_REMOTE" "HEAD:refs/heads/$b"
+  else
+    git push -u "$GIT_REMOTE" "HEAD:refs/heads/$b"
+  fi
+}
+
+replace_all() {  # replace_all <text>: {placeholders} from the environment (multi-line safe).
+  # A line holding nothing but a placeholder with no value disappears, so optional data
+  # (no ticket, no linked plan) leaves no gaps.
+  TXT="$1" awk 'BEGIN {
+    nl = split(ENVIRON["TXT"], lines, "\n")
+    n = split("ticket ticket_url branch base summary commits verify plan", names, " ")
+    split("TICKET TICKET_URL BRANCH BASE SUMMARY COMMITS VERIFY PLAN", vars, " ")
+    blank = 1
+    for (L = 1; L <= nl; L++) {
+      t = lines[L]; trim = t; gsub(/^[ \t]+|[ \t]+$/, "", trim)
+      drop = 0
+      for (k = 1; k <= n; k++) if (trim == "{" names[k] "}" && ENVIRON[vars[k]] == "") drop = 1
+      if (drop) continue
+      for (k = 1; k <= n; k++) {
+        key = "{" names[k] "}"; out = ""
+        while ((i = index(t, key)) > 0) { out = out substr(t, 1, i - 1) ENVIRON[vars[k]]; t = substr(t, i + length(key)) }
+        t = out t
+      }
+      if (t ~ /^[ \t]*$/) { if (blank) continue; blank = 1 } else blank = 0
+      print t
+    }
+  }'
+}
+
+cmd_pr() {
+  local title="" draft="$GIT_PR_DRAFT" b list tpl body_file title_file v
+  while [ $# -gt 0 ]; do
+    case "$1" in --title=*) title="${1#--title=}"; shift ;; --draft) draft=1; shift ;; *) die "unknown option $1" ;; esac
+  done
+  b="$(current_branch)"; [ -n "$b" ] || die "not on a branch"
+  [ "$b" = "$GIT_BASE" ] && die "you're on the base branch ($GIT_BASE); a PR needs its own branch (gitflow start)"
+  check_branch "$b" >&2 || exit 1
+  list="$(branch_commits)"; [ -n "$list" ] || die "no commits on $b beyond $GIT_BASE"
+  export TICKET BRANCH="$b" BASE="$GIT_BASE" SUMMARY COMMITS VERIFY PLAN TICKET_URL
+  TICKET="$(branch_ticket "$b")"
+  TICKET_URL=""; [ -n "$GIT_TICKET_URL" ] && [ -n "$TICKET" ] && TICKET_URL="$(fill "$GIT_TICKET_URL")"
+  SUMMARY="$(git log -1 --format=%s "$(printf '%s\n' "$list" | head -1)")"
+  # shellcheck disable=SC2086
+  COMMITS="$(git log --no-walk --reverse --format='- %s' $list)"
+  VERIFY="not run"
+  if [ "$GIT_PUSH_REQUIRES" != off ]; then
+    v="$("$ROOT/.agents/bin/verify" --tier="$GIT_PUSH_REQUIRES" 2>&1)"; VERIFY="$(printf '%s\n' "$v" | head -1) (verify --tier=$GIT_PUSH_REQUIRES)"
+  fi
+  PLAN=""
+  v="$(linked_plan "$b")"
+  [ -n "$v" ] && PLAN="Plan: $(sed -n '1s/^# //p' "$v")"
+  [ -z "$title" ] && title="$SUMMARY" && [ -n "$GIT_PR_TITLE" ] && title="$(fill "$GIT_PR_TITLE")"
+  if [ -f "$GIT_PR_TEMPLATE" ]; then tpl="$(cat "$GIT_PR_TEMPLATE")"
+  else tpl="$(printf '## Summary\n{summary}\n\n{ticket_url}\n{plan}\n\n## Changes\n{commits}\n\n## Verification\n{verify}\n')"; fi
+  case "$tpl" in *"{"*"}"*) ;; *) tpl="$(printf '%s\n\n## Changes\n{commits}\n\n## Verification\n{verify}\n' "$tpl")" ;; esac
+  mkdir -p .agents/cache
+  body_file=".agents/cache/pr-body.md"; title_file=".agents/cache/pr-title.txt"
+  replace_all "$tpl" > "$body_file"
+  printf '%s\n' "$title" > "$title_file"
+  case "$GIT_PR_TOOL" in
+    gh|glab)
+      git ls-remote --exit-code --heads "$GIT_REMOTE" "$b" >/dev/null 2>&1 || die "push the branch first: gitflow push"
+      if [ "$GIT_PR_TOOL" = gh ]; then
+        # shellcheck disable=SC2046
+        gh pr create --base "$GIT_BASE" --head "$b" --title "$title" --body-file "$body_file" $( [ "$draft" = 1 ] && echo --draft )
+      else
+        # shellcheck disable=SC2046
+        glab mr create --target-branch "$GIT_BASE" --source-branch "$b" --title "$title" --description "$(cat "$body_file")" --yes $( [ "$draft" = 1 ] && echo --draft )
+      fi ;;
+    *)
+      echo "Not opened (GIT_PR_TOOL=none). Open it from $b into $GIT_BASE with:"
+      echo "title: $title"
+      echo "body ($body_file):"
+      cat "$body_file" ;;
+  esac
+}
+
+cmd_review() {
+  local n
+  case "$GIT_PR_TOOL" in
+    gh)
+      n="$(gh pr view --json number -q .number 2>/dev/null)" || die "no PR for this branch"
+      gh api "repos/{owner}/{repo}/pulls/$n/comments" \
+        --jq '.[] | "\(.path):\(.line // .original_line // 1): review: \(.user.login): \(.body | gsub("\n"; " "))"'
+      gh pr view "$n" --comments ;;
+    glab) glab mr view --comments ;;
+    *) echo "No PR tool configured (GIT_PR_TOOL=none). Ask the human to paste the review comments." ;;
+  esac
+}
+
+cmd_merge() {
+  case "$GIT_PR_TOOL" in
+    gh) gh pr merge --"$GIT_MERGE_METHOD" --delete-branch ;;
+    glab) if [ "$GIT_MERGE_METHOD" = squash ]; then glab mr merge --squash --yes; else glab mr merge --yes; fi ;;
+    *) die "no PR tool configured (GIT_PR_TOOL=none); merge in the web UI" ;;
+  esac
+}
+
+cmd_status() {
+  local b t ab tk
+  b="$(current_branch)"
+  echo "branch:   ${b:-detached HEAD}$( [ -n "$b" ] && protected "$b" && echo ' (protected)')"
+  tk="$(branch_ticket "$b")"; [ -n "$tk" ] && echo "ticket:   $tk"
+  t="$(target_ref)"
+  echo "base:     $GIT_BASE${t:+ ($t)}"
+  if [ -n "$t" ] && [ -n "$b" ]; then
+    ab="$(git rev-list --left-right --count "$t...HEAD" 2>/dev/null)"
+    [ -n "$ab" ] && echo "vs base:  $(echo "$ab" | awk '{ print $2 " ahead, " $1 " behind" }')"
+  fi
+  echo "agent may: $GIT_AGENT_MAY"
+  if [ -z "$b" ] || protected "$b"; then echo "next:     gitflow start <ticket> <summary>"
+  elif [ -n "$(git status --porcelain --untracked-files=no)" ]; then echo "next:     stage and gitflow commit <summary>"
+  elif ! git ls-remote --exit-code --heads "$GIT_REMOTE" "$b" >/dev/null 2>&1; then echo "next:     gitflow push"
+  else echo "next:     gitflow pr (or gitflow review if one is open)"; fi
+}
+
+cmd_install_hooks() {
+  local hp dir h f quiet=0 wrote=""
+  [ "${1:-}" = --quiet ] && quiet=1
+  case "$GIT_LOCAL_HOOKS" in
+    off) [ "$quiet" -eq 1 ] || echo "gitflow: git hooks off (GIT_LOCAL_HOOKS=off)"; return 0 ;;
+    on) ;;
+    *) hooks_needed || { [ "$quiet" -eq 1 ] || echo "gitflow: no git hooks needed (nothing in git.conf to enforce)"; return 0; } ;;
+  esac
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  hp="$(git config core.hooksPath)"
+  if [ -n "$hp" ]; then
+    [ "$quiet" -eq 1 ] && return 0
+    echo "gitflow: core.hooksPath is $hp (husky, pre-commit, or similar); left it alone. Add to its hooks:"
+    echo "  commit-msg: .agents/bin/gitflow hook-commit-msg \"\$1\""
+    echo "  pre-push:   .agents/bin/gitflow hook-pre-push \"\$@\""
+    return 0
+  fi
+  dir="$(git rev-parse --git-path hooks)"
+  mkdir -p "$dir"
+  local hooks="commit-msg pre-push"
+  [ -n "$(commit_template)" ] && hooks="$hooks prepare-commit-msg"
+  for h in $hooks; do
+    f="$dir/$h"
+    if [ -f "$f" ] && ! grep -q 'ai-harness gitflow' "$f"; then
+      [ "$quiet" -eq 1 ] || echo "gitflow: kept your existing $h hook; add this line to it: .agents/bin/gitflow hook-$h \"\$@\""
+      continue
+    fi
+    [ -f "$f" ] && continue
+    printf '#!/bin/sh\n# ai-harness gitflow hook (local only; delete to disable)\n[ -x .agents/bin/gitflow ] || exit 0\nexec .agents/bin/gitflow hook-%s "$@"\n' "$h" > "$f"
+    chmod +x "$f"
+    wrote="$wrote $h"
+  done
+  [ -n "$wrote" ] && echo "gitflow: installed git hooks:$wrote"
+  return 0
+}
+
+cmd_template() {
+  local t kind opt label val auto
+  t="$(commit_template)"
+  if [ -z "$t" ]; then
+    echo "no commit template in effect (set GIT_COMMIT_TEMPLATE, or git config commit.template in this repo)"
+    [ -n "$GIT_COMMIT" ] && echo "subject format: $GIT_COMMIT"
+    return 0
+  fi
+  echo "template: ${t#"$ROOT"/}"
+  local example="gitflow commit \"<summary>\""
+  while IFS="$TAB" read -r kind opt label val; do
+    case "$kind" in
+      subject) echo "subject:  $val"; case "$val" in *"{type}"*) example="$example --type=<$(printf '%s' "$GIT_COMMIT_TYPES" | tr ' ' '|')>" ;; esac ;;
+      field)
+        auto=0
+        case "$val" in *"{"*"}"*)
+          printf '%s' "$val" | grep -oE '\{[a-z_]+\}' | grep -qvE '^\{(ticket|type|summary|author|branch|user)\}$' || auto=1 ;;
+        *) auto=1 ;; esac
+        if [ "$auto" = 1 ]; then printf 'section:  %-14s filled automatically (%s)\n' "$label" "$val"
+        else
+          printf 'section:  %-14s %s, you write it\n' "$label" "$( [ "$opt" = 1 ] && echo optional || echo required)"
+          [ "$opt" = 1 ] || example="$example --section \"$label=<text>\""
+        fi ;;
+    esac
+  done < <(template_model "$t")
+  echo "example:  $example"
+}
+
+hook_prepare_commit_msg() {  # prefill the editor from the template for a plain `git commit`
+  local f="$1" src="${2:-}" t b tmp content
+  t="$(commit_template)"; [ -n "$t" ] || return 0
+  case "$src" in ""|template) ;; *) return 0 ;; esac
+  content="$(grep -v '^#' "$f" | tr -d '[:space:]')"
+  if [ "$src" = "" ] && [ -n "$content" ]; then return 0; fi
+  b="$(current_branch)"
+  tmp="$(mktemp)"
+  TICKET="$(branch_ticket "$b")" TYPE="" SUMMARY="" BRANCH="$b" USERNAME="$(git config user.name | tr ' ' '.')" \
+    AUTHOR="$(git config user.name) <$(git config user.email)>" SECTIONS="" render_template human "$t" "$tmp" >/dev/null || true
+  { cat "$tmp"; echo; grep '^#' "$f"; } > "$f.new"
+  mv "$f.new" "$f"
+  rm -f "$tmp"
+  return 0
+}
+
+tidy_optional() {  # drop optional template sections a human left empty, then collapse blank runs
+  local f="$1" t
+  t="$(commit_template)"; [ -n "$t" ] || return 0
+  template_model "$t" | awk -F '\t' '$1 == "field" && $2 == 1 { print $3 }' > "$f.opt"
+  awk 'NR == FNR { opt[$0] = 1; next }
+    {
+      if (match($0, /^[A-Za-z][A-Za-z0-9 _-]*:[ \t]*$/)) { l = substr($0, 1, index($0, ":") - 1); if (l in opt) next }
+      if ($0 ~ /^[ \t]*$/) { if (blank) next; blank = 1 } else blank = 0
+      print
+    }' "$f.opt" "$f" > "$f.tidy" && mv "$f.tidy" "$f"
+  rm -f "$f.opt"
+}
+
+hook_commit_msg() {
+  local b out
+  b="$(current_branch)"
+  out="$(check_msg "$1" "$b")" && { tidy_optional "$1"; return 0; }
+  echo "commit rejected by this repo's git workflow (.agents/git.conf):" >&2
+  printf '%s\n' "$out" | sed 's/^/  /' >&2
+  echo "  tip: .agents/bin/gitflow commit \"<summary>\" builds a valid message" >&2
+  return 1
+}
+
+hook_pre_push() {
+  local lsha rref rsha branch bad=0 out z
+  z="0000000000000000000000000000000000000000"
+  while read -r _ lsha rref rsha; do
+    case "$rref" in refs/heads/*) ;; *) continue ;; esac
+    branch="${rref#refs/heads/}"
+    if protected "$branch"; then echo "push rejected: $branch is protected (GIT_PROTECTED); open a PR instead" >&2; bad=1; continue; fi
+    zeros "$lsha" && continue   # deleting your own branch
+    if zeros "$rsha"; then
+      out="$(check_branch "$branch")" || { echo "push rejected: $out" >&2; bad=1; continue; }
+      local t mb
+      t="$(target_ref)"; mb="$( [ -n "$t" ] && git merge-base "$t" "$lsha" 2>/dev/null)"
+      out="$(check_commits "$branch" "${mb:+$mb..}$lsha")" || { printf 'push rejected:\n%s\n' "$out" >&2; bad=1; }
+    else
+      if git cat-file -e "$rsha" 2>/dev/null && ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
+        [ "$GIT_FORCE" = lease-own ] || { echo "push rejected: force pushes are off (GIT_FORCE=$GIT_FORCE)" >&2; bad=1; continue; }
+      fi
+      out="$(check_commits "$branch" "$rsha..$lsha")" || { printf 'push rejected:\n%s\n' "$out" >&2; bad=1; }
+    fi
+  done
+  : "$z"
+  return $bad
+}
+
+# check-cmd <command>: would this command break the workflow if an agent ran it? Exit 2 + reason.
+cmd_check_cmd() {
+  # shellcheck disable=SC2086,SC2048  # split the command into words on purpose (no globbing: set -f)
+  set -- $*
+  local tool="${1:-}" sub b a prev="" name="" base="" force=0 lease=0 remote="" refs="" dst r
+  case "$tool" in
+    git)
+      shift
+      while [ $# -gt 0 ]; do
+        case "$1" in -C|-c) shift 2 ;; --*=*|-P|--no-pager|--bare) shift ;; *) break ;; esac
+      done
+      sub="${1:-}"; [ $# -gt 0 ] && shift
+      b="$(current_branch)"
+      case "$sub" in
+        push)
+          may push || { echo "pushing is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY); say the branch is ready instead"; return 2; }
+          for a in "$@"; do
+            case "$a" in
+              --force|-f) force=1 ;;
+              --force-with-lease*|--force-if-includes) lease=1 ;;
+              --mirror|--all) echo "bulk pushes ($a) aren't allowed"; return 2 ;;
+              -*) ;;
+              *) if [ -z "$remote" ]; then remote="$a"; else refs="$refs $a"; fi ;;
+            esac
+          done
+          [ "$force" -eq 1 ] && { echo "force pushes (--force) aren't allowed; use gitflow push --lease on your own branch if GIT_FORCE allows"; return 2; }
+          [ -n "$refs" ] || refs="$b"
+          for r in $refs; do
+            case "$r" in +*) echo "force pushes (+refspec) aren't allowed"; return 2 ;; esac
+            dst="$r"; case "$r" in *:*) dst="${r#*:}" ;; esac
+            [ "$dst" = HEAD ] && dst="$b"
+            dst="${dst#refs/heads/}"
+            protected "$dst" && { echo "pushing to $dst is blocked: it's protected (GIT_PROTECTED); open a PR"; return 2; }
+          done
+          if [ "$lease" -eq 1 ] && [ "$GIT_FORCE" != lease-own ]; then echo "force pushes are off (GIT_FORCE=$GIT_FORCE)"; return 2; fi ;;
+        commit)
+          may commit || { echo "committing is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; }
+          [ -n "$b" ] && protected "$b" && { echo "$b is protected; commit on a branch: .agents/bin/gitflow start <ticket> <summary>"; return 2; }
+          for a in "$@"; do case "$a" in -n|--no-verify) echo "commit hooks can't be skipped"; return 2 ;; esac; done ;;
+        checkout|switch|branch)
+          for a in "$@"; do
+            case "$prev" in -b|-B|-c|-C|--create|--orphan) name="$a" ;; esac
+            case "$a" in --create=*) name="${a#--create=}" ;; esac
+            prev="$a"
+          done
+          if [ "$sub" = branch ] && [ -z "$name" ]; then
+            name=""
+            for a in "$@"; do
+              case "$a" in -d|-D|--delete|-m|-M|--move|-c|-C|--copy|-l|--list|-a|--all|-r|--remotes|-v|-vv|--show-current|--contains|--merged|--no-merged|-u|--set-upstream-to*|--unset-upstream|--edit-description) name=""; break ;; -*) ;; *) [ -z "$name" ] && name="$a" ;; esac
+            done
+          fi
+          if [ -n "$name" ]; then
+            may branch || { echo "creating branches is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; }
+            check_branch "$name" || return 2
+          fi ;;
+        merge)
+          [ -n "$b" ] && protected "$b" && { echo "merging into $b happens through a PR, not locally"; return 2; } ;;
+        rebase)
+          for a in "$@"; do
+            case "$a" in
+              --continue|--abort|--skip|--quit) return 0 ;;
+              -i|--interactive) echo "interactive rebase needs an editor and rewrites history; not for agents"; return 2 ;;
+            esac
+          done
+          [ -n "$b" ] && protected "$b" && { echo "$b is protected; don't rebase it"; return 2; }
+          [ "$GIT_UPDATE" = rebase ] || { echo "this repo updates branches by merge (GIT_UPDATE=$GIT_UPDATE): .agents/bin/gitflow update"; return 2; } ;;
+      esac ;;
+    gh|glab)
+      shift
+      sub="${1:-} ${2:-}"
+      [ $# -ge 2 ] && shift 2
+      case "$tool $sub" in
+        "gh pr create"|"glab mr create")
+          may pr || { echo "opening PRs is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; }
+          for a in "$@"; do
+            case "$prev" in --base|-B|--target-branch|-b) base="$a" ;; esac
+            case "$a" in --base=*|--target-branch=*) base="${a#*=}" ;; esac
+            prev="$a"
+          done
+          [ "$base" = "$GIT_BASE" ] || { echo "PRs in this repo target $GIT_BASE (GIT_BASE); use .agents/bin/gitflow pr"; return 2; } ;;
+        "gh pr merge"|"glab mr merge")
+          may merge || { echo "merging is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
+        "glab mr approve")
+          echo "agents never approve PRs"; return 2 ;;
+        "gh pr review")
+          for a in "$@"; do case "$a" in -a|--approve) echo "agents never approve PRs"; return 2 ;; esac; done ;;
+      esac ;;
+    .agents/bin/gitflow|gitflow)
+      case "${2:-}" in
+        start) may branch || { echo "creating branches is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
+        commit|update) may commit || { echo "committing is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
+        push) may push || { echo "pushing is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY); say the branch is ready instead"; return 2; } ;;
+        pr) may pr || { echo "opening PRs is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
+        merge) may merge || { echo "merging is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
+      esac ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------- main
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  config) cmd_config ;;
+  status) cmd_status ;;
+  start) cmd_start "$@" ;;
+  commit) cmd_commit "$@" ;;
+  template) cmd_template ;;
+  update) cmd_update ;;
+  check) cmd_check ;;
+  push) cmd_push "$@" ;;
+  pr) cmd_pr "$@" ;;
+  review) cmd_review ;;
+  merge) cmd_merge ;;
+  install-hooks) cmd_install_hooks "$@" ;;
+  check-branch) check_branch "${1:-}" ;;
+  check-msg) check_msg "${1:-/dev/stdin}" "$(current_branch)" ;;
+  check-cmd) cmd_check_cmd "$*" ;;
+  hook-commit-msg) hook_commit_msg "${1:-}" ;;
+  hook-pre-push) hook_pre_push ;;
+  hook-prepare-commit-msg) hook_prepare_commit_msg "${1:-}" "${2:-}" ;;
+  ""|-h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$cmd' (see: gitflow --help)" ;;
+esac

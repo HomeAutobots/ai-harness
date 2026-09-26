@@ -1,0 +1,12 @@
+
+# req-driven workflow (install.sh --workflow req-driven). harness-tailor fills these in.
+# Requirements export: a .csv (an "id" column), .json, .md/.txt, or a directory of them.
+REQ_SOURCE=""
+# What a requirement ID looks like (Python regex). With a "-" in it, REQ_12 also counts as REQ-12.
+REQ_ID_PATTERN="REQ-[0-9]+"
+# Changes to these paths must reference a requirement (space-separated globs).
+REQ_SCOPE="src/**"
+# Where tests live. New tests here must name the requirement they verify.
+REQ_TESTS="test/** tests/** **/test/** **/tests/** **/*_test.* **/*Test.* **/*Tests.* **/test_*.py **/*.test.* **/*.spec.*"
+# Full tier: 1 = every requirement needs at least one test that references it.
+REQ_REQUIRE_TESTED=0

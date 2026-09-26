@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# ai-harness: verify (orchestrator). Harness-owned: replaced on upgrade.
+#
+#   .agents/bin/verify [--tier=edit|turn|full] [--json] [--no-cache] [--update-baseline] [files...]
+#
+# Runs the guard, the project's checks for a tier (.agents/checks/<tier>.sh, project-owned), and
+# any workflow pack checks (.agents/workflows/<name>/checks/<tier>.sh), then shapes the result: one line when green, capped findings when not, full log on disk.
+#   edit  per-file checks on the given files (the post-edit hook, or `check <files>`)
+#   turn  the default; what the stop hook runs: build, affected tests, lint on changed code
+#   full  commit gate and CI: everything, including slow checks
+# Results are cached by working-tree state, so repeat calls with no changes are instant.
+# Exit: 0 ok/skipped, 1 findings, 2 policy block, 3 tooling problem, 124 out of budget.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+export AGENTS_ROOT="$ROOT"
+# shellcheck source=../lib/feedback.sh
+. "$ROOT/.agents/lib/feedback.sh"
+agents_load_conf
+cd "$ROOT" || exit 3
+
+TIER=turn JSON=0 CACHE=1
+FILES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tier=*) TIER="${1#--tier=}" ;;
+    --json) JSON=1 ;;
+    --no-cache) CACHE=0 ;;
+    --update-baseline) export AGENTS_UPDATE_BASELINE=1; CACHE=0 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --) shift; while [ $# -gt 0 ]; do FILES+=("$1"); shift; done; break ;;
+    -*) echo "verify: unknown option $1" >&2; exit 3 ;;
+    *) FILES+=("$1") ;;
+  esac
+  shift
+done
+
+case "$TIER" in
+  edit) BUDGET="$EDIT_BUDGET" ;;
+  turn) BUDGET="$TURN_BUDGET" ;;
+  full) BUDGET="$FULL_BUDGET" ;;
+  *) echo "verify: unknown tier '$TIER' (edit, turn, full)" >&2; exit 3 ;;
+esac
+
+# Normalize explicit files to repo-relative paths that exist; default to the changed set.
+if [ ${#FILES[@]} -gt 0 ]; then
+  NORM=()
+  for f in "${FILES[@]}"; do
+    case "$f" in "$ROOT"/*) f="${f#"$ROOT"/}" ;; ./*) f="${f#./}" ;; esac
+    [ -f "$f" ] && NORM+=("$f")
+  done
+  FILES=()
+  [ ${#NORM[@]} -gt 0 ] && FILES=("${NORM[@]}")
+elif [ "$TIER" != edit ]; then
+  while IFS= read -r f; do [ -n "$f" ] && FILES+=("$f"); done < <(agents_changed_files)
+fi
+
+emit() {  # emit <status-word> <rc> <shaped-file> <log-path>
+  local word="$1" rc="$2" shaped="$3" log="$4"
+  if [ "$JSON" -eq 1 ]; then
+    awk -v tier="$TIER" -v rc="$rc" -v word="$word" -v logp="$log" '
+      function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, "\\t", s); gsub(/[\001-\037]/, " ", s); return s }
+      { a[++n] = "\"" esc($0) "\"" }
+      END {
+        printf "{\"tool\":\"verify\",\"tier\":\"%s\",\"status\":\"%s\",\"exit\":%d,\"findings\":[", tier, tolower(word), rc
+        for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), a[i]
+        printf "],\"log\":\"%s\"}\n", esc(logp)
+      }' "$shaped"
+  else
+    if [ "$rc" -eq 0 ]; then
+      echo "$word verify $TIER"
+    else
+      echo "$word verify $TIER"
+      cat "$shaped"
+      [ -n "$log" ] && echo "full log: $log"
+    fi
+  fi
+}
+
+# Nothing to check for the edit tier without files.
+if [ "$TIER" = edit ] && [ ${#FILES[@]} -eq 0 ]; then
+  emit ok 0 /dev/null ""
+  exit 0
+fi
+
+mkdir -p "$AGENTS_CACHE"
+KEY=""
+if [ "$CACHE" -eq 1 ]; then
+  if [ ${#FILES[@]} -gt 0 ]; then KEY="$(agents_state_key "${FILES[@]}")"; else KEY="$(agents_state_key)"; fi
+  KEY="$TIER-$JSON-$KEY"
+  C="$AGENTS_CACHE/verify-$TIER-$JSON"
+  if [ -f "$C.key" ] && [ "$(cat "$C.key")" = "$KEY" ]; then
+    cat "$C.out"
+    exit "$(cat "$C.rc")"
+  fi
+fi
+
+RAW="$(mktemp)"; SHAPED="$(mktemp)"
+trap 'rm -f "$RAW" "$SHAPED" "$RAW.part"' EXIT
+
+# 1. Guard: new suppressions, skipped or deleted tests. Cheap, always first.
+GUARD_RC=0
+if [ "$TIER" = edit ]; then
+  "$ROOT/.agents/bin/guard" "${FILES[@]}" >"$RAW.part" 2>&1 || GUARD_RC=$?
+else
+  "$ROOT/.agents/bin/guard" >"$RAW.part" 2>&1 || GUARD_RC=$?
+fi
+[ "$GUARD_RC" -ne 0 ] && cat "$RAW.part" >> "$RAW"
+
+# 2. The project's checks for this tier.
+CHECK_RC=0
+SCRIPT=".agents/checks/$TIER.sh"
+if [ -f "$SCRIPT" ]; then
+  export AGENTS_TIER="$TIER"
+  if [ ${#FILES[@]} -gt 0 ]; then
+    agents_budget_run "$BUDGET" "$RAW.part" bash "$SCRIPT" "${FILES[@]}" || CHECK_RC=$?
+  else
+    agents_budget_run "$BUDGET" "$RAW.part" bash "$SCRIPT" || CHECK_RC=$?
+  fi
+  cat "$RAW.part" >> "$RAW"
+elif [ "$TIER" != edit ]; then
+  echo "infra: $SCRIPT is missing. Run the harness-tailor skill to set up checks." >> "$RAW"
+  CHECK_RC=3
+fi
+
+# 3. Workflow packs listed in WORKFLOWS (harness.conf) add their own checks for the tier.
+WF_RC=0
+for wf in ${WORKFLOWS:-}; do
+  WS=".agents/workflows/$wf/checks/$TIER.sh"
+  [ -f "$WS" ] || continue
+  rc=0
+  agents_budget_run "$BUDGET" "$RAW.part" bash "$WS" ${FILES[@]+"${FILES[@]}"} || rc=$?
+  cat "$RAW.part" >> "$RAW"
+  WF_RC="$(agents_worst_rc "$WF_RC" "$rc")"
+done
+
+RC="$(agents_worst_rc "$GUARD_RC" "$CHECK_RC" "$WF_RC")"
+case "$RC" in
+  0) WORD=ok ;;
+  1) WORD=FAIL ;;
+  2) WORD=BLOCK ;;
+  3) WORD=INFRA ;;
+  124) WORD=SKIP; echo "SKIP: out of budget (${BUDGET}s). Checks did not finish; nothing was verified." >> "$RAW" ;;
+  *) WORD=FAIL ;;
+esac
+
+LOG=""
+if [ "$RC" -ne 0 ]; then
+  agents_shape "$RAW" > "$SHAPED"
+  LOG="$(agents_log "verify-$TIER" "$RAW")"
+fi
+
+OUT="$(emit "$WORD" "$RC" "$SHAPED" "$LOG")"
+printf '%s\n' "$OUT"
+if [ -n "$KEY" ]; then
+  printf '%s\n' "$OUT" > "$C.out"
+  echo "$RC" > "$C.rc"
+  echo "$KEY" > "$C.key"
+fi
+exit "$RC"

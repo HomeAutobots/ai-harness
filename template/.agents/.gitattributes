@@ -1,0 +1,7 @@
+bin/* text eol=lf
+hooks/* text eol=lf
+lib/* text eol=lf
+checks/* text eol=lf
+stacks/** text eol=lf
+*.conf text eol=lf
+*.patterns text eol=lf

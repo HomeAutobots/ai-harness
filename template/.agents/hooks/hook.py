@@ -1,0 +1,631 @@
+#!/usr/bin/env python3
+"""ai-harness hook adapter. Harness-owned: replaced on upgrade.
+
+Translates each tool's hook protocol into the harness's tool-agnostic checks:
+
+  pre-tool      enforce .agents/policy.conf on shell commands and file reads; before a question
+                to the human, check the question ledger for an earlier answer
+  post-edit     run .agents/bin/check on edited files and feed findings back to the agent;
+                after a question to the human, record the question and answer in the ledger
+  session-start remind the agent of questions still waiting on the human
+  turn-start    snapshot the working tree when a prompt arrives
+  stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
+                anything; block with the findings until it passes (bounded retries)
+
+Usage: hook.py <event> --tool=<claude|copilot|cursor>   (JSON payload on stdin)
+
+A crashing hook must never wedge the agent: every path ends in a valid, permissive
+response unless policy says otherwise.
+"""
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+CACHE = os.path.join(ROOT, ".agents", "cache")
+EDIT_TOOLS = {
+    "edit", "write", "multiedit", "create", "str_replace_editor", "str_replace_based_edit_tool",
+    "apply_patch", "notebookedit", "replace", "write_file",
+}
+SHELL_TOOLS = {"bash", "shell", "run_shell_command", "powershell", "terminal", "run_in_terminal"}
+READ_TOOLS = {"read", "view", "read_file", "grep", "glob", "search"}
+QUESTION_TOOLS = {"askuserquestion", "ask_user", "askuser"}
+
+
+# ---------------------------------------------------------------- config
+
+def load_conf():
+    conf = {
+        "HOOKS": "policy edit turn questions", "EDIT_BUDGET": "15", "TURN_BUDGET": "300",
+        "TURN_MAX_BLOCKS": "3", "POLICY_FAIL_CLOSED": "0",
+    }
+    path = os.path.join(ROOT, ".agents", "harness.conf")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                m = re.match(r'^\s*([A-Z_][A-Z0-9_]*)=(?:"([^"]*)"|\'([^\']*)\'|([^\s#]*))', line)
+                if m:
+                    conf[m.group(1)] = next(g for g in m.groups()[1:] if g is not None)
+    except OSError:
+        pass
+    return conf
+
+
+def load_policy():
+    rules = []
+    path = os.path.join(ROOT, ".agents", "policy.conf")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                reason = ""
+                if " #" in line:
+                    line, reason = line.split(" #", 1)
+                    line, reason = line.strip(), reason.strip()
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    rules.append((parts[0], parts[1].strip(), reason))
+    except OSError:
+        pass
+    return rules
+
+
+# ---------------------------------------------------------------- helpers
+
+def log_event(tool, event, decision, detail=""):
+    try:
+        os.makedirs(CACHE, exist_ok=True)
+        with open(os.path.join(CACHE, "hook-events.log"), "a", encoding="utf-8") as fh:
+            fh.write("%d\t%s\t%s\t%s\t%s\n" % (time.time(), tool, event, decision, detail[:200].replace("\n", " ")))
+    except OSError:
+        pass
+
+
+def as_dict(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {"input": value}
+        except ValueError:
+            return {"input": value}
+    return {}
+
+
+def tool_name(data):
+    return str(data.get("tool_name") or data.get("toolName") or "")
+
+
+def tool_args(data):
+    return as_dict(data.get("tool_input", data.get("toolArgs", {})))
+
+
+def session_key(data):
+    sid = str(data.get("session_id") or data.get("sessionId") or data.get("conversation_id") or "default")
+    return hashlib.sha1(sid.encode()).hexdigest()[:12]
+
+
+def git(*args):
+    try:
+        return subprocess.run(["git"] + list(args), cwd=ROOT, capture_output=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return b""
+
+
+def tree_state():
+    h = hashlib.sha1()
+    h.update(git("rev-parse", "-q", "--verify", "HEAD"))
+    h.update(git("status", "--porcelain=v1", "-z"))
+    h.update(git("diff", "--binary", "HEAD"))
+    untracked = git("ls-files", "-o", "--exclude-standard")
+    if untracked.strip():
+        try:
+            h.update(subprocess.run(["git", "hash-object", "--stdin-paths"], cwd=ROOT, input=untracked,
+                                    capture_output=True, timeout=30).stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return h.hexdigest()
+
+
+def read_file(path, default=""):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def write_file(path, text):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except OSError:
+        pass
+
+
+def rel_to_root(path, cwd=None):
+    if not path:
+        return None
+    p = os.path.expanduser(str(path))
+    if not os.path.isabs(p):
+        p = os.path.join(cwd or ROOT, p)
+    p = os.path.abspath(p)
+    if p != ROOT and not p.startswith(ROOT + os.sep):
+        return None
+    return os.path.relpath(p, ROOT)
+
+
+# ---------------------------------------------------------------- policy
+
+def glob_match(rel, pat):
+    if fnmatch.fnmatchcase(rel, pat):
+        return True
+    if pat.startswith("**/") and glob_match(rel, pat[3:]):
+        return True
+    if "/**/" in pat and glob_match(rel, pat.replace("/**/", "/", 1)):
+        return True
+    return False
+
+
+def path_matches(path, pattern, cwd=None):
+    """Patterns: ./x is repo-relative, ~/x is home-relative, /x absolute, bare x matches a basename."""
+    p = os.path.expanduser(str(path))
+    if not os.path.isabs(p):
+        p = os.path.join(cwd or ROOT, p)
+    p = os.path.abspath(p)
+    if pattern.startswith("./"):
+        base, pat = ROOT, pattern[2:]
+    elif pattern.startswith("~/"):
+        base, pat = os.path.expanduser("~"), pattern[2:]
+    elif pattern.startswith("/"):
+        base, pat = "/", pattern[1:]
+    else:
+        return fnmatch.fnmatchcase(os.path.basename(p), pattern)
+    rel = os.path.relpath(p, base)
+    if rel.startswith(".."):
+        return False
+    return glob_match(rel, pat)
+
+
+def read_denied(path, rules, cwd=None):
+    if not path:
+        return None
+    for kind, pat, _ in rules:
+        if kind == "allow-read" and path_matches(path, pat, cwd):
+            return None
+    for kind, pat, reason in rules:
+        if kind == "deny-read" and path_matches(path, pat, cwd):
+            return "reading %s is blocked by policy (%s)%s" % (path, pat, ": " + reason if reason else "")
+    return None
+
+
+def segments(cmd):
+    for seg in re.split(r"&&|\|\||[;|\n&]|\$\(|`", cmd):
+        seg = " ".join(seg.split())
+        # strip leading env assignments and transparent wrappers
+        while True:
+            m = re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*|command|exec|env|nohup|time|builtin)\s+", seg)
+            if not m:
+                break
+            seg = seg[m.end():]
+        seg = re.sub(r"^(?:bash|sh|zsh)\s+(?=[^-\s])", "", seg.strip("() "))
+        if seg.startswith(ROOT + "/"):
+            seg = seg[len(ROOT) + 1:]
+        while seg.startswith("./"):
+            seg = seg[2:]
+        if seg:
+            yield seg
+
+
+def shell_denied(cmd, rules, cwd=None):
+    if not cmd:
+        return None
+    try:
+        tokens = shlex.split(cmd, comments=False, posix=True)
+    except ValueError:
+        tokens = cmd.split()
+    for kind, pat, reason in rules:
+        why = ": " + reason if reason else ""
+        if kind == "deny-cmd":
+            for seg in segments(cmd):
+                if seg == pat or seg.startswith(pat + " "):
+                    return "`%s` is blocked by policy%s" % (pat, why)
+        elif kind == "deny-arg":
+            if any(t == pat or t.startswith(pat + "=") for t in tokens):
+                return "`%s` is blocked by policy%s" % (pat, why)
+        elif kind == "deny-regex":
+            try:
+                if re.search(pat, cmd):
+                    return "this command matches a blocked pattern (%s)%s" % (pat, why)
+            except re.error:
+                pass
+    gitflow = os.path.join(ROOT, ".agents", "bin", "gitflow")
+    if os.path.exists(gitflow):
+        for seg in segments(cmd):
+            if re.match(r"^(git|gh|glab|\.agents/bin/gitflow|gitflow)(\s|$)", seg):
+                try:
+                    p = subprocess.run([gitflow, "check-cmd", seg], cwd=ROOT, capture_output=True, text=True, timeout=15)
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if p.returncode == 2:
+                    return (p.stdout.strip() or "blocked by this repo's git workflow") + " (.agents/git.conf)"
+    for t in tokens:
+        if " " in t.strip() and t.strip() != cmd.strip():
+            nested = shell_denied(t, rules, cwd)  # e.g. bash -c "git push"
+            if nested:
+                return nested
+            continue
+        if t.startswith("-") or any(c in t for c in "*?[]$"):
+            continue
+        t = t.lstrip("<>")
+        denied = read_denied(t, rules, cwd)
+        if denied:
+            return denied
+    return None
+
+
+def pre_tool(tool, data, conf):
+    feats = conf.get("HOOKS", "").split()
+    if is_question_tool(data):
+        return question_pre(tool, data) if "questions" in feats else allow(tool, "pre-tool")
+    if "policy" not in feats:
+        return allow(tool, "pre-tool")
+    rules = load_policy()
+    cwd = data.get("cwd") or ROOT
+    kind, value = None, ""
+    if tool == "cursor":
+        ev = data.get("hook_event_name", "")
+        if ev == "beforeShellExecution":
+            kind, value = "shell", data.get("command", "")
+        elif ev == "beforeReadFile":
+            kind, value = "read", data.get("file_path", "")
+    else:
+        name = tool_name(data).lower()
+        args = tool_args(data)
+        if name in SHELL_TOOLS:
+            kind, value = "shell", args.get("command") or args.get("input") or ""
+        elif name in READ_TOOLS:
+            kind, value = "read", args.get("file_path") or args.get("path") or args.get("filePath") or ""
+    reason = None
+    if kind == "shell":
+        reason = shell_denied(str(value), rules, cwd)
+    elif kind == "read":
+        reason = read_denied(str(value), rules, cwd)
+    if reason:
+        log_event(tool, "pre-tool", "deny", str(value))
+        return deny(tool, reason + ". Ask the human if this is really needed.")
+    return allow(tool, "pre-tool")
+
+
+def deny(tool, reason):
+    if tool == "claude":
+        sys.stderr.write(reason + "\n")
+        return 2
+    if tool == "copilot":
+        print(json.dumps({"permissionDecision": "deny", "permissionDecisionReason": reason}))
+        return 2
+    if tool == "cursor":
+        print(json.dumps({"continue": True, "permission": "deny", "user_message": reason,
+                          "agent_message": reason, "userMessage": reason, "agentMessage": reason}))
+        return 2
+    sys.stderr.write(reason + "\n")
+    return 2
+
+
+def allow(tool, event):
+    if tool == "cursor" and event in ("pre-tool", "turn-start"):
+        print(json.dumps({"continue": True, "permission": "allow"}))
+    return 0
+
+
+# ---------------------------------------------------------------- edit and stop
+
+def edited_files(tool, data):
+    files = []
+    if tool == "cursor":
+        files.append(data.get("file_path"))
+    else:
+        if tool_name(data).lower() not in EDIT_TOOLS:
+            return []
+        args = tool_args(data)
+        for k in ("file_path", "path", "notebook_path", "filePath"):
+            if args.get(k):
+                files.append(args[k])
+        for e in args.get("edits") or []:
+            if isinstance(e, dict) and e.get("file_path"):
+                files.append(e["file_path"])
+        patch = args.get("patch") or args.get("input") or ""
+        if isinstance(patch, str):
+            files += re.findall(r"^\*\*\* (?:Update|Add) File: (.+)$", patch, re.M)
+            files += re.findall(r"^\+\+\+ b/(.+)$", patch, re.M)
+    out = []
+    for f in files:
+        r = rel_to_root(f, data.get("cwd"))
+        if r and os.path.isfile(os.path.join(ROOT, r)) and not r.startswith(".agents" + os.sep + "cache"):
+            if r not in out:
+                out.append(r)
+    return out
+
+
+def run_tool(args, budget):
+    try:
+        p = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=budget)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 124, "out of budget"
+    except OSError as e:
+        return 3, str(e)
+
+
+def post_edit(tool, data, conf):
+    feats = conf.get("HOOKS", "").split()
+    if is_question_tool(data):
+        return question_post(tool, data) if "questions" in feats else 0
+    if "edit" not in feats:
+        return 0
+    files = edited_files(tool, data)
+    if not files:
+        return 0
+    budget = int(conf.get("EDIT_BUDGET", "15") or 15) + 10
+    rc, out = run_tool([os.path.join(ROOT, ".agents", "bin", "check")] + files, budget)
+    log_event(tool, "post-edit", str(rc), " ".join(files))
+    if rc not in (1, 2):
+        return 0
+    msg = out + "\nFix these before moving on."
+    if tool == "claude":
+        sys.stderr.write(msg + "\n")
+        return 2
+    if tool == "copilot":
+        print(json.dumps({"additionalContext": msg}))
+        return 0
+    return 0  # cursor ignores afterFileEdit output; the stop gate reports instead
+
+
+def turn_start(tool, data, conf):
+    write_file(os.path.join(CACHE, "turn-" + session_key(data)), tree_state())
+    return allow(tool, "turn-start")
+
+
+def stop_gate(tool, data, conf):
+    key = session_key(data)
+    counter = os.path.join(CACHE, "stop-" + key)
+    max_blocks = int(conf.get("TURN_MAX_BLOCKS", "3") or 3)
+
+    # Only gate turns that changed the tree. Without a snapshot, gate any dirty tree.
+    before = read_file(os.path.join(CACHE, "turn-" + key))
+    now = tree_state()
+    dirty = bool(git("status", "--porcelain").strip())
+    if (before and before == now) or (not before and not dirty):
+        write_file(counter, "0")
+        return finish_allow(tool)
+
+    # A task paused for the human (tasks ask) is a legitimate place to stop, even mid red phase.
+    waiting = paused_for_human()
+    if waiting:
+        write_file(counter, "0")
+        log_event(tool, "stop-gate", "paused", waiting)
+        return finish_allow(tool, "Paused for your input: open questions in %s" % waiting)
+
+    blocks = int(read_file(counter, "0") or 0)
+    if tool == "cursor" and isinstance(data.get("loop_count"), int):
+        blocks = max(blocks, data["loop_count"])
+    if blocks >= max_blocks:
+        write_file(counter, "0")
+        log_event(tool, "stop-gate", "give-up")
+        return finish_allow(tool, "Stop gate: verify still failing after %d attempts. Handing back; "
+                                  "run .agents/bin/verify to see what is left." % blocks)
+
+    budget = int(conf.get("TURN_BUDGET", "300") or 300) + 30
+    rc, out = run_tool([os.path.join(ROOT, ".agents", "bin", "verify"), "--tier=turn"], budget)
+    log_event(tool, "stop-gate", str(rc))
+    if rc == 0:
+        write_file(counter, "0")
+        write_file(os.path.join(CACHE, "turn-" + key), tree_state())
+        return finish_allow(tool)
+    if rc not in (1, 2):
+        write_file(counter, "0")
+        return finish_allow(tool, "Stop gate could not verify (exit %d): %s" % (rc, out.splitlines()[-1] if out else ""))
+
+    write_file(counter, str(blocks + 1))
+    reason = ("The stop gate ran .agents/bin/verify and it failed. Fix these, then finish:\n\n%s\n\n"
+              "(Attempt %d of %d. If a finding is wrong or out of scope, say so plainly instead of "
+              "suppressing it.)" % (out, blocks + 1, max_blocks))
+    if tool == "claude":
+        sys.stderr.write(reason + "\n")
+        return 2
+    if tool == "copilot":
+        print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
+    if tool == "cursor":
+        print(json.dumps({"followup_message": reason}))
+        return 0
+    sys.stderr.write(reason + "\n")
+    return 2
+
+
+# ---------------------------------------------------------------- question ledger
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def open_questions():
+    """[(slug, question row)] for every open question in every plan's ledger."""
+    import glob
+    out = []
+    for qj in sorted(glob.glob(os.path.join(ROOT, ".agents", "plans", "*", "questions.json"))):
+        for q in load_json(qj) or []:
+            if isinstance(q, dict) and q.get("status") == "open":
+                out.append((os.path.basename(os.path.dirname(qj)), q))
+    return out
+
+
+def paused_for_human():
+    """A plan whose blocked task has an open question (tasks ask): a legitimate place to stop."""
+    for slug, q in open_questions():
+        tasks = load_json(os.path.join(ROOT, ".agents", "plans", slug, "tasks.json")) or []
+        if any(isinstance(t, dict) and t.get("id") == q.get("task") and t.get("status") == "blocked" for t in tasks):
+            return ".agents/plans/%s/questions.json" % slug
+    return ""
+
+
+def is_question_tool(data):
+    return tool_name(data).lower() in QUESTION_TOOLS
+
+
+def question_texts(args):
+    out = []
+    qs = args.get("questions")
+    if isinstance(qs, list):
+        for q in qs:
+            if isinstance(q, dict) and isinstance(q.get("question"), str):
+                out.append(q["question"])
+            elif isinstance(q, str):
+                out.append(q)
+    for k in ("question", "prompt", "message"):
+        if isinstance(args.get(k), str):
+            out.append(args[k])
+    return [q.strip() for q in out if q.strip()]
+
+
+def answer_texts(data, questions):
+    resp = data.get("tool_response", data.get("tool_result", data.get("toolResult")))
+    if isinstance(resp, dict) and isinstance(resp.get("answers"), dict):
+        answers = resp["answers"]
+        return [str(answers.get(q, "")) for q in questions]
+    text = resp
+    if isinstance(resp, dict):
+        text = (resp.get("text_result_for_llm") or resp.get("textResultForLlm") or resp.get("content")
+                or resp.get("result") or "")
+    if isinstance(text, list):
+        text = " ".join(t.get("text", "") if isinstance(t, dict) else str(t) for t in text)
+    text = " ".join(str(text or "").split())[:500]
+    return [text] * len(questions)
+
+
+def tasks_cli(*args):
+    try:
+        p = subprocess.run([os.path.join(ROOT, ".agents", "bin", "tasks")] + list(args), cwd=ROOT,
+                           capture_output=True, text=True, timeout=20)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.SubprocessError):
+        return 3, ""
+
+
+def question_pre(tool, data):
+    """Before the agent asks the human: surface an earlier answer once per session."""
+    seen_file = os.path.join(CACHE, "asked-" + session_key(data))
+    seen = set(read_file(seen_file).split())
+    hits = []
+    for q in question_texts(tool_args(data)):
+        h = hashlib.sha1(q.lower().encode()).hexdigest()[:12]
+        if h in seen:
+            continue  # already shown the earlier answer; asking again is the agent's call
+        rc, out = tasks_cli("similar", q)
+        best = [l.split("\t") for l in out.splitlines() if l.strip()]
+        best = [b for b in best if len(b) >= 6 and float(b[0]) >= 0.7]
+        if best:
+            seen.add(h)
+            b = best[0]
+            hits.append("- \"%s\" was answered in %s %s (%s): %s" % (b[4], b[1], b[2], b[3], b[5]))
+    if not hits:
+        return allow(tool, "pre-tool")
+    write_file(seen_file, "\n".join(sorted(seen)))
+    log_event(tool, "pre-tool", "question-dedupe", " ".join(hits)[:200])
+    return deny(tool, "The question ledger already has an answer:\n%s\nUse it. If something changed since, "
+                      "ask again and say what changed." % "\n".join(hits))
+
+
+def question_post(tool, data):
+    """After the agent asked the human: record question and answer in the ledger."""
+    qs = question_texts(tool_args(data))
+    for q, a in zip(qs, answer_texts(data, qs)):
+        tasks_cli("record", "--source=hook-" + tool, q, a)
+    if qs:
+        log_event(tool, "post-edit", "question-recorded", str(len(qs)))
+    return 0
+
+
+def session_start(tool, data, conf):
+    waiting = open_questions()
+    if not waiting:
+        return 0
+    lines = ["Questions still waiting on the human (question ledger):"]
+    for slug, q in waiting[:5]:
+        lines.append("- %s %s%s: %s" % (slug, q.get("id"), " (%s)" % q["task"] if q.get("task") else "", q.get("question")))
+    if len(waiting) > 5:
+        lines.append("- ...and %d more: .agents/bin/tasks questions --open" % (len(waiting) - 5))
+    lines.append("Ask the human about these before continuing that work. Record answers with "
+                 ".agents/bin/tasks answer <slug> <Q-id> \"<answer>\".")
+    text = "\n".join(lines)
+    if tool == "copilot":
+        print(json.dumps({"additionalContext": text}))
+    else:
+        print(text)
+    return 0
+
+
+def finish_allow(tool, note=""):
+    if note:
+        if tool == "claude":
+            print(json.dumps({"systemMessage": note}))
+        else:
+            sys.stderr.write(note + "\n")
+    if tool == "cursor":
+        print(json.dumps({}))
+    return 0
+
+
+# ---------------------------------------------------------------- main
+
+# pre-tool and post-edit check their own features (policy/edit vs questions) per tool call.
+EVENTS = {"pre-tool": (None, pre_tool), "post-edit": (None, post_edit),
+          "session-start": ("questions", session_start),
+          "turn-start": ("turn", turn_start), "stop-gate": ("turn", stop_gate)}
+
+
+def main(argv):
+    event = argv[1] if len(argv) > 1 else ""
+    tool = "claude"
+    for a in argv[2:]:
+        if a.startswith("--tool="):
+            tool = a.split("=", 1)[1]
+    conf = load_conf()
+    if event not in EVENTS:
+        sys.stderr.write("hook.py: unknown event %r\n" % event)
+        return 0
+    feature, handler = EVENTS[event]
+    if os.environ.get("AGENTS_HOOKS", "on") == "off" or (feature and feature not in conf.get("HOOKS", "").split()):
+        return allow(tool, event)
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        data = json.loads(raw) if raw.strip() else {}
+        if not isinstance(data, dict):
+            data = {}
+    except ValueError:
+        data = {}
+    try:
+        return handler(tool, data, conf)
+    except Exception as e:  # never wedge the agent
+        log_event(tool, event, "error", repr(e))
+        if event == "pre-tool" and conf.get("POLICY_FAIL_CLOSED") == "1":
+            return deny(tool, "policy hook failed (%s); failing closed" % e)
+        return allow(tool, event)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
