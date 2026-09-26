@@ -180,7 +180,9 @@ cpp_sanitize() {
   local b="$AGENTS_ROOT/$CPP_SAN_DIR"
   agents_step sanitizer-build cmake --build "$b" -j "${CPP_JOBS:-$(cpp_nproc)}" || return 1
   [ -f "$b/CTestTestfile.cmake" ] || return 0
-  ASAN_OPTIONS="${ASAN_OPTIONS:-abort_on_error=1:detect_leaks=1}" \
+  # No detect_leaks=1: ASan already enables leak checks where LeakSanitizer exists (Linux), and
+  # Apple clang aborts every binary at startup when it's set ("not supported on this platform").
+  ASAN_OPTIONS="${ASAN_OPTIONS:-abort_on_error=1}" \
   UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}" \
     agents_step sanitizer-tests _cpp_ctest "$b"
 }

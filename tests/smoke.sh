@@ -633,7 +633,11 @@ EOF
   out="$("$X/.agents/bin/verify" || true)"
   t  "new warning in changed file fails" bash -c "printf '%s' \"\$1\" | grep -q 'unused variable'" _ "$out"
   t  "warning survives a rebuild"      bash -c "'$X/.agents/bin/verify' --no-cache | grep -q 'unused variable'"
-  (cd "$X" && .agents/bin/verify --update-baseline >/dev/null 2>&1)
+  if ! command -v clang-tidy >/dev/null 2>&1; then   # e.g. stock macOS: reported, then dropped like a project would
+    t "missing clang-tidy is infra"    bash -c "printf '%s' \"\$1\" | grep -q 'infra: clang-tidy not found'" _ "$out"
+    edit "$X/.agents/checks/turn.sh" '/^cpp_tidy_changed/d'
+  fi
+  t  "update-baseline succeeds"        bash -c "cd '$X' && .agents/bin/verify --update-baseline"
   t  "baselined warning passes"        "$X/.agents/bin/verify"
   rm -rf "$X/.agents/baselines"; git -C "$X" checkout -q src/net/frame.cpp
   printf 'int x = ;\n' >> "$X/src/net/frame.cpp"
