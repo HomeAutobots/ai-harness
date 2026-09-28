@@ -741,6 +741,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   mv "$FD/features.md" "$FD/features.md.bak"
   t  "deleted approved list is a finding" has "$("$F/.agents/bin/verify" || true)" "[fdd-list-missing] the feature list was approved but is gone"
   mv "$FD/features.md.bak" "$FD/features.md"
+  t  "message check installed hooks"   grep -q 'ai-harness gitflow' "$F/.git/hooks/commit-msg"
+  git -C "$F" add src/sale.cpp
+  out="$(cd "$F" && git commit -qm 'F-12: add sale total' 2>&1 || true)"
+  t  "private ID in a message rejected" has "$out" "commit message line 1: F-12 is a private feature ID from your local feature list; use the ticket key PROJ-123"
+  t  "ticket key in a message is fine" bash -c "cd '$F' && git commit -qm 'PROJ-123: add sale total'"
+  out="$(cd "$F" && git commit -q --allow-empty -m 'Add sale total' -m '#F-12: rounding note' 2>&1 || true)"
+  t  "private ID behind a # line is still caught" has "$out" "F-12 is a private feature ID"
+  t  "unlisted ID in a message is fine"  bash -c "cd '$F' && git commit -q --allow-empty -m 'F-77: not ours'"
+  out="$(cd "$F" && git commit -q --allow-empty -m 'Add sale total' -m 'mentions F-12 in the body' 2>&1 || true)"
+  t  "leak in the message body is caught" has "$out" "commit message line 3: F-12 is a private feature ID"
 fi
 
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

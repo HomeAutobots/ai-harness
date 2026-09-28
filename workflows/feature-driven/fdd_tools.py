@@ -391,9 +391,21 @@ def write_report(root, d, conf, feats, approvals, rows):
 
 def cmd_msg(root, path):
     conf = load_conf(root)
-    if not os.path.isfile(os.path.join(fdd_dir(root, conf), "features.md")):
+    fpath = os.path.join(fdd_dir(root, conf), "features.md")
+    if not os.path.isfile(fpath):
         return 0
-    return 0
+    feats, _ = parse_features(root, conf, fpath)
+    ids = Ids(conf["FDD_ID_PATTERN"])
+    out = []
+    # No skip for '#' lines: git only strips those on an edited (no -m/-F) commit, and gitflow
+    # always commits with -F, so a '#'-prefixed line lands in history like any other.
+    for n, line in enumerate(read_lines(path), 1):
+        for i in ids.find(line):
+            if i in feats:
+                tk = feats[i].ticket
+                out.append("commit message line %d: %s is a private feature ID from your local feature list; %s"
+                           % (n, i, "use the ticket key %s" % tk if tk else "leave it out"))
+    return emit(out)
 
 
 def cmd_status(root, only):
