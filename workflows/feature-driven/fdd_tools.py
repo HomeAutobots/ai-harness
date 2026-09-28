@@ -154,14 +154,75 @@ def added_lines(root, files):
     return out
 
 
+# ------------------------------------------------------------------ feature list
+
+class Feature:
+    def __init__(self, fid, name, ticket, fset, line):
+        self.id, self.name, self.ticket, self.set, self.line = fid, name, ticket, fset, line
+
+
+ITEM = re.compile(r"^\s*[-*]\s+(\S+)\s*(.*?)\s*$")
+TICKET = re.compile(r"\s*\[([^\]]*)\]$")
+
+
+def parse_features(root, conf, path):
+    """({id: Feature} in list order, fdd-format findings). ## starts a subject area, ### a feature set."""
+    feats, found = {}, []
+    rel = shown(root, path)
+    name_rx = re.compile(conf["FDD_NAME_PATTERN"]) if conf["FDD_NAME_PATTERN"] else None
+    fset = None
+    for n, line in enumerate(read_lines(path), 1):
+        if line.startswith("### "):
+            fset = line[4:].strip()
+            continue
+        if line.startswith("## "):
+            fset = None
+            continue
+        m = ITEM.match(line)
+        if not m:
+            continue
+        fid, rest = m.group(1), m.group(2)
+        if not re.fullmatch(conf["FDD_ID_PATTERN"], fid):
+            found.append(finding(rel, n, "fdd-format", "'%s' isn't a feature ID (%s)" % (fid, conf["FDD_ID_PATTERN"]),
+                                 "start each feature with its ID, e.g. '- F-12 Calculate the total of a sale'"))
+            continue
+        ticket = ""
+        t = TICKET.search(rest)
+        if t:
+            ticket, rest = t.group(1).strip(), rest[:t.start()].rstrip()
+            if not re.fullmatch(conf["ticket"], ticket):
+                found.append(finding(rel, n, "fdd-format", "[%s] isn't a ticket key (%s)" % (ticket, conf["ticket"]),
+                                     "use the real ticket key, or leave the brackets off"))
+                ticket = ""
+        if fid in feats:
+            found.append(finding(rel, n, "fdd-format", "%s is already used on line %d" % (fid, feats[fid].line),
+                                 "give each feature its own ID"))
+            continue
+        if fset is None:
+            found.append(finding(rel, n, "fdd-format", "%s isn't in a feature set" % fid,
+                                 "put it under a '### FS-<n> <feature set>' heading"))
+        if name_rx and not name_rx.search(rest):
+            found.append(finding(rel, n, "fdd-format", "'%s' doesn't read like an FDD feature name" % rest,
+                                 "<action> the <result> <by|for|of|to> a(n) <object>, "
+                                 "e.g. 'Calculate the total of a sale'"))
+        feats[fid] = Feature(fid, rest, ticket, fset, n)
+    return feats, found
+
+
 # ------------------------------------------------------------------ commands (filled in by later tasks)
 
 def cmd_check(tier, root, files):
     conf = load_conf(root)
     d = fdd_dir(root, conf)
-    if not os.path.isfile(os.path.join(d, "features.md")):
-        return 0
-    return 0
+    fpath = os.path.join(d, "features.md")
+    out = []
+    if not os.path.isfile(fpath):
+        return emit(out)
+    feats, fmt = parse_features(root, conf, fpath)
+    edited = {os.path.normpath(os.path.join(root, f)) for f in files}
+    if tier == "full" or (tier == "edit" and fpath in edited):
+        out += fmt
+    return emit(out)
 
 
 def cmd_msg(root, path):
