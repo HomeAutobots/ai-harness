@@ -751,6 +751,19 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "unlisted ID in a message is fine"  bash -c "cd '$F' && git commit -q --allow-empty -m 'F-77: not ours'"
   out="$(cd "$F" && git commit -q --allow-empty -m 'Add sale total' -m 'mentions F-12 in the body' 2>&1 || true)"
   t  "leak in the message body is caught" has "$out" "commit message line 3: F-12 is a private feature ID"
+  (cd "$F" && .agents/bin/tasks set f-12-total T1 "done" "$(git rev-parse --short HEAD)" >/dev/null)
+  "$F/.agents/bin/verify" --tier=full >/dev/null 2>&1 || true
+  P="$F/.agents/cache/fdd-progress.md"
+  t  "report: built"                   grep -qx -- '- F-12 Calculate the total of a sale: 89% built \[PROJ-123\]' "$P"
+  "$FDDX" approve inspect F-12 >/dev/null
+  "$F/.agents/bin/verify" --tier=full >/dev/null 2>&1 || true
+  t  "report: inspected"               grep -qx -- '- F-12 Calculate the total of a sale: 100% inspected \[PROJ-123\]' "$P"
+  t  "report: designed only"           grep -qx -- '- F-13 Apply a discount to a sale line: 41% designed' "$P"
+  t  "report: not started"             grep -qx -- '- F-14 Refund the total of a sale: 0% not started' "$P"
+  t  "report: set percent"             grep -qx '## FS-1 Making a sale: 47%' "$P"
+  tnot "report has no dates"           grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}' "$P"
+  echo more > "$F/notes.txt"; git -C "$F" add notes.txt; (cd "$F" && git commit -qm 'Add notes')
+  t  "inspection survives later commits" bash -c "'$FDDX' status F-12 | grep -q '100% inspected'"
 fi
 
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
