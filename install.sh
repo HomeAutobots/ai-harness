@@ -139,6 +139,7 @@ for s in $STACKS; do
   rm -rf "${DEST:?}/.agents/stacks/$s"
   mkdir -p "$DEST/.agents/stacks"
   cp -R "$HARNESS/stacks/$s" "$DEST/.agents/stacks/$s"
+  find "$DEST/.agents/stacks/$s" -name __pycache__ -type d -prune -exec rm -rf {} +   # from a dev checkout
   # A stack's tier scripts replace the generic stubs, never tailored scripts.
   for tier in edit turn full; do
     t="$DEST/.agents/checks/$tier.sh"
@@ -159,6 +160,7 @@ for w in $WORKFLOWS; do
   rm -rf "${DEST:?}/.agents/workflows/$w" "${DEST:?}/.agents/skills/$w"
   mkdir -p "$DEST/.agents/workflows" "$DEST/.agents/skills"
   cp -R "$HARNESS/workflows/$w" "$DEST/.agents/workflows/$w"
+  find "$DEST/.agents/workflows/$w" -name __pycache__ -type d -prune -exec rm -rf {} +   # from a dev checkout
   mv "$DEST/.agents/workflows/$w/skill" "$DEST/.agents/skills/$w"
   # Settings are project-owned: appended once, never overwritten.
   snip="$HARNESS/workflows/$w/harness.conf.snippet"
@@ -199,8 +201,12 @@ done
 printf '%s\n' "$VERSION" > "$DEST/.agents/HARNESS_VERSION"
 chmod +x "$DEST"/.agents/bin/* "$DEST"/.agents/hooks/run "$DEST"/.agents/checks/*.sh
 for w in $WORKFLOWS; do
-  [ -d "$DEST/.agents/workflows/$w/checks" ] && chmod +x "$DEST/.agents/workflows/$w/checks/"*.sh
-  [ -d "$DEST/.agents/workflows/$w/bin" ] && chmod +x "$DEST/.agents/workflows/$w/bin/"*
+  if [ -d "$DEST/.agents/workflows/$w/checks" ]; then
+    find "$DEST/.agents/workflows/$w/checks" -type f -name '*.sh' -exec chmod +x {} +
+  fi
+  if [ -d "$DEST/.agents/workflows/$w/bin" ]; then
+    find "$DEST/.agents/workflows/$w/bin" -type f -exec chmod +x {} +
+  fi
 done
 
 "$DEST/.agents/bin/sync"

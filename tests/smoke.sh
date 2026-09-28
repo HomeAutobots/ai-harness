@@ -844,8 +844,14 @@ printf '#!/usr/bin/env bash\ngrep -q bad "$AGENTS_ROOT/.agents/demo/state" 2>/de
 D2="$HX/workflows/demo2"; mkdir -p "$D2/checks" "$D2/skill"
 printf -- '---\nname: demo2\ndescription: Second test pack.\n---\n\n# Demo 2\n' > "$D2/skill/SKILL.md"
 printf '#!/usr/bin/env bash\ngrep -q OTHER-ID "$1" && { echo "other pack says no"; exit 1; }\nexit 0\n' > "$D2/checks/commit-msg.sh"
+mkdir -p "$DP/__pycache__"; touch "$DP/__pycache__/x.pyc"   # left behind by a dev checkout
+D3="$HX/workflows/demo3"; mkdir -p "$D3/checks" "$D3/bin" "$D3/skill"   # empty bin/, no .sh in checks/
+printf -- '---\nname: demo3\ndescription: Third test pack.\n---\n\n# Demo 3\n' > "$D3/skill/SKILL.md"
+printf 'notes\n' > "$D3/checks/README"
+trc  "pack with an empty bin/ installs" 0 "$HX/install.sh" --workflow demo3 "$(repo demo3)"
 D=$(repo demo)
 "$HX/install.sh" --workflow demo "$D" >/dev/null 2>&1
+t    "no __pycache__ copied from a pack" test ! -e "$D/.agents/workflows/demo/__pycache__"
 t    "pack rule appended to policy"    grep -qx 'deny-cmd demo-approve   # approving is a human decision' "$D/.agents/policy.conf"
 if [ "$HAVE_PY" -eq 1 ]; then
   t  "pack rule rendered natively"     grep -q 'Bash(demo-approve' "$D/.claude/settings.json"
