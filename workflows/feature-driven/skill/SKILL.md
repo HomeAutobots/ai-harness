@@ -26,7 +26,7 @@ Write `designs/F-12.md`: approach, entities and files touched, and a test plan (
 
 ## 5. Build by feature, then check-in 3
 - Tests from the design's test plan first, then the code. `verify` passes.
-- Never write a private feature ID in code, tests, docs, or commit messages; use the ticket key or nothing. `verify` and the commit hook reject it.
+- Never write a private feature ID in code, tests, docs, commit messages, branch summaries (`gitflow start PROJ-123 <summary>`), plan titles, or PR text; use the ticket key or nothing. `verify` and the commit hook catch code and messages; the rest is on you.
 - Commit, record it (`tasks set <slug> <T-id> done <sha>`), validate the change, then ask for `fdd approve inspect F-12`. The feature is done after that.
 
 ## Report

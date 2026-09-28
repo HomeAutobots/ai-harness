@@ -1,6 +1,7 @@
 # feature-driven workflow (install.sh --workflow feature-driven). harness-tailor fills these in.
-# Where the model, feature list, designs, and approvals live. Local, never committed:
-# repo-relative (ignored by the seeded .gitignore) or an absolute path outside the repo.
+# Where the model, feature list, designs, and approvals live. Local, never committed: .agents/fdd
+# (ignored by the seeded .gitignore), another repo dir with its own .gitignore ('*' and '!.gitignore';
+# verify reports fdd-not-local without one), or an absolute path outside the repo.
 FDD_DIR=".agents/fdd"
 # What a private feature ID looks like (Python regex).
 FDD_ID_PATTERN="F-[0-9]+"

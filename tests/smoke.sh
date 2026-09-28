@@ -769,7 +769,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "inspection survives later commits" bash -c "'$FDDX' status F-12 | grep -q '100% inspected'"
   for c in ".agents/workflows/feature-driven/bin/fdd approve list" \
            "bash ./.agents/workflows/feature-driven/bin/fdd approve design F-12" \
-           "python3 .agents/workflows/feature-driven/fdd_tools.py approve . list"; do
+           "python3 .agents/workflows/feature-driven/fdd_tools.py approve . list" \
+           "cd .agents/workflows/feature-driven/bin && ./fdd approve list" \
+           ".agents/workflows/feature-driven/bin/fdd 'approve' list" \
+           "cd .agents/workflows/feature-driven/bin && PATH=.:\$PATH 'fdd' approve list"; do
     trc  "agent can't: $c" 2  hook "$F" pre-tool claude "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$c\"}}"
   done
   trc  "agent may run fdd status" 0  hook "$F" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":".agents/workflows/feature-driven/bin/fdd status"}}'
@@ -780,6 +783,42 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "FDD_DIR outside the repo works"  bash -c "'$FDDX' status | grep -q '^list: approved'"
   mv "$FD.hidden" "$FD"
   edit "$F/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
+  FC="$F/.agents/workflows/feature-driven/checks"
+  pk(){ local tier="$1"; shift; env AGENTS_ROOT="$F" bash "$FC/$tier.sh" "$@" 2>&1 || true; }
+  cp -R "$FD" "$F/.agents/other"; rm -f "$F/.agents/other/.gitignore"
+  edit "$F/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/other"|'
+  t  "unignored FDD_DIR in the repo is a finding" has "$(pk turn)" ".agents/other/features.md:1: error: [fdd-not-local] FDD files must stay local"
+  printf '*\n!.gitignore\n' > "$F/.agents/other/.gitignore"
+  trc "ignored FDD_DIR in the repo passes" 0 env AGENTS_ROOT="$F" bash "$FC/turn.sh"
+  rm -rf "$F/.agents/other"
+  edit "$F/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
+  git -C "$F" add -f .agents/fdd/model.md
+  t  "force-added FDD file is a finding" has "$(pk turn)" ".agents/fdd/model.md:1: error: [fdd-not-local]"
+  git -C "$F" rm -q --cached .agents/fdd/model.md
+  printf '// F-12 total\n' > "$F/src/new.cpp"
+  t  "empty FDD_DIR means the default" has "$(env FDD_DIR= AGENTS_ROOT="$F" bash "$FC/turn.sh" 2>&1)" "src/new.cpp:1: error: [fdd-leak] F-12"
+  rm -f "$F/src/new.cpp"
+  printf '++ counter\n// F-12 total\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
+  t  "an added '++' line hides no later leak" has "$(pk edit src/sale.cpp)" "src/sale.cpp:2: error: [fdd-leak] F-12"
+  printf '// F-12 total\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
+  t  "a file outside the repo doesn't hide leaks" has "$(pk edit "$EXT/features.md" src/sale.cpp)" "src/sale.cpp:1: error: [fdd-leak] F-12"
+  git -C "$F" checkout -q src/sale.cpp
+  printf '// F-12 total\n' > "$F/src/new.cpp"
+  t  "leak in a new untracked file"    has "$(pk turn)" "src/new.cpp:1: error: [fdd-leak] F-12"
+  rm -f "$F/src/new.cpp"
+  out="$(env FDD_ID_PATTERN='F-[' AGENTS_ROOT="$F" bash "$FC/turn.sh" 2>&1)" && rc=0 || rc=$?
+  t  "bad FDD_ID_PATTERN is a tooling problem" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q '^infra: FDD_ID_PATTERN isn.t a valid Python regex'" _ "$out"
+  out="$("$FDDX" 2>&1)" && rc=0 || rc=$?
+  t  "fdd usage"                       bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q '^usage: fdd'" _ "$out"
+  edit "$F/.agents/harness.conf" "s|^FDD_DIR=.*|  FDD_DIR='$EXT'|"
+  (cd "$F" && .agents/bin/tasks set f-12-total T2 doing >/dev/null)
+  printf 'int total(int a, int b) { return a + b + 1; }\n' > "$F/src/sale.cpp"
+  t  "FDD_DIR in single quotes: design gate" has "$("$F/.agents/bin/verify" || true)" "building F-13, but its design isn't approved"
+  "$FDDX" approve design F-13 >/dev/null
+  t  "approval outside the repo refreshes the cache" "$F/.agents/bin/verify"
+  git -C "$F" checkout -q src/sale.cpp
+  (cd "$F" && .agents/bin/tasks set f-12-total T2 todo >/dev/null)
+  edit "$F/.agents/harness.conf" 's|^ *FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
   "$HARNESS/install.sh" --workflow req-driven "$F" >/dev/null 2>&1
   t  "both workflows listed"           grep -q '^WORKFLOWS="feature-driven req-driven"' "$F/.agents/harness.conf"
   printf '// F-12 again\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"

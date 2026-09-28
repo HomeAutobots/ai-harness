@@ -15,7 +15,7 @@ Settings come from .agents/harness.conf (environment variables override):
   fdd_tools.py msg <root> <message-file>                  commit messages carry no private feature IDs
   fdd_tools.py approve <root> list | design <ID> | inspect <ID>   record a human approval
   fdd_tools.py status <root> [ID]                         approvals and milestones, no dates
-Exit: 0 clean, 1 findings, 2 usage.
+Exit: 0 clean, 1 findings, 2 usage, 3 tooling problem (e.g. a pattern that isn't a valid regex).
 """
 import datetime
 import fnmatch
@@ -56,8 +56,19 @@ def load_conf(root):
     for k in list(conf):
         if k in os.environ:
             conf[k] = os.environ[k]
+    conf["FDD_DIR"] = conf["FDD_DIR"] or ".agents/fdd"  # empty means the default, as in checks/state.sh
     conf["ticket"] = read_conf(os.path.join(root, ".agents", "git.conf"), "GIT_").get("GIT_TICKET") or DEFAULT_TICKET
+    for key, name in (("FDD_ID_PATTERN", "FDD_ID_PATTERN"), ("FDD_NAME_PATTERN", "FDD_NAME_PATTERN"),
+                      ("ticket", "GIT_TICKET")):
+        try:
+            re.compile(conf[key])
+        except re.error as e:
+            raise ConfError("%s isn't a valid Python regex: %s" % (name, e))
     return conf
+
+
+class ConfError(Exception):
+    pass
 
 
 def fdd_dir(root, conf):
@@ -125,24 +136,37 @@ def matches_any(path, globs):
 # ------------------------------------------------------------------ git
 
 def git(root, *args):
-    return subprocess.run(["git", "-C", root] + list(args), capture_output=True, text=True,
-                          errors="replace").stdout
+    return subprocess.run(["git", "-C", root, "-c", "core.quotePath=false"] + list(args), capture_output=True,
+                          text=True, errors="replace").stdout
+
+
+def in_repo(root, path):
+    return not os.path.relpath(os.path.join(root, path), root).startswith("..")
 
 
 def added_lines(root, files):
     """{path: {line_no: text}} for lines added in the working tree vs HEAD, untracked included."""
     out = {}
+    if files:
+        files = [f for f in files if in_repo(root, f)]  # git rejects the whole call for one outside path
+        if not files:
+            return out
     has_head = subprocess.run(["git", "-C", root, "rev-parse", "-q", "--verify", "HEAD"],
                               capture_output=True).returncode == 0
     if has_head:
-        path, ln = None, 0
+        path, ln, header = None, 0, False
         for line in git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", *files).splitlines():
-            if line.startswith("+++ "):
-                path = line[6:] if line.startswith("+++ b/") else None
+            if line.startswith("diff --git "):
+                path, header = None, True
+            elif header and line.startswith("+++ "):
+                p = line[4:]
+                p = p[:-1] if p.endswith("\t") else p
+                path = p[2:] if p.startswith("b/") else None
             elif line.startswith("@@"):
+                header = False
                 m = re.match(r"@@ -\S+ \+(\d+)", line)
                 ln = int(m.group(1)) if m else 0
-            elif line.startswith("+") and path:
+            elif line.startswith("+") and path and not header:
                 out.setdefault(path, {})[ln] = line[1:]
                 ln += 1
     for f in git(root, "ls-files", "-o", "--exclude-standard", "--", *files).splitlines():
@@ -325,6 +349,8 @@ def cmd_check(tier, root, files):
                                "restore it; to stop using the workflow, remove feature-driven from WORKFLOWS instead"))
         return emit(out)
     feats, fmt = parse_features(root, conf, fpath)
+    if tier != "edit":
+        out += not_local(root, d, fpath)
     edited = {os.path.normpath(os.path.join(root, f)) for f in files}
     if tier == "full" or (tier == "edit" and fpath in edited):
         out += fmt
@@ -382,6 +408,25 @@ def cmd_check(tier, root, files):
     if tier == "full":
         write_report(root, d, conf, feats, approvals, rows)
     return emit(out)
+
+
+def not_local(root, d, fpath):
+    """fdd-not-local findings when FDD_DIR is inside the repo and git tracks or doesn't ignore it."""
+    rel = os.path.relpath(d, root)
+    if rel.startswith(".."):
+        return []
+    fix = ("add a .gitignore with '*' and '!.gitignore' to %s (or set FDD_DIR to .agents/fdd), "
+           "and git rm --cached anything already tracked" % rel)
+    out = []
+    keep = os.path.normpath(os.path.join(rel, ".gitignore"))
+    for f in git(root, "ls-files", "-z", "--", rel).split("\0"):
+        if f and os.path.normpath(f) != keep:
+            out.append(finding(f, 1, "fdd-not-local", "FDD files must stay local, but git tracks this one", fix))
+    frel = os.path.relpath(fpath, root)
+    if subprocess.run(["git", "-C", root, "check-ignore", "-q", "--no-index", frel],
+                      capture_output=True).returncode == 1:
+        out.append(finding(frel, 1, "fdd-not-local", "FDD files must stay local, but git doesn't ignore %s" % rel, fix))
+    return out
 
 
 def write_report(root, d, conf, feats, approvals, rows):
@@ -474,7 +519,18 @@ def cmd_approve(root, args):
 
 
 def main(argv):
-    a = argv[1:]
+    try:
+        return dispatch(argv[1:])
+    except ConfError as e:
+        print("infra: %s" % e)
+    except re.error as e:
+        print("infra: a FDD_* or GIT_TICKET pattern isn't a valid Python regex: %s" % e)
+    except Exception as e:  # a crash is a tooling problem, not findings
+        print("infra: fdd_tools failed: %s" % e)
+    return 3
+
+
+def dispatch(a):
     if len(a) >= 3 and a[0] == "check" and a[1] in ("edit", "turn", "full"):
         return cmd_check(a[1], os.path.abspath(a[2]), a[3:])
     if len(a) == 3 and a[0] == "msg":

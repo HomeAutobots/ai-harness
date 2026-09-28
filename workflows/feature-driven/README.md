@@ -34,6 +34,7 @@ inspection records the commit and is final.
 |---|---|---|
 | edit, turn, full | `fdd-leak` | a feature ID from your list appears in a changed line of shared code, tests, or docs |
 | edit (when the list is edited), full | `fdd-format` | duplicate ID, feature outside a set, name or ticket in the wrong shape |
+| turn, full | `fdd-not-local` | `FDD_DIR` is in the repo but git tracks files in it or doesn't ignore it |
 | turn, full | `fdd-list-missing` | the approved list was deleted |
 | turn, full | `fdd-list-unapproved` | in-scope code changed while the list isn't approved, or changed since |
 | turn, full | `fdd-unknown` | a task in progress names a feature that isn't in the list |
@@ -48,7 +49,17 @@ The full tier writes `.agents/cache/fdd-progress.md`, FDD's parking lot: each fe
 - **Nothing configured, nothing happens.** Until `features.md` exists, every check is quiet and commits pass.
 - **Tracing is local.** A change belongs to the feature whose plan task is `doing`; nothing in the code says so.
 - **Gates.** `FDD_ASK` picks the check-ins that need your approval; the others get an agent review only.
-- **Known gap.** Policy blocks the approve command, not file writes, so an agent could still edit
-  `approvals` by hand. It's local, so review `fdd status` before trusting it.
+- **Known gaps.** Policy blocks the approve command, not file writes, so an agent could still edit
+  `approvals` by hand. It's local, so review `fdd status` before trusting it. The command rules match
+  patterns, not intent: an agent that writes its own script to append an approval is outside them.
+  Private IDs can also reach shared places the checks don't read: a branch summary
+  (`gitflow start PROJ-123 <summary>`), a plan title that ends up in a PR body, or code committed
+  before a turn gate ran (`fdd-leak` diffs against `HEAD`, so it only sees uncommitted changes).
+- **Patterns are Python regexes.** `FDD_ID_PATTERN`, `FDD_NAME_PATTERN`, and `GIT_TICKET` (from
+  `.agents/git.conf`, used to check ticket keys) must all be valid Python regexes. An invalid one is
+  reported as a tooling problem (`infra:`, exit 3).
+- **Matching.** Feature IDs match case-sensitively: with the default pattern, `f-12` isn't `F-12`.
+- **Environment overrides.** `FDD_*` environment variables override `.agents/harness.conf`, but they
+  aren't part of `verify`'s cache key. Run `verify --no-cache` after changing one.
 - **python3.** The checks need it (a missing python3 is reported as a tooling problem). The commit check
   blocks without it once a feature list exists.

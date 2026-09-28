@@ -5,5 +5,8 @@
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 command -v python3 >/dev/null 2>&1 || { echo "fdd: python3 not found" >&2; exit 3; }
 cmd="${1:-}"
-[ $# -gt 0 ] && shift
+case "$cmd" in
+  approve|status) shift ;;
+  *) printf 'usage: fdd approve list | design <ID> | inspect <ID>\n       fdd status [ID]\n' >&2; exit 2 ;;
+esac
 exec python3 "$ROOT/.agents/workflows/feature-driven/fdd_tools.py" "$cmd" "$ROOT" "$@"
