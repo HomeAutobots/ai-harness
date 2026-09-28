@@ -97,7 +97,7 @@ Every repo's git workflow is described in config and carried out by one CLI, `.a
 - **Protected branches are the project's call.** Nothing is protected by default, which suits solo and trunk-based repos. Set any names or globs, such as `GIT_PROTECTED="dev/main release/*"`; `{base}` stands for whatever `GIT_BASE` is.
 - **Plans link to branches only if you want.** `tasks link <slug>` records a plan's branch so `gitflow pr` can include it. Plans work without branches, and branches without plans.
 - **Enforcement:**
-  - Local git hooks (`commit-msg`, `pre-push`, and `prepare-commit-msg` when there's a commit template) apply to you and to every tool: message format, trailers, protected branches, force pushes. They're installed only once git.conf has something for them to enforce (`sync` adds them when it does). An existing `core.hooksPath` (husky, pre-commit) is left alone, with the lines to add.
+  - Local git hooks (`commit-msg`, `pre-push`, and `prepare-commit-msg` when there's a commit template) apply to you and to every tool: message format, trailers, protected branches, force pushes. They're installed only once git.conf, or an installed workflow pack, has something for them to enforce (`sync` adds them when it does). An existing `core.hooksPath` (husky, pre-commit) is left alone, with the lines to add.
   - The policy hook checks agent commands before they run: protected pushes, force pushes, branch names, PR base, rebase vs merge, steps outside `GIT_AGENT_MAY`, and approving PRs, which agents never do.
   - When the project's git.conf sets `GIT_AGENT_MAY` explicitly, the forbidden steps are also rendered as native deny rules (Claude Code, Codex). Personal settings never land in committed files, so CI and every developer render the same thing.
 
@@ -130,6 +130,11 @@ Each task starts the agent at the commit before a real fix; success means that f
 Stack packs answer "how do we build and test this language." Workflow packs answer "in what order, and with what evidence, do we change things." They're independent, so a project can combine `cpp-cmake` with `req-driven`.
 
 `install.sh --workflow <name>` copies `workflows/<name>` into `.agents/workflows/<name>` (harness-owned), installs its skill, and appends its settings to `.agents/harness.conf` once. `verify` then runs the pack's checks for each tier after the project's own tier scripts, so nothing in `.agents/checks/` has to change.
+
+A pack can also ship:
+- `policy.conf.snippet`: rules appended to `.agents/policy.conf` once. Its first line is a marker comment; while the marker is there, reinstalls add nothing, so a rule you delete stays deleted.
+- `seed/`: files copied into the project once and never overwritten (project-owned), e.g. `seed/.agents/<name>/.gitignore` to keep the pack's working files local. Harness-owned paths are skipped.
+- `checks/commit-msg.sh <file>`: extra commit-message rules. `gitflow` runs it everywhere it checks messages (the `commit-msg` hook, `gitflow commit`, `check`, and pre-push). Exit 1 or 2 rejects the commit with its output. Any other failure (a missing tool, a crash) also blocks, since an unchecked message could carry what the check exists to stop; a human can bypass with `git commit --no-verify`, which the policy denies to agents. A pack that prefers to let commits through handles its own missing tools and exits 0. It sees every message, including merge, fixup, and revert messages that the git.conf rules skip. Shipping one is enough for the git hooks to be installed.
 
 - **req-driven**: every change starts from a requirement ID in any exported requirements source (CSV, JSON, Markdown, text). Deterministic checks: IDs must exist, new tests must name the requirement they verify, changes in scope must reference one (in code, tests, or the plan task in progress), and the full tier writes a requirement to code to tests trace with optional untested-requirement gating. Standard-agnostic. See `workflows/req-driven/README.md`.
 

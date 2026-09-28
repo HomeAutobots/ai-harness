@@ -553,6 +553,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   commit "$W" base
   "$HARNESS/install.sh" --workflow req-driven "$W" >/dev/null 2>&1
   t  "workflow recorded"               grep -q '^WORKFLOWS="req-driven"' "$W/.agents/harness.conf"
+  t  "no message check, no git hooks"  test ! -e "$W/.git/hooks/commit-msg"
   t  "settings appended once"          test "$(grep -c '^REQ_SOURCE=' "$W/.agents/harness.conf")" -eq 1
   t  "skill installed and mirrored"    test -f "$W/.claude/skills/req-driven/SKILL.md"
   t  "skill in index"                  grep -q '`req-driven`' "$W/AGENTS.md"
@@ -656,6 +657,63 @@ EOF
 else
   echo "cpp-cmake stack (skipped: needs python3, cmake, c++)"; SKIP=$((SKIP + 1))
 fi
+
+echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
+HX="$WORK/hx"; mkdir -p "$HX"   # a copy of the harness plus a test pack
+cp -R "$HARNESS/install.sh" "$HARNESS/VERSION" "$HARNESS/template" "$HARNESS/stacks" "$HARNESS/workflows" "$HX/"
+DP="$HX/workflows/demo"; mkdir -p "$DP/checks" "$DP/skill" "$DP/seed/.agents/demo"
+printf -- '---\nname: demo\ndescription: Test pack.\n---\n\n# Demo\n' > "$DP/skill/SKILL.md"
+printf '# demo workflow\nDEMO_ON="1"\n' > "$DP/harness.conf.snippet"
+printf '# demo workflow\ndeny-cmd demo-approve   # approving is a human decision\n' > "$DP/policy.conf.snippet"
+printf '*\n' > "$DP/seed/.agents/demo/.gitignore"
+printf '#!/usr/bin/env bash\ncat >/dev/null\ngrep -q SECRET-ID "$1" && { echo "private ID in commit message"; exit 1; }\ngrep -q BLOCK-ME "$1" && { echo "blocked by policy"; exit 2; }\ngrep -q BROKEN "$1" && { echo "infra: demo tool missing"; exit 3; }\nexit 0\n' > "$DP/checks/commit-msg.sh"
+D2="$HX/workflows/demo2"; mkdir -p "$D2/checks" "$D2/skill"
+printf -- '---\nname: demo2\ndescription: Second test pack.\n---\n\n# Demo 2\n' > "$D2/skill/SKILL.md"
+printf '#!/usr/bin/env bash\ngrep -q OTHER-ID "$1" && { echo "other pack says no"; exit 1; }\nexit 0\n' > "$D2/checks/commit-msg.sh"
+D=$(repo demo)
+"$HX/install.sh" --workflow demo "$D" >/dev/null 2>&1
+t    "pack rule appended to policy"    grep -qx 'deny-cmd demo-approve   # approving is a human decision' "$D/.agents/policy.conf"
+if [ "$HAVE_PY" -eq 1 ]; then
+  t  "pack rule rendered natively"     grep -q 'Bash(demo-approve' "$D/.claude/settings.json"
+fi
+t    "pack seed file created"          test -f "$D/.agents/demo/.gitignore"
+t    "snippet and seed not left in pack" bash -c "test ! -e '$D/.agents/workflows/demo/policy.conf.snippet' && test ! -e '$D/.agents/workflows/demo/seed'"
+echo notes > "$D/.agents/demo/notes.md"
+t    "seeded ignore keeps files local" git -C "$D" check-ignore -q .agents/demo/notes.md
+printf 'mine\n' > "$D/.agents/demo/.gitignore"
+"$HX/install.sh" "$D" >/dev/null 2>&1
+t    "rule appended once"              bash -c "test \"\$(grep -c '^deny-cmd demo-approve' '$D/.agents/policy.conf')\" = 1"
+t    "seed file never overwritten"     grep -qx mine "$D/.agents/demo/.gitignore"
+edit "$D/.agents/policy.conf" '/^deny-cmd demo-approve/d'
+"$HX/install.sh" "$D" >/dev/null 2>&1
+tnot "deleted rule stays deleted"      grep -q '^deny-cmd demo-approve' "$D/.agents/policy.conf"
+t    "message check alone installs hooks" grep -q 'ai-harness gitflow' "$D/.git/hooks/commit-msg"
+echo a > "$D/a.txt"; git -C "$D" add a.txt
+out="$(cd "$D" && git commit -qm 'Add SECRET-ID notes' 2>&1 || true)"
+t    "pack check rejects a commit"     bash -c "printf '%s' \"\$1\" | grep -q 'private ID in commit message'" _ "$out"
+t    "rejected commit not made"        bash -c "test -z \"\$(git -C '$D' log -1 --format=%s | grep SECRET-ID)\""
+t    "clean message commits"           bash -c "cd '$D' && git commit -qm 'Add notes'"
+echo b > "$D/b.txt"; git -C "$D" add b.txt
+out="$(cd "$D" && git commit -qm 'BROKEN tool run' 2>&1)" && rc=0 || rc=$?
+t    "pack tooling problem blocks"     test "$rc" != 0
+t    "and says why"                    bash -c "printf '%s' \"\$1\" | grep -q \"couldn't check the message (exit 3)\" && printf '%s' \"\$1\" | grep -q 'infra: demo tool missing'" _ "$out"
+tnot "no commit made"                  bash -c "git -C '$D' log -1 --format=%s | grep -q BROKEN"
+git -C "$D" reset -q b.txt
+trc  "check-msg reads stdin" 1         bash -c "cd '$D' && printf 'x SECRET-ID\n' | .agents/bin/gitflow check-msg"
+trc  "exit 2 also rejects" 1           bash -c "cd '$D' && printf 'x BLOCK-ME\n' | .agents/bin/gitflow check-msg"
+"$HX/install.sh" --workflow demo2 "$D" >/dev/null 2>&1
+trc  "a pack reading stdin can't hide the next" 1 bash -c "cd '$D' && printf 'x OTHER-ID\n' | .agents/bin/gitflow check-msg"
+printf 'X="${UNSET_IN_CONF}"\n' >> "$D/.agents/harness.conf"
+trc  "harness.conf is parsed, not run" 1 bash -c "cd '$D' && printf 'x SECRET-ID\n' | .agents/bin/gitflow check-msg"
+printf 'GIT_LOCAL_HOOKS="off"\n' >> "$D/.agents/git.conf"; rm -f "$D/.git/hooks/commit-msg"
+echo c > "$D/c.txt"; git -C "$D" add c.txt
+out="$(cd "$D" && .agents/bin/gitflow commit 'Add c' --body='see SECRET-ID' 2>&1 || true)"
+t    "gitflow commit checks without hooks" bash -c "printf '%s' \"\$1\" | grep -q 'private ID in commit message'" _ "$out"
+tnot "and makes no commit"             bash -c "git -C '$D' log -1 --format=%B | grep -q SECRET-ID"
+git -C "$D" checkout -q -b topic && git -C "$D" commit -qm 'Leak SECRET-ID' --no-verify   # check looks beyond the base
+t    "history check sees pack rules"   bash -c "cd '$D' && .agents/bin/gitflow check 2>&1 | grep -q 'private ID in commit message'"
+edit "$D/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="demo"/'
+t    "pack out of WORKFLOWS stops checking" bash -c "cd '$D' && printf 'x OTHER-ID\n' | .agents/bin/gitflow check-msg"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" "$HARNESS"

@@ -162,12 +162,38 @@ for w in $WORKFLOWS; do
   mv "$DEST/.agents/workflows/$w/skill" "$DEST/.agents/skills/$w"
   # Settings are project-owned: appended once, never overwritten.
   snip="$HARNESS/workflows/$w/harness.conf.snippet"
-  first_var="$(grep -m1 -o '^[A-Z_]*=' "$snip" 2>/dev/null | tr -d '=')"
+  first_var=""
+  [ -f "$snip" ] && first_var="$(grep -m1 -o '^[A-Z_]*=' "$snip" | tr -d '=' || true)"
   if [ -n "$first_var" ] && ! grep -q "^$first_var=" "$CONF"; then
     cat "$snip" >> "$CONF"
     say "added $w settings to .agents/harness.conf (harness-tailor fills them in)"
   fi
   rm -f "$DEST/.agents/workflows/$w/harness.conf.snippet"
+  # Policy rules are project-owned too: appended once, keyed on the snippet's first line (a marker
+  # comment), so a rule the project deletes on purpose stays deleted while the marker stays.
+  snip="$HARNESS/workflows/$w/policy.conf.snippet"
+  if [ -f "$snip" ]; then
+    marker="$(sed -n '1p' "$snip")"
+    if [ -n "$marker" ] && ! grep -qxF -- "$marker" "$DEST/.agents/policy.conf"; then
+      { echo; cat "$snip"; } >> "$DEST/.agents/policy.conf"
+      say "added $w rules to .agents/policy.conf"
+    fi
+  fi
+  rm -f "$DEST/.agents/workflows/$w/policy.conf.snippet"
+  # Seed files (e.g. a .gitignore for the pack's local working files): project-owned, created once.
+  if [ -d "$HARNESS/workflows/$w/seed" ]; then
+    (cd "$HARNESS/workflows/$w/seed" && find . -type f) | while IFS= read -r f; do
+      f="${f#./}"
+      case "$f" in .agents/bin/*|.agents/lib/*|.agents/hooks/*|.agents/core/*|.agents/skills/*|.agents/workflows/*|.agents/stacks/*)
+        say "warning: $w seeds $f, which is harness-owned; skipped"; continue ;;
+      esac
+      [ -e "$DEST/$f" ] && continue
+      mkdir -p "$(dirname "$DEST/$f")"
+      cp "$HARNESS/workflows/$w/seed/$f" "$DEST/$f"
+      say "created $f"
+    done
+  fi
+  rm -rf "${DEST:?}/.agents/workflows/$w/seed"
 done
 
 printf '%s\n' "$VERSION" > "$DEST/.agents/HARNESS_VERSION"

@@ -18,6 +18,9 @@
 #   gitflow review                                   review comments on this branch's PR/MR
 #   gitflow merge                                    merge the PR/MR (GIT_MERGE_METHOD)
 #   gitflow install-hooks [--quiet]                  commit-msg and pre-push git hooks (when needed)
+# Workflow packs can add commit-message rules: .agents/workflows/<name>/checks/commit-msg.sh <file>
+# (exit 1 or 2 rejects with its output; any other failure, like a missing tool, also blocks).
+# Packs see every message, including merge, fixup, and revert messages that git.conf rules skip.
 # Internal: check-branch <name>, check-msg <file>, check-cmd <command>, hook-commit-msg <file>,
 #           hook-prepare-commit-msg <file> [source], hook-pre-push.
 # Exit: 0 ok, 1 problem, 2 blocked by the workflow (check-cmd).
@@ -113,7 +116,8 @@ protected() {  # nothing is protected unless configured; "{base}" means the base
 }
 
 hooks_needed() {  # is there anything for the local git hooks to enforce?
-  [ -n "$GIT_PROTECTED$GIT_BRANCH$GIT_COMMIT$GIT_COMMIT_PATTERN$GIT_COMMIT_TRAILERS$(commit_template)" ] || [ "$GIT_FORCE" = never ]
+  [ -n "$GIT_PROTECTED$GIT_BRANCH$GIT_COMMIT$GIT_COMMIT_PATTERN$GIT_COMMIT_TRAILERS$(commit_template)$(workflow_msg_scripts)" ] \
+    || [ "$GIT_FORCE" = never ]
 }
 
 # ---------------------------------------------------------------- commit template
@@ -295,6 +299,51 @@ check_branch() {  # prints why a branch name is not allowed
 }
 
 check_msg() {  # check_msg <message file> <branch>: prints what's wrong with a commit message
+  local bad=0
+  check_msg_conf "$@" || bad=1
+  workflow_msg_checks "$1" || bad=1
+  return $bad
+}
+
+workflow_msg_scripts() {  # commit-message checks shipped by installed workflow packs
+  local w
+  [ -f "$ROOT/.agents/harness.conf" ] || return 0
+  # parsed, never executed (git hooks run this on every commit)
+  for w in $(sed -n 's/^WORKFLOWS="\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$ROOT/.agents/harness.conf" | head -1); do
+    [ -f "$ROOT/.agents/workflows/$w/checks/commit-msg.sh" ] && echo "$ROOT/.agents/workflows/$w/checks/commit-msg.sh"
+  done
+  return 0
+}
+
+workflow_msg_checks() {  # workflow_msg_checks <message file>: any nonzero exit rejects, including a check that can't run
+  local s out rc bad=0
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    rc=0
+    out="$(AGENTS_ROOT="$ROOT" bash "$s" "$1" </dev/null 2>&1)" || rc=$?
+    case "$rc" in
+      0) ;;
+      1|2) printf '%s\n' "${out:-rejected by ${s#"$ROOT"/}}"; bad=1 ;;
+      *) # fail closed: an unchecked message could carry what the check exists to stop
+         echo "${s#"$ROOT"/} couldn't check the message (exit $rc), so the commit is blocked"
+         [ -n "$out" ] && printf '%s\n' "$out"
+         echo "fix the tooling it needs (e.g. python3); a human can bypass with git commit --no-verify"
+         bad=1 ;;
+    esac
+  done < <(workflow_msg_scripts)
+  return $bad
+}
+
+msg_gate() {  # msg_gate <message file>: pack rules for gitflow commit, which can't rely on the hook
+  local out
+  out="$(workflow_msg_checks "$1")" && return 0
+  rm -f "$1"
+  echo "gitflow: commit rejected by a workflow pack:" >&2
+  printf '%s\n' "$out" | sed 's/^/  /' >&2
+  exit 1
+}
+
+check_msg_conf() {  # check_msg_conf <message file> <branch>: the git.conf rules
   local f="$1" b="${2:-}" subj tk bad=0 t key tmpl
   subj="$(grep -v '^#' "$f" | sed -n '/[^[:space:]]/{p;q;}')"
   case "$subj" in "Merge "*|"fixup! "*|"squash! "*|"amend! "*|"Revert \""*) return 0 ;; esac
@@ -434,7 +483,8 @@ cmd_commit() {
     }
     [ "$all" -eq 1 ] && git add -u
     if git diff --cached --quiet; then rm -f "$msg"; die "nothing staged; git add the files first (or -a for all tracked changes)"; fi
-    git commit -q -F "$msg" || { rm -f "$msg"; exit 1; }
+    msg_gate "$msg"
+  git commit -q -F "$msg" || { rm -f "$msg"; exit 1; }
     rm -f "$msg"
     git log -1 --format='%h %s'
     return 0
@@ -457,6 +507,7 @@ cmd_commit() {
   fi
   [ "$all" -eq 1 ] && git add -u
   if git diff --cached --quiet; then rm -f "$msg"; die "nothing staged; git add the files first (or -a for all tracked changes)"; fi
+  msg_gate "$msg"
   git commit -q -F "$msg" || { rm -f "$msg"; exit 1; }
   rm -f "$msg"
   git log -1 --format='%h %s'
@@ -629,7 +680,7 @@ cmd_install_hooks() {
   case "$GIT_LOCAL_HOOKS" in
     off) [ "$quiet" -eq 1 ] || echo "gitflow: git hooks off (GIT_LOCAL_HOOKS=off)"; return 0 ;;
     on) ;;
-    *) hooks_needed || { [ "$quiet" -eq 1 ] || echo "gitflow: no git hooks needed (nothing in git.conf to enforce)"; return 0; } ;;
+    *) hooks_needed || { [ "$quiet" -eq 1 ] || echo "gitflow: no git hooks needed (nothing in git.conf or workflow packs to enforce)"; return 0; } ;;
   esac
   git rev-parse --git-dir >/dev/null 2>&1 || return 0
   hp="$(git config core.hooksPath)"
@@ -720,7 +771,7 @@ hook_commit_msg() {
   local b out
   b="$(current_branch)"
   out="$(check_msg "$1" "$b")" && { tidy_optional "$1"; return 0; }
-  echo "commit rejected by this repo's git workflow (.agents/git.conf):" >&2
+  echo "commit rejected by this repo's git workflow (.agents/git.conf, workflow packs):" >&2
   printf '%s\n' "$out" | sed 's/^/  /' >&2
   echo "  tip: .agents/bin/gitflow commit \"<summary>\" builds a valid message" >&2
   return 1
@@ -867,7 +918,9 @@ case "$cmd" in
   merge) cmd_merge ;;
   install-hooks) cmd_install_hooks "$@" ;;
   check-branch) check_branch "${1:-}" ;;
-  check-msg) check_msg "${1:-/dev/stdin}" "$(current_branch)" ;;
+  check-msg)
+    if [ -n "${1:-}" ]; then check_msg "$1" "$(current_branch)"
+    else m="$(mktemp)"; cat > "$m"; rc=0; check_msg "$m" "$(current_branch)" || rc=$?; rm -f "$m"; exit "$rc"; fi ;;
   check-cmd) cmd_check_cmd "$*" ;;
   hook-commit-msg) hook_commit_msg "${1:-}" ;;
   hook-pre-push) hook_pre_push ;;

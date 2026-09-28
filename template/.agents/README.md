@@ -16,7 +16,8 @@ repo, rendered into whatever each tool reads, plus deterministic feedback tools 
 | `bin/gitflow` | harness | The repo's git workflow: branch, commit, update, push, PR, review, merge, checks |
 | `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, hook adapter |
 | `stacks/<name>/` | harness | Stack packs (e.g. cpp-cmake), refreshed on upgrade |
-| `workflows/<name>/` | harness | Workflow packs (e.g. req-driven): checks verify runs per tier; their skill lands in `skills/` |
+| `workflows/<name>/` | harness | Workflow packs (e.g. req-driven): checks verify runs per tier, optional commit-message checks gitflow runs; their skill lands in `skills/` |
+| files a workflow pack seeds | project | Created once from the pack's `seed/` (e.g. a `.gitignore` for its local working files); a deleted one comes back on the next install |
 | `skills/harness-tailor`, `plan-task`, `review-diff` | harness | Built-in skills |
 | `checks/{edit,turn,full}.sh` | project | What each tier actually runs. Tailor these. |
 | `harness.conf` | project | Adapters, hooks, budgets, stacks |
