@@ -707,6 +707,40 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf '# Model\n\nSale has lines.\n' > "$FD/model.md"
   t  "model edit voids list approval"  bash -c "'$FDDX' status | grep -q '^list: changed since it was approved'"
   "$FDDX" approve list >/dev/null
+  printf 'int total(int a, int b) { return a + b + 0; }\n' > "$F/src/sale.cpp"
+  out="$("$F/.agents/bin/verify" || true)"
+  t  "untraced scoped change"          has "$out" "src/sale.cpp:1: error: [fdd-untraced] this change touches src/** but no plan task in progress names a feature"
+  (cd "$F" && .agents/bin/tasks new f-12-total "Sale total" >/dev/null && .agents/bin/tasks add f-12-total "F-12: add sale total" >/dev/null && .agents/bin/tasks set f-12-total T1 doing >/dev/null)
+  t  "no design blocks build"          has "$("$F/.agents/bin/verify" || true)" "[fdd-no-design] building F-12, but it has no design (.agents/fdd/designs/F-12.md)"
+  mkdir -p "$FD/designs"; printf '# F-12\nApproach: add the lines.\n' > "$FD/designs/F-12.md"
+  t  "unapproved design blocks build"  has "$("$F/.agents/bin/verify" || true)" "building F-12, but its design isn't approved"
+  "$FDDX" approve design F-12 >/dev/null
+  t  "approved design passes"          "$F/.agents/bin/verify"
+  printf 'Also rounding.\n' >> "$FD/designs/F-12.md"
+  t  "edited design needs re-approval" has "$("$F/.agents/bin/verify" || true)" "building F-12, but its design changed since it was approved"
+  "$FDDX" approve design F-12 >/dev/null
+  printf -- '- F-14 Refund the total of a sale\n' >> "$FD/features.md"
+  t  "edited list voids approval"      has "$("$F/.agents/bin/verify" || true)" "[fdd-list-unapproved] the feature list is changed since it was approved"
+  "$FDDX" approve list >/dev/null
+  (cd "$F" && .agents/bin/tasks new misc Misc >/dev/null && .agents/bin/tasks add misc "F-99: mystery" >/dev/null && .agents/bin/tasks set misc T1 doing >/dev/null)
+  t  "unknown feature in the ledger"   has "$("$F/.agents/bin/verify" || true)" "[fdd-unknown] F-99 is not in .agents/fdd/features.md"
+  rm -rf "$F/.agents/plans/misc"
+  printf '// F-12 total\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
+  out="$("$F/.agents/bin/verify" || true)"
+  t  "private ID in code fails"        has "$out" "src/sale.cpp:1: error: [fdd-leak] F-12 is a private feature ID from your local feature list"
+  t  "leak fix names the ticket"       has "$out" "use the ticket key PROJ-123 instead"
+  trc "edit tier catches the leak" 1   "$F/.agents/bin/check" src/sale.cpp
+  printf '// PROJ-123 total, F-77 is not ours\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
+  t  "ticket key and unlisted IDs pass" "$F/.agents/bin/verify"
+  edit "$F/.agents/harness.conf" 's/^FDD_ASK=.*/FDD_ASK="list inspect"/'
+  (cd "$F" && .agents/bin/tasks set f-12-total T1 todo >/dev/null && .agents/bin/tasks add f-12-total "F-13: add a discount" >/dev/null && .agents/bin/tasks set f-12-total T2 doing >/dev/null)
+  printf '# F-13\nApproach: percentage off a line.\n' > "$FD/designs/F-13.md"
+  t  "design outside FDD_ASK needs only the file" "$F/.agents/bin/verify"
+  edit "$F/.agents/harness.conf" 's/^FDD_ASK=.*/FDD_ASK="list design inspect"/'
+  (cd "$F" && .agents/bin/tasks set f-12-total T2 todo >/dev/null && .agents/bin/tasks set f-12-total T1 doing >/dev/null)
+  mv "$FD/features.md" "$FD/features.md.bak"
+  t  "deleted approved list is a finding" has "$("$F/.agents/bin/verify" || true)" "[fdd-list-missing] the feature list was approved but is gone"
+  mv "$FD/features.md.bak" "$FD/features.md"
 fi
 
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

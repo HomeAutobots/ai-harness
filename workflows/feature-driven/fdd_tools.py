@@ -316,14 +316,77 @@ def cmd_check(tier, root, files):
     conf = load_conf(root)
     d = fdd_dir(root, conf)
     fpath = os.path.join(d, "features.md")
+    approvals = read_approvals(d)
+    ask = conf["FDD_ASK"].split()
     out = []
     if not os.path.isfile(fpath):
+        if tier != "edit" and ("list", "-") in approvals:
+            out.append(finding(shown(root, fpath), 1, "fdd-list-missing", "the feature list was approved but is gone",
+                               "restore it; to stop using the workflow, remove feature-driven from WORKFLOWS instead"))
         return emit(out)
     feats, fmt = parse_features(root, conf, fpath)
     edited = {os.path.normpath(os.path.join(root, f)) for f in files}
     if tier == "full" or (tier == "edit" and fpath in edited):
         out += fmt
+    inside = d + os.sep
+    added = added_lines(root, files)
+    ids = Ids(conf["FDD_ID_PATTERN"])
+    for path in sorted(added):
+        if os.path.join(root, path).startswith(inside):
+            continue
+        for n in sorted(added[path]):
+            for i in ids.find(added[path][n]):
+                if i in feats:
+                    tk = feats[i].ticket
+                    out.append(finding(path, n, "fdd-leak", "%s is a private feature ID from your local feature list" % i,
+                                       "remove it; use the ticket key %s instead" % tk if tk else
+                                       "remove it; shared code, tests, and docs don't mention local feature IDs"))
+    if tier == "edit":
+        return emit(out)
+    rows = ledger(root, conf)
+    doing = [r for r in rows if r[2] == "doing"]
+    for rel, n, _, _, fid in doing:
+        if fid not in feats:
+            out.append(finding(rel, n, "fdd-unknown", "%s is not in %s" % (fid, shown(root, fpath)),
+                               "name a feature from the approved list; a new feature needs a new list approval"))
+    scoped = [p for p in sorted(added)
+              if not os.path.join(root, p).startswith(inside) and matches_any(p, conf["FDD_SCOPE"])]
+    if scoped:
+        if "list" in ask:
+            state = approval(approvals, "list", "-", list_hash(d))
+            if state != "current":
+                out.append(finding(shown(root, fpath), 1, "fdd-list-unapproved", "the feature list is %s"
+                                   % ("not approved" if state == "missing" else "changed since it was approved"),
+                                   "validate the model and list, then ask the human to run %s list" % APPROVE))
+        active = sorted({r[4] for r in doing if r[4] in feats})
+        if not active:
+            out.append(finding(scoped[0], 1, "fdd-untraced",
+                               "this change touches %s but no plan task in progress names a feature" % conf["FDD_SCOPE"],
+                               "set the feature's task to doing (tasks set <slug> <T-id> doing), its description "
+                               "starting with the feature ID; if no feature fits, stop and ask"))
+        for fid in active:
+            dp = design_path(d, fid)
+            why = None
+            if not os.path.isfile(dp):
+                why = "it has no design (%s)" % shown(root, dp)
+            elif "design" in ask:
+                state = approval(approvals, "design", fid, sha(dp))
+                if state == "missing":
+                    why = "its design isn't approved"
+                elif state == "stale":
+                    why = "its design changed since it was approved"
+            if why:
+                out.append(finding(scoped[0], 1, "fdd-no-design", "building %s, but %s" % (fid, why),
+                                   "write the design, validate it, and ask the human to run %s design %s; "
+                                   "no code in %s until then" % (APPROVE, fid, conf["FDD_SCOPE"])))
+    if tier == "full":
+        write_report(root, d, conf, feats, approvals, rows)
     return emit(out)
+
+
+def write_report(root, d, conf, feats, approvals, rows):
+    """Placeholder until Task 7."""
+    return None
 
 
 def cmd_msg(root, path):
