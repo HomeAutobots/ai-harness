@@ -579,6 +579,11 @@ if [ "$HAVE_PY" -eq 1 ]; then
   (cd "$W" && .agents/bin/tasks new frames Frames >/dev/null && .agents/bin/tasks add frames "REQ-2: reject zero" >/dev/null && .agents/bin/tasks set frames T1 doing >/dev/null)
   t  "plan task in progress is a trace" "$W/.agents/bin/verify"
   git -C "$W" checkout -q src/frame.cpp; rm -rf "$W/.agents/plans/frames"
+  printf 'int parse(int n) { return n > 1 && n <= 1500; }\n' > "$W/src/frame.cpp"
+  "$W/.agents/bin/verify" >/dev/null 2>&1 || true   # caches the untraced failure
+  (cd "$W" && .agents/bin/tasks new cachecheck C >/dev/null && .agents/bin/tasks add cachecheck "REQ-2: tweak" >/dev/null && .agents/bin/tasks set cachecheck T1 doing >/dev/null)
+  t  "ledger change refreshes the cache" "$W/.agents/bin/verify"
+  git -C "$W" checkout -q src/frame.cpp; rm -rf "$W/.agents/plans/cachecheck"
   edit "$W/.agents/harness.conf" 's/^REQ_REQUIRE_TESTED=0/REQ_REQUIRE_TESTED=1/'
   t  "untested requirement fails full" bash -c "'$W/.agents/bin/verify' --tier=full | grep -q 'REQ-1 has no test'"
   t  "trace report written"            grep -q '| REQ-2 | none | tests/frame_test.cpp:1 |' "$W/.agents/cache/req-trace.md"
@@ -667,6 +672,9 @@ printf '# demo workflow\nDEMO_ON="1"\n' > "$DP/harness.conf.snippet"
 printf '# demo workflow\ndeny-cmd demo-approve   # approving is a human decision\n' > "$DP/policy.conf.snippet"
 printf '*\n' > "$DP/seed/.agents/demo/.gitignore"
 printf '#!/usr/bin/env bash\ncat >/dev/null\ngrep -q SECRET-ID "$1" && { echo "private ID in commit message"; exit 1; }\ngrep -q BLOCK-ME "$1" && { echo "blocked by policy"; exit 2; }\ngrep -q BROKEN "$1" && { echo "infra: demo tool missing"; exit 3; }\nexit 0\n' > "$DP/checks/commit-msg.sh"
+mkdir -p "$DP/bin"; printf '#!/usr/bin/env bash\necho demo\n' > "$DP/bin/demo-tool"   # not executable in the source
+printf '#!/usr/bin/env bash\ncat "$AGENTS_ROOT/.agents/demo/state" 2>/dev/null\n' > "$DP/checks/state.sh"
+printf '#!/usr/bin/env bash\ngrep -q bad "$AGENTS_ROOT/.agents/demo/state" 2>/dev/null && { echo "x:1: error: [demo] state is bad"; exit 1; }\nexit 0\n' > "$DP/checks/turn.sh"
 D2="$HX/workflows/demo2"; mkdir -p "$D2/checks" "$D2/skill"
 printf -- '---\nname: demo2\ndescription: Second test pack.\n---\n\n# Demo 2\n' > "$D2/skill/SKILL.md"
 printf '#!/usr/bin/env bash\ngrep -q OTHER-ID "$1" && { echo "other pack says no"; exit 1; }\nexit 0\n' > "$D2/checks/commit-msg.sh"
@@ -680,6 +688,13 @@ t    "pack seed file created"          test -f "$D/.agents/demo/.gitignore"
 t    "snippet and seed not left in pack" bash -c "test ! -e '$D/.agents/workflows/demo/policy.conf.snippet' && test ! -e '$D/.agents/workflows/demo/seed'"
 echo notes > "$D/.agents/demo/notes.md"
 t    "seeded ignore keeps files local" git -C "$D" check-ignore -q .agents/demo/notes.md
+t    "pack bin made executable"        test -x "$D/.agents/workflows/demo/bin/demo-tool"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$D/.agents/checks/turn.sh"
+echo good > "$D/.agents/demo/state"
+t    "pack state: clean"               "$D/.agents/bin/verify"
+echo bad > "$D/.agents/demo/state"
+t    "pack state change refreshes the cache" bash -c "! '$D/.agents/bin/verify' >/dev/null 2>&1"
+echo good > "$D/.agents/demo/state"
 printf 'mine\n' > "$D/.agents/demo/.gitignore"
 "$HX/install.sh" "$D" >/dev/null 2>&1
 t    "rule appended once"              bash -c "test \"\$(grep -c '^deny-cmd demo-approve' '$D/.agents/policy.conf')\" = 1"

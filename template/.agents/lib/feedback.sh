@@ -46,6 +46,7 @@ agents_changed_files() {
 # agents_state_key [files...]: hash of everything a check result can depend on: the file list
 # asked about, HEAD, the whole working-tree diff, untracked files, and harness config and packs.
 # Whole-tree on purpose: a result for one file can depend on others (headers, a requirements export).
+# Gitignored inputs count too: plan ledgers, and whatever a workflow pack's checks/state.sh prints.
 agents_state_key() {
   (
     cd "$AGENTS_ROOT" || exit 0
@@ -55,6 +56,10 @@ agents_state_key() {
     git ls-files -o --exclude-standard -z | xargs -0 git hash-object -- 2>/dev/null
     cat .agents/harness.conf .agents/checks/* .agents/baselines/* .agents/guard.allow \
       .agents/workflows/*/* .agents/workflows/*/checks/* .agents/stacks/*/* 2>/dev/null
+    cat .agents/plans/*/tasks.json 2>/dev/null
+    for s in .agents/workflows/*/checks/state.sh; do
+      [ -f "$s" ] && bash "$s" 2>/dev/null
+    done
   ) | agents_hash
 }
 

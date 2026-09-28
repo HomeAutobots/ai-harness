@@ -198,7 +198,10 @@ done
 
 printf '%s\n' "$VERSION" > "$DEST/.agents/HARNESS_VERSION"
 chmod +x "$DEST"/.agents/bin/* "$DEST"/.agents/hooks/run "$DEST"/.agents/checks/*.sh
-for w in $WORKFLOWS; do [ -d "$DEST/.agents/workflows/$w/checks" ] && chmod +x "$DEST/.agents/workflows/$w/checks/"*.sh; done
+for w in $WORKFLOWS; do
+  [ -d "$DEST/.agents/workflows/$w/checks" ] && chmod +x "$DEST/.agents/workflows/$w/checks/"*.sh
+  [ -d "$DEST/.agents/workflows/$w/bin" ] && chmod +x "$DEST/.agents/workflows/$w/bin/"*
+done
 
 "$DEST/.agents/bin/sync"
 # Local git hooks (commit-msg, pre-push) so the git workflow holds for humans and every tool.
