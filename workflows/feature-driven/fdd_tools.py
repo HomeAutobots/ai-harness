@@ -209,6 +209,107 @@ def parse_features(root, conf, path):
     return feats, found
 
 
+# ------------------------------------------------------------------ approvals, ledger, milestones
+
+def read_approvals(d):
+    """{(kind, id): value}; the latest line for each wins."""
+    out = {}
+    for line in read_lines(os.path.join(d, "approvals")):
+        parts = line.split("\t")
+        if len(parts) == 5:
+            out[(parts[0], parts[1])] = parts[4]
+    return out
+
+
+def sha(*paths):
+    h = hashlib.sha256()
+    for p in paths:
+        try:
+            with open(p, "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            pass
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def list_hash(d):
+    return sha(os.path.join(d, "model.md"), os.path.join(d, "features.md"))
+
+
+def design_path(d, fid):
+    return os.path.join(d, "designs", fid + ".md")
+
+
+def approval(approvals, kind, fid, current=None):
+    """'current', 'stale', or 'missing'. Inspections are final, so they never go stale."""
+    v = approvals.get((kind, fid))
+    if v is None:
+        return "missing"
+    return "current" if kind == "inspect" or v == current else "stale"
+
+
+def list_state(d, approvals):
+    return {"current": "approved", "stale": "changed since it was approved", "missing": "not approved"}[
+        approval(approvals, "list", "-", list_hash(d))]
+
+
+def ledger(root, conf):
+    """[(tasks.json path, line, status, commit, feature ID)] for plan tasks whose description starts with an ID."""
+    start = re.compile(r"\s*(%s)(?![A-Za-z0-9])" % conf["FDD_ID_PATTERN"])
+    rows = []
+    for tj in sorted(glob.glob(os.path.join(root, ".agents", "plans", "*", "tasks.json"))):
+        rel = os.path.relpath(tj, root)
+        for n, line in enumerate(read_lines(tj), 1):
+            s = line.strip().rstrip(",")
+            if not s.startswith("{"):
+                continue
+            try:
+                task = json.loads(s)
+            except ValueError:
+                continue
+            desc = task.get("desc", "")
+            if not isinstance(desc, str):
+                continue
+            m = start.match(desc)
+            if m:
+                rows.append((rel, n, task.get("status", ""), task.get("commit", ""), m.group(1)))
+    return rows
+
+
+def milestone(d, fid, conf, approvals, rows):
+    """(percent, label), cumulative: each milestone counts only once the ones before it are reached."""
+    ask = conf["FDD_ASK"].split()
+    dp = design_path(d, fid)
+    reached = (
+        os.path.isfile(dp),
+        "design" not in ask or approval(approvals, "design", fid, sha(dp)) == "current",
+        any(r[4] == fid and r[2] == "done" and r[3] for r in rows),
+        "inspect" not in ask or approval(approvals, "inspect", fid) == "current",
+    )
+    pct, label = 0, "not started"
+    for ok, (weight, name) in zip(reached, MILESTONES):
+        if not ok:
+            break
+        pct, label = weight, name
+    return pct, label
+
+
+def progress_lines(d, conf, feats, approvals, rows, only=None):
+    sets = {}
+    for f in feats.values():
+        sets.setdefault(f.set or "(no feature set)", []).append(f)
+    out = []
+    for fset, fs in sets.items():
+        pcts = [milestone(d, f.id, conf, approvals, rows) for f in fs]
+        if only is None:
+            out.append("## %s: %d%%" % (fset, int(round(sum(p for p, _ in pcts) / float(len(pcts))))))
+        for f, (p, label) in zip(fs, pcts):
+            if only in (None, f.id):
+                out.append("- %s %s: %d%% %s%s" % (f.id, f.name, p, label, " [%s]" % f.ticket if f.ticket else ""))
+    return out
+
+
 # ------------------------------------------------------------------ commands (filled in by later tasks)
 
 def cmd_check(tier, root, files):
@@ -234,16 +335,61 @@ def cmd_msg(root, path):
 
 def cmd_status(root, only):
     conf = load_conf(root)
-    fpath = os.path.join(fdd_dir(root, conf), "features.md")
+    d = fdd_dir(root, conf)
+    fpath = os.path.join(d, "features.md")
     if not os.path.isfile(fpath):
         print("list: none yet (%s)" % shown(root, fpath))
         return 0
+    feats, _ = parse_features(root, conf, fpath)
+    if only and only not in feats:
+        print("fdd: %s is not in %s" % (only, shown(root, fpath)), file=sys.stderr)
+        return 1
+    approvals = read_approvals(d)
+    print("list: %s" % list_state(d, approvals))
+    for line in progress_lines(d, conf, feats, approvals, ledger(root, conf), only):
+        print(line)
     return 0
 
 
 def cmd_approve(root, args):
-    print("usage: fdd approve list | design <ID> | inspect <ID>", file=sys.stderr)
-    return 2
+    kinds = {"list": 0, "design": 1, "inspect": 1}
+    if not args or args[0] not in kinds or len(args) != 1 + kinds[args[0]]:
+        print("usage: fdd approve list | design <ID> | inspect <ID>", file=sys.stderr)
+        return 2
+    conf = load_conf(root)
+    d = fdd_dir(root, conf)
+    fpath = os.path.join(d, "features.md")
+    if not os.path.isfile(fpath):
+        print("fdd: no feature list at %s" % shown(root, fpath), file=sys.stderr)
+        return 1
+    feats, fmt = parse_features(root, conf, fpath)
+    kind, fid = args[0], (args[1] if len(args) == 2 else "-")
+    if kind == "list":
+        if fmt:
+            print("\n".join(fmt), file=sys.stderr)
+            print("fdd: fix the list before approving it", file=sys.stderr)
+            return 1
+        value = list_hash(d)
+    elif fid not in feats:
+        print("fdd: %s is not in %s" % (fid, shown(root, fpath)), file=sys.stderr)
+        return 1
+    elif kind == "design":
+        dp = design_path(d, fid)
+        if not os.path.isfile(dp):
+            print("fdd: no design at %s" % shown(root, dp), file=sys.stderr)
+            return 1
+        value = sha(dp)
+    else:
+        value = git(root, "rev-parse", "-q", "--verify", "HEAD").strip()
+        if not value:
+            print("fdd: nothing is committed yet; inspect after the feature's commit", file=sys.stderr)
+            return 1
+    who = (git(root, "config", "user.name").strip() or os.environ.get("USER", "unknown"))
+    who = who.replace("\t", " ").replace("\n", " ")
+    with open(os.path.join(d, "approvals"), "a", encoding="utf-8") as fh:
+        fh.write("\t".join((kind, fid, who, datetime.date.today().isoformat(), value)) + "\n")
+    print("approved %s" % (kind if fid == "-" else "%s %s" % (kind, fid)))
+    return 0
 
 
 def main(argv):

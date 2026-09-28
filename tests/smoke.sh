@@ -695,6 +695,18 @@ if [ "$HAVE_PY" -eq 1 ]; then
   trc "turn tier never runs fdd-format" 0 env AGENTS_ROOT="$F" bash "$F/.agents/workflows/feature-driven/checks/turn.sh" .agents/fdd/features.md
   printf '# Features\n\n## Sales\n### FS-1 Making a sale\n- F-12 Calculate the total of a sale [PROJ-123]\n- F-13 Apply a discount to a sale line\n' > "$FD/features.md"
   tnot "clean list, no format findings" bash -c "'$F/.agents/bin/verify' --tier=full | grep -q fdd-format"
+  t  "status: list not approved"       bash -c "'$FDDX' status | grep -q '^list: not approved'"
+  t  "approve list"                    bash -c "'$FDDX' approve list | grep -qx 'approved list'"
+  t  "list approval recorded"          python3 -c "import sys; r=[l.rstrip('\n').split('\t') for l in open(sys.argv[1])]; assert any(x[0]=='list' and x[1]=='-' and len(x[4])==64 for x in r)" "$FD/approvals"
+  t  "status: list approved"           bash -c "'$FDDX' status | grep -q '^list: approved'"
+  t  "status lists features"           bash -c "'$FDDX' status | grep -qx -- '- F-12 Calculate the total of a sale: 0% not started \[PROJ-123\]'"
+  tnot "status prints no dates"        bash -c "'$FDDX' status | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'"
+  trc "approve design needs the file" 1 "$FDDX" approve design F-12
+  trc "approve needs a listed feature" 1 "$FDDX" approve inspect F-99
+  trc "approve usage" 2                "$FDDX" approve design
+  printf '# Model\n\nSale has lines.\n' > "$FD/model.md"
+  t  "model edit voids list approval"  bash -c "'$FDDX' status | grep -q '^list: changed since it was approved'"
+  "$FDDX" approve list >/dev/null
 fi
 
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
