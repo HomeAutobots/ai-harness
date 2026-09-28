@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# feature-driven workflow CLI. Harness-owned: replaced on upgrade.
+#   fdd approve list | design <ID> | inspect <ID>   record your approval (people only; policy blocks agents)
+#   fdd status [ID]                                 list approval and each feature's milestone
+ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+command -v python3 >/dev/null 2>&1 || { echo "fdd: python3 not found" >&2; exit 3; }
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+exec python3 "$ROOT/.agents/workflows/feature-driven/fdd_tools.py" "$cmd" "$ROOT" "$@"

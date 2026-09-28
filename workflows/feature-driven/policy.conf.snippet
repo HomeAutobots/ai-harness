@@ -1,0 +1,3 @@
+# feature-driven workflow
+deny-cmd .agents/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision
+deny-regex (bin/fdd|fdd_tools\.py)\s+approve   # the same, by any path or through python3

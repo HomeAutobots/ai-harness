@@ -663,6 +663,29 @@ else
   echo "cpp-cmake stack (skipped: needs python3, cmake, c++)"; SKIP=$((SKIP + 1))
 fi
 
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "feature-driven workflow"
+  has(){ printf '%s' "$1" | grep -qF -- "$2"; }
+  F=$(repo fdd)
+  mkdir -p "$F/src" "$F/tests"
+  printf 'int total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
+  commit "$F" base
+  "$HARNESS/install.sh" --workflow feature-driven "$F" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$F/.agents/checks/$tier.sh"; done
+  commit "$F" harness
+  FD="$F/.agents/fdd"; FDDX="$F/.agents/workflows/feature-driven/bin/fdd"
+  t  "fdd settings appended"           grep -q '^FDD_DIR=".agents/fdd"' "$F/.agents/harness.conf"
+  t  "approve denied in policy"        grep -q '^deny-cmd .agents/workflows/feature-driven/bin/fdd approve' "$F/.agents/policy.conf"
+  t  "fdd skill installed"             test -f "$F/.agents/skills/feature-driven/SKILL.md"
+  t  "fdd command executable"          test -x "$FDDX"
+  t  "artifacts stay local"            bash -c "mkdir -p '$FD' && echo x > '$FD/model.md' && git -C '$F' check-ignore -q .agents/fdd/model.md"
+  t  "seeded gitignore itself tracked" bash -c "git -C '$F' ls-files --error-unmatch .agents/fdd/.gitignore"
+  printf 'int total(int a, int b) { return b + a; }\n' > "$F/src/sale.cpp"
+  t  "no feature list: verify quiet"   "$F/.agents/bin/verify"
+  t  "no feature list: status says so" bash -c "'$FDDX' status | grep -q '^list: none yet'"
+  t  "no feature list: commits pass"   bash -c "cd '$F' && git add -A src && git commit -qm 'Swap operands'"
+fi
+
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
 HX="$WORK/hx"; mkdir -p "$HX"   # a copy of the harness plus a test pack
 cp -R "$HARNESS/install.sh" "$HARNESS/VERSION" "$HARNESS/template" "$HARNESS/stacks" "$HARNESS/workflows" "$HX/"

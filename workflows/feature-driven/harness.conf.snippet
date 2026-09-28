@@ -1,0 +1,12 @@
+# feature-driven workflow (install.sh --workflow feature-driven). harness-tailor fills these in.
+# Where the model, feature list, designs, and approvals live. Local, never committed:
+# repo-relative (ignored by the seeded .gitignore) or an absolute path outside the repo.
+FDD_DIR=".agents/fdd"
+# What a private feature ID looks like (Python regex).
+FDD_ID_PATTERN="F-[0-9]+"
+# Changes here need a feature in progress (plan task set to doing) and its design (space-separated globs).
+FDD_SCOPE="src/**"
+# What a feature name looks like (Python regex); empty skips the check.
+FDD_NAME_PATTERN="^\S+ .+ (by|for|of|to|from|in|on|with|into) .+$"
+# Check-ins that need your approval (fdd approve): list design inspect. Others get an agent review only.
+FDD_ASK="list design inspect"
