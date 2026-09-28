@@ -387,9 +387,10 @@ def cmd_check(tier, root, files):
 def write_report(root, d, conf, feats, approvals, rows):
     cache = os.path.join(root, ".agents", "cache")
     os.makedirs(cache, exist_ok=True)
+    weights = ", ".join("%s %d%%" % (label, pct) for pct, label in MILESTONES)
     head = ["# Feature progress", "",
-            "From `%s`, with FDD's milestone weights: designed 41%%, design approved 44%%, built 89%%, "
-            "inspected 100%%." % shown(root, os.path.join(d, "features.md")), ""]
+            "From `%s`, with FDD's milestone weights: %s."
+            % (shown(root, os.path.join(d, "features.md")), weights), ""]
     with open(os.path.join(cache, "fdd-progress.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(head + progress_lines(d, conf, feats, approvals, rows)) + "\n")
 

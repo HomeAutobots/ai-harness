@@ -684,6 +684,8 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "no feature list: verify quiet"   "$F/.agents/bin/verify"
   t  "no feature list: status says so" bash -c "'$FDDX' status | grep -q '^list: none yet'"
   t  "no feature list: commits pass"   bash -c "cd '$F' && git add -A src && git commit -qm 'Swap operands'"
+  t    "no feature list: full tier quiet too" "$F/.agents/bin/verify" --tier=full
+  tnot "no feature list: no report written"   test -f "$F/.agents/cache/fdd-progress.md"
   printf '# Features\n\n## Sales\n- F-9 Orphan feature of a sale\n### FS-1 Making a sale\n- F-12 Calculate the total of a sale [PROJ-123]\n- F-12 Duplicate the total of a sale\n- F-13 Discount\n- F-14 Apply a discount to a sale line [bad]\n- Z-1 Not an ID of any sort\n' > "$FD/features.md"
   out="$("$F/.agents/bin/verify" --tier=full || true)"
   t  "feature outside a set"           has "$out" ".agents/fdd/features.md:4: error: [fdd-format] F-9 isn't in a feature set"
@@ -755,6 +757,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$F/.agents/bin/verify" --tier=full >/dev/null 2>&1 || true
   P="$F/.agents/cache/fdd-progress.md"
   t  "report: built"                   grep -qx -- '- F-12 Calculate the total of a sale: 89% built \[PROJ-123\]' "$P"
+  t  "report header names the source"  grep -qF 'From `.agents/fdd/features.md`, with FDD'"'"'s milestone weights: designed 41%, design approved 44%, built 89%, inspected 100%.' "$P"
   "$FDDX" approve inspect F-12 >/dev/null
   "$F/.agents/bin/verify" --tier=full >/dev/null 2>&1 || true
   t  "report: inspected"               grep -qx -- '- F-12 Calculate the total of a sale: 100% inspected \[PROJ-123\]' "$P"
