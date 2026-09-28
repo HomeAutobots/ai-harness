@@ -227,7 +227,7 @@ def segments(cmd):
             yield seg
 
 
-def shell_denied(cmd, rules, cwd=None):
+def shell_denied(cmd, rules, cwd=None, parent=None):
     if not cmd:
         return None
     try:
@@ -244,9 +244,13 @@ def shell_denied(cmd, rules, cwd=None):
             if any(t == pat or t.startswith(pat + "=") for t in tokens):
                 return "`%s` is blocked by policy%s" % (pat, why)
         elif kind == "deny-regex":
+            if parent is not None and cmd in parent:
+                continue  # already matched against the whole command, where this argument appears verbatim
             try:
                 if re.search(pat, cmd):
-                    return "this command matches a blocked pattern (%s)%s" % (pat, why)
+                    # The reason says what's blocked; the raw regex only helps when there is none.
+                    return ("this command is blocked by policy%s" % why if reason
+                            else "this command matches a blocked pattern (%s)" % pat)
             except re.error:
                 pass
     gitflow = os.path.join(ROOT, ".agents", "bin", "gitflow")
@@ -261,9 +265,9 @@ def shell_denied(cmd, rules, cwd=None):
                     return (p.stdout.strip() or "blocked by this repo's git workflow") + " (.agents/git.conf)"
     for t in tokens:
         if " " in t.strip() and t.strip() != cmd.strip():
-            nested = shell_denied(t, rules, cwd)  # e.g. bash -c "git push"
-            if nested:
-                return nested
+            inner = shell_denied(t, rules, cwd, parent=cmd)  # e.g. bash -c "git push"
+            if inner:
+                return inner
             continue
         if t.startswith("-") or any(c in t for c in "*?[]$"):
             continue
@@ -475,10 +479,17 @@ def open_questions():
 
 
 def paused_for_human():
-    """A plan whose blocked task has an open question (tasks ask): a legitimate place to stop."""
+    """A plan whose blocked (or done, awaiting sign-off) task has an open question (tasks ask):
+    a legitimate place to stop."""
+    clean = None
     for slug, q in open_questions():
         tasks = load_json(os.path.join(ROOT, ".agents", "plans", slug, "tasks.json")) or []
-        if any(isinstance(t, dict) and t.get("id") == q.get("task") and t.get("status") == "blocked" for t in tasks):
+        # A done task awaiting sign-off pauses only while nothing is uncommitted (new files included,
+        # the ledgers aside); new edits get checked.
+        if clean is None and any(isinstance(t, dict) and t.get("status") == "done" for t in tasks):
+            clean = not git("status", "--porcelain", "--", ".", ":(exclude).agents/plans").strip()
+        if any(isinstance(t, dict) and t.get("id") == q.get("task") and (
+                t.get("status") == "blocked" or (t.get("status") == "done" and clean)) for t in tasks):
             return ".agents/plans/%s/questions.json" % slug
     return ""
 

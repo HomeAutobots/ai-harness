@@ -12,7 +12,8 @@
 #   tasks next <slug>                        the task to work on now (exit 1 when all done)
 #   tasks set <slug> <id> <todo|doing|done|blocked> [commit]
 #   tasks ask <slug> <T-id> [--gate=plan|tests|impl] [--force] <question...>
-#                                            record a question for the human (task -> blocked);
+#                                            record a question for the human (task -> blocked,
+#                                            a done task stays done);
 #                                            refuses if the question was already answered
 #   tasks answer <slug> <Q-id|T-id> <answer...>   record the answer; task resumes when none are open
 #   tasks questions [--open] [--plan=<slug>] [words...]   search questions and answers, all plans
@@ -140,12 +141,21 @@ similar() {
     }' | sort -t "$(printf '\t')" -k1,1 -rn
 }
 
-# The plan in play: newest plan with a task in progress or blocked; else _general.
+# The plan in play: the newest plan with a task in progress or blocked. Failing that, the newest plan
+# with a done task waiting for sign-off (an open question on it). Else _general.
 active_plan() {
   local found
   found="$(ls -t "$PLANS" 2>/dev/null | while IFS= read -r d; do
     [ -f "$PLANS/$d/tasks.json" ] || continue
-    if grep -q '"status":"\(doing\|blocked\)"' "$PLANS/$d/tasks.json"; then echo "$d"; break; fi
+    if grep -Eq '"status":"(doing|blocked)"' "$PLANS/$d/tasks.json"; then echo "$d"; break; fi
+  done)"
+  [ -n "$found" ] || found="$(ls -t "$PLANS" 2>/dev/null | while IFS= read -r d; do
+    [ -f "$PLANS/$d/tasks.json" ] && [ -f "$PLANS/$d/questions.json" ] || continue
+    ids="$(parse "$PLANS/$d/tasks.json" | awk -F '\t' '$2 == "done" { printf " %s", $1 }') "
+    if qparse "$PLANS/$d/questions.json" | awk -F '\t' -v ids="$ids" \
+         '$4 == "open" && $2 != "" && index(ids, " " $2 " ") { f = 1 } END { exit f ? 0 : 1 }'; then
+      echo "$d"; break
+    fi
   done)"
   echo "${found:-_general}"
 }
@@ -257,9 +267,12 @@ PLAN
     n="$(qparse "$q" | awk -F '\t' '{ k = substr($1, 2) + 0; if (k > m) m = k } END { print m + 0 }')"
     qid="Q$((n + 1))"
     { qparse "$q"; printf '%s\t%s\t%s\topen\tagent\t%s\t\t%s\t\n' "$qid" "$id" "$gate" "$(date +%Y-%m-%d)" "$text"; } | write_questions "$q"
-    parse "$d/tasks.json" | awk -F '\t' -v OFS='\t' -v id="$id" '$1 == id { $2 = "blocked" } { print }' | write_tasks "$d/tasks.json"
+    # A done task stays done (asking for sign-off on finished work); anything else waits, blocked.
+    st="$(parse "$d/tasks.json" | awk -F '\t' -v id="$id" '$1 == id { print $2; exit }')"
+    [ "$st" = "done" ] || parse "$d/tasks.json" | awk -F '\t' -v OFS='\t' -v id="$id" '$1 == id { $2 = "blocked" } { print }' | write_tasks "$d/tasks.json"
     printf '%s %s: asked %s (%s): %s\n' "$(date +%Y-%m-%d)" "${AGENTS_TOOL:-agent}" "$qid" "$id" "$text" >> "$d/progress.log"
-    echo "$qid recorded; $id -> blocked, waiting on the human"
+    if [ "$st" = "done" ]; then echo "$qid recorded; $id stays done, waiting on the human"
+    else echo "$qid recorded; $id -> blocked, waiting on the human"; fi
     ;;
   answer)
     slug="${1:-}"; d="$(plan_dir "$slug")"; shift
@@ -325,6 +338,7 @@ PLAN
     d="$PLANS/$slug" q="$PLANS/$slug/questions.json" today="$(date +%Y-%m-%d)"
     task=""
     [ -f "$d/tasks.json" ] && task="$(parse "$d/tasks.json" | awk -F '\t' '$2 == "doing" || $2 == "blocked" { print $1; exit }')"
+    [ -n "$task" ] || task="$(qparse "$q" | awk -F '\t' '$4 == "open" && $2 != "" { print $2; exit }')"   # done, awaiting sign-off
     st=open; ans_day=""
     [ -n "$answer" ] && { st=answered; ans_day="$today"; }
     n="$(qparse "$q" | awk -F '\t' '{ k = substr($1, 2) + 0; if (k > m) m = k } END { print m + 0 }')"

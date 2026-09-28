@@ -441,9 +441,40 @@ cmd_start() {
   git show-ref -q --verify "refs/heads/$name" && die "branch $name exists; switch to it with: git checkout $name"
   git fetch -q "$GIT_REMOTE" "$GIT_BASE" 2>/dev/null || true
   start="$(target_ref)"
+  case "$start" in   # full ref names: a tag or file named like the branch can't shadow it
+    "$GIT_REMOTE/$GIT_BASE") start="refs/remotes/$GIT_REMOTE/$GIT_BASE" ;;
+    "$GIT_BASE") start="refs/heads/$GIT_BASE" ;;
+  esac
+  # A local base with unpushed commits: branching from the remote would leave them out, and the
+  # checkout would delete their files from the working tree (the harness itself, if it's among them).
+  local lb="refs/heads/$GIT_BASE"
+  if [ "$start" = "refs/remotes/$GIT_REMOTE/$GIT_BASE" ] && git show-ref -q --verify "$lb" \
+     && [ "$(git rev-parse -q --verify "$lb")" != "$(git rev-parse -q --verify "$start")" ]; then
+    local up=0 down=0 hint=""
+    git merge-base --is-ancestor "$start" "$lb" || up=$?
+    if [ "$up" -eq 0 ]; then
+      echo "note: $GIT_BASE has $(git rev-list --count "$start..$lb") commit(s) not on $GIT_REMOTE/$GIT_BASE; branching from $GIT_BASE so they come along"
+      start="$lb"
+    else
+      git merge-base --is-ancestor "$lb" "$start" || down=$?
+      [ -f "$(git rev-parse --git-dir 2>/dev/null)/shallow" ] \
+        && hint=" This is a shallow clone, so git may not see the shared history; try: git fetch --unshallow"
+      if [ "$up" -gt 1 ] || [ "$down" -gt 1 ]; then
+        die "couldn't compare $GIT_BASE with $GIT_REMOTE/$GIT_BASE, so nothing was changed.$hint"
+      elif [ "$down" -ne 0 ]; then
+        die "$GIT_BASE and $GIT_REMOTE/$GIT_BASE have diverged; reconcile them (push or pull $GIT_BASE) before starting a branch.$hint"
+      fi
+    fi
+  fi
+  # Same loss from any branch: never switch to a start point that lacks the committed harness.
+  if [ -n "$start" ] && git cat-file -e "HEAD:.agents/bin/gitflow" 2>/dev/null \
+     && ! git cat-file -e "$start:.agents/bin/gitflow" 2>/dev/null; then
+    die "${start#refs/*/} doesn't have the harness this branch has committed; branching from it would remove .agents/ from the working tree. Push or merge the harness to $GIT_BASE first."
+  fi
   if [ -n "$start" ]; then git checkout -q -b "$name" "$start" || exit 1
   else git checkout -q -b "$name" || exit 1; fi
-  echo "on $name (from ${start:-HEAD})"
+  start="${start#refs/remotes/}"
+  echo "on $name (from ${start#refs/heads/})"
 }
 
 cmd_commit() {

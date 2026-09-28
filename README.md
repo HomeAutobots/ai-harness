@@ -78,7 +78,7 @@ The built-in `validate` skill checks work at three gates: the plan before any te
 
 Questions and answers live in a **question ledger** per plan (`.agents/plans/<slug>/questions.json`, or `_general/` outside a plan):
 
-- `tasks ask` records a question (with its gate) and blocks the task. It refuses a question the ledger already answered, so you don't get asked the same thing twice across sessions or tools.
+- `tasks ask` records a question (with its gate) and blocks the task (a done task stays done while it waits for your sign-off). It refuses a question the ledger already answered, so you don't get asked the same thing twice across sessions or tools.
 - `tasks answer` records your answer, adds it to the plan's Decisions, and resumes the task once nothing is open.
 - `tasks questions <words>` searches every question and answer across all plans.
 - A task waiting on you pauses the stop gate, which matters at the test gate, where tests are deliberately red.

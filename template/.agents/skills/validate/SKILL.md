@@ -26,7 +26,7 @@ Gates listed in `VALIDATE_ASK` in `.agents/harness.conf` (all three when unset) 
 How to ask:
 - Search the question ledger first: `.agents/bin/tasks questions <key words>`. If the human already answered it, use that answer, and say so, instead of asking again.
 - Batch them, three at most, each with the options you see and your recommendation.
-- Record each with `.agents/bin/tasks ask <slug> <T-id> --gate=plan|tests|impl "<question>"`. It goes in the plan's question ledger (`questions.json`), marks the task blocked, and lets the stop gate pause for the answer instead of forcing a fix of deliberately failing tests. It refuses a question the ledger already answered.
+- Record each with `.agents/bin/tasks ask <slug> <T-id> --gate=plan|tests|impl "<question>"`. It goes in the plan's question ledger (`questions.json`), marks the task blocked (a done task stays done), and lets the stop gate pause for the answer instead of forcing a fix of deliberately failing tests. It refuses a question the ledger already answered.
 - Then ask with your tool's question tool if it has one (AskUserQuestion in Claude Code, ask_user in Copilot); where hooks run, those questions and answers are also recorded automatically. Otherwise ask in chat.
 - When answered: `.agents/bin/tasks answer <slug> <Q-id> "<decision>"`. It lands under Decisions in plan.md and the task resumes once none of its questions are open.
 - Never guess past an open question to keep moving.

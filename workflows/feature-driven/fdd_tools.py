@@ -384,9 +384,10 @@ def cmd_check(tier, root, files):
                 out.append(finding(shown(root, fpath), 1, "fdd-list-unapproved", "the feature list is %s"
                                    % ("not approved" if state == "missing" else "changed since it was approved"),
                                    "validate the model and list, then ask the human to run %s list" % APPROVE))
+        first = min(added[scoped[0]] or [1])  # point at the first changed line, not the top of the file
         active = sorted({r[4] for r in doing if r[4] in feats})
         if not active:
-            out.append(finding(scoped[0], 1, "fdd-untraced",
+            out.append(finding(scoped[0], first, "fdd-untraced",
                                "this change touches %s but no plan task in progress names a feature" % conf["FDD_SCOPE"],
                                "set the feature's task to doing (tasks set <slug> <T-id> doing), its description "
                                "starting with the feature ID; if no feature fits, stop and ask"))
@@ -402,7 +403,7 @@ def cmd_check(tier, root, files):
                 elif state == "stale":
                     why = "its design changed since it was approved"
             if why:
-                out.append(finding(scoped[0], 1, "fdd-no-design", "building %s, but %s" % (fid, why),
+                out.append(finding(scoped[0], first, "fdd-no-design", "building %s, but %s" % (fid, why),
                                    "write the design, validate it, and ask the human to run %s design %s; "
                                    "no code in %s until then" % (APPROVE, fid, conf["FDD_SCOPE"])))
     if tier == "full":
