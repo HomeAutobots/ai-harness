@@ -136,9 +136,10 @@ A pack can also ship:
 - `seed/`: files copied into the project once and never overwritten (project-owned), e.g. `seed/.agents/<name>/.gitignore` to keep the pack's working files local. Harness-owned paths are skipped.
 - `checks/commit-msg.sh <file>`: extra commit-message rules. `gitflow` runs it everywhere it checks messages (the `commit-msg` hook, `gitflow commit`, `check`, and pre-push). Exit 1 or 2 rejects the commit with its output. Any other failure (a missing tool, a crash) also blocks, since an unchecked message could carry what the check exists to stop; a human can bypass with `git commit --no-verify`, which the policy denies to agents. A pack that prefers to let commits through handles its own missing tools and exits 0. It sees every message, including merge, fixup, and revert messages that the git.conf rules skip. Shipping one is enough for the git hooks to be installed.
 - `bin/`: commands for people, made executable on install.
-- `checks/state.sh`: prints whatever the pack's checks read that git ignores (local working files), so `verify`'s cache notices when it changes. Plan ledgers are always included.
+- `checks/state.sh`: prints whatever the pack's checks read that git ignores (local working files), so `verify`'s cache notices when it changes. It runs on every `verify` call, since it feeds the cache key, so keep it fast and side-effect free. Plan ledgers are always included.
 
 - **req-driven**: every change starts from a requirement ID in any exported requirements source (CSV, JSON, Markdown, text). Deterministic checks: IDs must exist, new tests must name the requirement they verify, changes in scope must reference one (in code, tests, or the plan task in progress), and the full tier writes a requirement to code to tests trace with optional untested-requirement gating. Standard-agnostic. See `workflows/req-driven/README.md`.
+- **feature-driven**: classic FDD for one developer. The agent drafts a domain model and feature list, then plans, designs, and builds one feature at a time; you approve the list, each design, and each finished feature with `fdd approve`, which agents can't run. Checks: design before build, a task in progress for every in-scope change, no private feature IDs in shared code or commit messages, and a parking-lot progress report. All FDD files stay local. See `workflows/feature-driven/README.md`.
 
 The skill's phases (pin the requirement, tests first, implement, report) each end at a `validate` gate, so they map onto planner, tester, implementer, and validator roles when roles land.
 
@@ -219,6 +220,7 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - `gitflow` was tested against a local bare remote and a stand-in `gh`, not live GitHub, GitLab, or Jira. `gitflow review` lists all PR comments (inline ones as `path:line`), not only unresolved threads.
 - Duplicate-question detection is word overlap with light stemming, not semantics. It catches rewordings of the same question; it can miss a paraphrase and, rarely, flag two different questions that share most words (`--force` overrides).
 - No sandbox profile ships with the harness. Pair it with a devcontainer that allowlists egress for unattended runs.
+- Policy rules block commands and reads, not writes. An agent can't run `guard allow` or `fdd approve`, but it could edit `.agents/guard.allow` or the local FDD `approvals` file directly.
 
 ## Roadmap
 
