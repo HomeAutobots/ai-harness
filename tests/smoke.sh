@@ -767,6 +767,27 @@ if [ "$HAVE_PY" -eq 1 ]; then
   tnot "report has no dates"           grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}' "$P"
   echo more > "$F/notes.txt"; git -C "$F" add notes.txt; (cd "$F" && git commit -qm 'Add notes')
   t  "inspection survives later commits" bash -c "'$FDDX' status F-12 | grep -q '100% inspected'"
+  for c in ".agents/workflows/feature-driven/bin/fdd approve list" \
+           "bash ./.agents/workflows/feature-driven/bin/fdd approve design F-12" \
+           "python3 .agents/workflows/feature-driven/fdd_tools.py approve . list"; do
+    trc  "agent can't: $c" 2  hook "$F" pre-tool claude "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$c\"}}"
+  done
+  trc  "agent may run fdd status" 0  hook "$F" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":".agents/workflows/feature-driven/bin/fdd status"}}'
+  t  "approve denied natively"         grep -q 'Bash(.agents/workflows/feature-driven/bin/fdd approve:\*)' "$F/.claude/settings.json"
+  EXT="$WORK/fdd-outside"; cp -R "$FD" "$EXT"
+  edit "$F/.agents/harness.conf" "s|^FDD_DIR=.*|FDD_DIR=\"$EXT\"|"
+  mv "$FD" "$FD.hidden"
+  t  "FDD_DIR outside the repo works"  bash -c "'$FDDX' status | grep -q '^list: approved'"
+  mv "$FD.hidden" "$FD"
+  edit "$F/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
+  "$HARNESS/install.sh" --workflow req-driven "$F" >/dev/null 2>&1
+  t  "both workflows listed"           grep -q '^WORKFLOWS="feature-driven req-driven"' "$F/.agents/harness.conf"
+  printf '// F-12 again\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
+  out="$("$F/.agents/bin/verify" || true)"
+  t  "both packs run"                  bash -c "printf '%s' \"\$1\" | grep -q 'fdd-leak' && printf '%s' \"\$1\" | grep -q 'REQ_SOURCE is not set'" _ "$out"
+  git -C "$F" checkout -q src/sale.cpp
+  t  "upgrade keeps the artifacts"     bash -c "test -f '$FD/features.md' && test -f '$FD/approvals' && test -f '$FD/designs/F-12.md'"
+  t  "upgrade keeps the seed"          test -f "$FD/.gitignore"
 fi
 
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
