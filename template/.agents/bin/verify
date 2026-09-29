@@ -107,6 +107,33 @@ else
 fi
 [ "$GUARD_RC" -ne 0 ] && cat "$RAW.part" >> "$RAW"
 
+# 1b. Local install mode: nothing the harness keeps out of git may be tracked.
+# Markers below must match EXCL_BEGIN/EXCL_END in .agents/bin/sync.
+LOCAL_RC=0
+if [ "$TIER" != edit ] && [ "${HARNESS_MODE:-team}" = local ]; then
+  ex="$(git rev-parse --git-path info/exclude 2>/dev/null)"
+  paths=""
+  [ -f "$ex" ] && paths="$(awk '$0 == "# >>> ai-harness (local install; managed by .agents/bin/sync)" { f = 1; next }
+                               $0 == "# <<< ai-harness" { f = 0 } f { sub(/^\//, ""); sub(/\/$/, ""); print }' "$ex")"
+  [ -n "$paths" ] || paths=".agents"
+  hits=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    tf="$(git ls-files -- "$p" 2>/dev/null)"
+    [ -n "$tf" ] || continue
+    hits="$hits $p"
+    printf '%s\n' "$tf" | while IFS= read -r f; do
+      echo "$f:1: error: [harness-tracked] tracked in git, but this clone keeps the harness local (HARNESS_MODE=local)"
+    done >> "$RAW"
+  done <<EOF
+$paths
+EOF
+  if [ -n "$hits" ]; then
+    echo "  fix: git rm -r --cached --quiet --$hits   (keeps the files; commit the removal), or run install.sh --team to share the harness" >> "$RAW"
+    LOCAL_RC=1
+  fi
+fi
+
 # 2. The project's checks for this tier.
 CHECK_RC=0
 SCRIPT=".agents/checks/$TIER.sh"
@@ -134,7 +161,7 @@ for wf in ${WORKFLOWS:-}; do
   WF_RC="$(agents_worst_rc "$WF_RC" "$rc")"
 done
 
-RC="$(agents_worst_rc "$GUARD_RC" "$CHECK_RC" "$WF_RC")"
+RC="$(agents_worst_rc "$GUARD_RC" "$LOCAL_RC" "$CHECK_RC" "$WF_RC")"
 case "$RC" in
   0) WORD=ok ;;
   1) WORD=FAIL ;;

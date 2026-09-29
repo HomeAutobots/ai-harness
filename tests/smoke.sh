@@ -1050,6 +1050,20 @@ printf '@AGENTS.md\n' > "$TM/CLAUDE.local.md"; "$TM/.agents/bin/sync" >/dev/null
 t    "team mode keeps a personal CLAUDE.local.md" test -f "$TM/CLAUDE.local.md"
 rm -f "$TM/CLAUDE.local.md"
 
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$LM/.agents/checks/$tier.sh"; done
+t    "local tree verifies clean"       "$LM/.agents/bin/verify"
+git -C "$LM" add -f .agents/harness.conf
+out="$("$LM/.agents/bin/verify" || true)"
+t    "tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
+t    "fix names git rm --cached"       hasl "$out" "git rm -r --cached"
+outedit="$("$LM/.agents/bin/verify" --tier=edit -- README.md 2>&1)"
+tnot "edit tier skips harness-tracked check" hasl "$outedit" "harness-tracked"
+git -C "$LM" rm -q --cached .agents/harness.conf
+t    "untracked again, clean"          "$LM/.agents/bin/verify"
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$TM/.agents/checks/$tier.sh"; done
+commit "$TM" harness
+t    "team mode: tracked harness is fine" "$TM/.agents/bin/verify"
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"

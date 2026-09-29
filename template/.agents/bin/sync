@@ -314,6 +314,7 @@ fi
 
 # Local mode: keep everything the harness created out of git in this clone. A marked block in
 # the clone's exclude file lists exact paths; lines outside the markers belong to someone else.
+# verify reads these same markers to flag files tracked by accident; keep them in sync.
 EXCL_BEGIN="# >>> ai-harness (local install; managed by .agents/bin/sync)"
 EXCL_END="# <<< ai-harness"
 exclude_block() {
