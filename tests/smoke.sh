@@ -988,6 +988,33 @@ PF=$(repo prefeature)
 t    "a pre-feature install stays team" grep -qx 'HARNESS_MODE="team"' "$PF/.agents/harness.conf"
 "$HARNESS/install.sh" "$LM" >/dev/null 2>&1
 t    "an upgrade keeps local"          grep -qx 'HARNESS_MODE="local"' "$LM/.agents/harness.conf"
+t    "git status clean after install"  test -z "$(git -C "$LM" status --porcelain)"
+t    "exclude block written"           grep -qx '# >>> ai-harness (local install; managed by .agents/bin/sync)' "$LM/.git/info/exclude"
+t    "block hides .agents"             grep -qx '/.agents/' "$LM/.git/info/exclude"
+t    "block hides AGENTS.md and CLAUDE.md" bash -c "grep -qx '/AGENTS.md' '$LM/.git/info/exclude' && grep -qx '/CLAUDE.md' '$LM/.git/info/exclude'"
+t    "block hides skill mirrors"       grep -qx '/.claude/skills/review-diff' "$LM/.git/info/exclude"
+"$LM/.agents/bin/sync" >/dev/null 2>&1
+t    "git status clean after sync"     test -z "$(git -C "$LM" status --porcelain)"
+t    "sync --check up to date"         "$LM/.agents/bin/sync" --check
+printf 'build/\n' >> "$LM/.git/info/exclude"; "$LM/.agents/bin/sync" >/dev/null 2>&1
+t    "own exclude lines kept"          grep -qx 'build/' "$LM/.git/info/exclude"
+TS=$(repo tracked)
+printf '# Project rules\n\nBe kind to the parser.\n' > "$TS/AGENTS.md"
+printf '@AGENTS.md\n\nTeam notes for Claude.\n' > "$TS/CLAUDE.md"
+mkdir -p "$TS/.claude/skills/review-diff"; printf -- '---\nname: review-diff\ndescription: The team version.\n---\n' > "$TS/.claude/skills/review-diff/SKILL.md"
+commit "$TS" shared
+out="$("$HARNESS/install.sh" "$TS" 2>&1)"; "$TS/.agents/bin/sync" >/dev/null 2>&1
+t    "tracked files untouched, status clean" test -z "$(git -C "$TS" status --porcelain)"
+t    "blocks go to AGENTS.local.md"    grep -q 'harness:core:start' "$TS/.agents/AGENTS.local.md"
+t    "tracked AGENTS.md has no blocks" bash -c "! grep -q 'harness:core' '$TS/AGENTS.md'"
+t    "CLAUDE.local.md imports the local blocks" grep -qx '@.agents/AGENTS.local.md' "$TS/CLAUDE.local.md"
+tnot "CLAUDE.local.md doesn't repeat CLAUDE.md's import" grep -qx '@AGENTS.md' "$TS/CLAUDE.local.md"
+t    "tracked skill left alone"        grep -q 'The team version' "$TS/.claude/skills/review-diff/SKILL.md"
+t    "and said so"                     hasl "$out" ".claude/skills/review-diff is tracked by the project"
+t    "AGENTS.md-only tools warned"     hasl "$out" "Copilot, Cursor, and Codex (which read only AGENTS.md)"
+printf '@AGENTS.md\n' > "$TM/CLAUDE.local.md"; "$TM/.agents/bin/sync" >/dev/null 2>&1
+t    "team mode keeps a personal CLAUDE.local.md" test -f "$TM/CLAUDE.local.md"
+rm -f "$TM/CLAUDE.local.md"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

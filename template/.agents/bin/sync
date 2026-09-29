@@ -19,8 +19,11 @@ cd "$ROOT"
 
 PY="$(command -v python3 || true)"
 CHECK=0
+UNSHARE=0
+# shellcheck disable=SC2034  # UNSHARE: used by --unshare (Task 5)
 case "${1:-}" in
   --check) CHECK=1 ;;
+  --unshare) UNSHARE=1 ;;
   --lock-skill)
     [ $# -eq 4 ] || { echo "usage: $0 --lock-skill <name> <source> <ref>" >&2; exit 2; }
     [ -n "$PY" ] || { echo "sync: python3 is required to pin skills" >&2; exit 2; }
@@ -36,6 +39,7 @@ SKILLS_DIR=.agents/skills
 # Defaults. harness.conf overrides them.
 ADAPTERS="claude copilot cursor"
 LINK_MODE="symlink"
+HARNESS_MODE="team"
 # shellcheck source=/dev/null
 [ -f .agents/harness.conf ] && . ./.agents/harness.conf
 
@@ -48,6 +52,28 @@ say()   { printf 'sync: %s\n' "$*"; }
 warn()  { printf 'sync: warning: %s\n' "$*" >&2; }
 die()   { printf 'sync: error: %s\n' "$*" >&2; exit 2; }
 drift() { say "out of date: $*"; DRIFT=1; }
+
+tracked() { git ls-files --error-unmatch -- "$1" >/dev/null 2>&1; }
+# claude_stub <file>: true if the file holds only what the harness writes (imports, blank lines,
+# the marker comment), so regenerating it loses nothing.
+claude_stub() {
+  [ -z "$(grep -vE '^@[^[:space:]]+[[:space:]]*$|^[[:space:]]*$|^<!-- Shared instructions live in AGENTS.md' "$1")" ]
+}
+LOCAL=0; [ "$HARNESS_MODE" = local ] && LOCAL=1
+
+# Local mode never modifies a file the project tracks. With a tracked AGENTS.md, the managed
+# blocks live in an untracked file of their own, imported by the Claude instructions file.
+if [ "$LOCAL" -eq 1 ] && tracked AGENTS.md; then
+  AGENTS_FILE=.agents/AGENTS.local.md
+  if [ ! -f "$AGENTS_FILE" ] && [ "$CHECK" -eq 0 ]; then
+    printf '%s\n' '# Harness instructions (local)' '' \
+      'This clone runs the AI harness in local mode and the project tracks AGENTS.md, so the harness keeps its instructions here. Project facts from harness-tailor go below the blocks.' \
+      > "$AGENTS_FILE"
+  fi
+  case " $ADAPTERS " in *" copilot "*|*" cursor "*|*" codex "*)
+    [ "$CHECK" -eq 1 ] || warn "the project tracks AGENTS.md, so Copilot, Cursor, and Codex (which read only AGENTS.md) won't see the harness rules in this clone; their hooks still enforce the checks and policy" ;;
+  esac
+fi
 
 [ -f "$AGENTS_FILE" ] || die "no $AGENTS_FILE at repo root. Run install.sh from the ai-harness repo first."
 [ -f "$CORE_SRC" ]    || die "missing $CORE_SRC. Re-run install.sh."
@@ -182,6 +208,11 @@ mirror_skills() {
     target="$dest/$name"
     rel="../../$SKILLS_DIR/$name"
 
+    if [ "$LOCAL" -eq 1 ] && tracked "$target"; then
+      warn "$target is tracked by the project; local mode leaves it alone"
+      continue
+    fi
+
     if { [ -e "$target" ] || [ -L "$target" ]; } && ! owned "$target"; then
       warn "$target already exists and wasn't made by the harness, leaving it alone"
       continue
@@ -214,6 +245,7 @@ mirror_skills() {
     name="$(basename "$target")"
     [ -f "$SKILLS_DIR/$name/SKILL.md" ] && continue
     owned "$target" || continue
+    [ "$LOCAL" -eq 1 ] && tracked "$target" && continue
     if [ "$CHECK" -eq 1 ]; then drift "$target (stale)"; continue; fi
     rm -rf "$target"
     CHANGED=1
@@ -222,15 +254,35 @@ mirror_skills() {
 }
 
 adapter_claude() {
-  # An @import works on every Claude Code setup. The built-in AGENTS.md fallback
-  # only kicks in with no CLAUDE.md present and isn't available on every provider.
-  if [ ! -f CLAUDE.md ]; then
-    printf '%s\n' '@AGENTS.md' '' \
-      '<!-- Shared instructions live in AGENTS.md. Claude Code-only notes go below this line. -->' \
-      > "$WORK/claude.md"
-    put CLAUDE.md "$WORK/claude.md"
-  elif ! grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md; then
-    warn "CLAUDE.md doesn't import AGENTS.md, so Claude Code won't see the harness. Run the harness-tailor skill to fold it in, or add '@AGENTS.md' as its first line."
+  # An @import works on every Claude Code setup. The built-in AGENTS.md fallback only kicks in
+  # with no CLAUDE.md present (any CLAUDE*.md counts) and isn't available on every provider.
+  local cf=CLAUDE.md imports="@AGENTS.md"
+  if [ "$LOCAL" -eq 1 ]; then
+    if tracked CLAUDE.md; then
+      cf=CLAUDE.local.md
+      grep -qE '^@AGENTS\.md[[:space:]]*$' CLAUDE.md && imports=""
+    fi
+    [ "$AGENTS_FILE" = AGENTS.md ] || imports="${imports:+$imports }@$AGENTS_FILE"
+  fi
+  # Nothing to import (the tracked CLAUDE.md already imports AGENTS.md, which holds the blocks):
+  # no personal file needed.
+  if [ -n "$imports" ]; then
+    # shellcheck disable=SC2086
+    printf '%s\n' $imports > "$WORK/claude.md"
+    printf '%s\n' '' '<!-- Shared instructions live in AGENTS.md. Claude Code-only notes go below this line. -->' >> "$WORK/claude.md"
+    if [ ! -f "$cf" ] || claude_stub "$cf"; then
+      put "$cf" "$WORK/claude.md"
+    else
+      for i in $imports; do
+        grep -qxF "$i" "$cf" \
+          || warn "$cf doesn't import ${i#@}, so Claude Code won't see the harness. Run the harness-tailor skill to fold it in, or add '$i' as a line."
+      done
+    fi
+  fi
+  # Team mode: a CLAUDE.local.md the harness made (marker line included) would load AGENTS.md twice.
+  if [ "$LOCAL" -eq 0 ] && [ -f CLAUDE.local.md ] && claude_stub CLAUDE.local.md \
+     && grep -q '^<!-- Shared instructions live in AGENTS.md' CLAUDE.local.md; then
+    if [ "$CHECK" -eq 1 ]; then drift "CLAUDE.local.md (remove)"; else rm -f CLAUDE.local.md; CHANGED=1; say "removed CLAUDE.local.md (team mode uses CLAUDE.md)"; fi
   fi
   mirror_skills .claude/skills
 }
@@ -260,6 +312,43 @@ else
   warn "python3 not found: hooks and permission rules were not rendered. Install python3 and re-run."
 fi
 
+# Local mode: keep everything the harness created out of git in this clone. A marked block in
+# the clone's exclude file lists exact paths; lines outside the markers belong to someone else.
+EXCL_BEGIN="# >>> ai-harness (local install; managed by .agents/bin/sync)"
+EXCL_END="# <<< ai-harness"
+exclude_block() {
+  local ex p
+  ex="$(git rev-parse --git-path info/exclude 2>/dev/null)" || return 0
+  [ -n "$ex" ] || return 0
+  : > "$WORK/exclude.list"
+  if [ "$LOCAL" -eq 1 ]; then
+    echo "/.agents/" >> "$WORK/exclude.list"
+    for p in AGENTS.md CLAUDE.md CLAUDE.local.md .claude/settings.local.json .github/hooks/harness.json \
+             .cursor/hooks.json .gemini/settings.json .codex/rules/harness.rules; do
+      { [ -e "$p" ] || [ -L "$p" ]; } || continue
+      tracked "$p" || echo "/$p" >> "$WORK/exclude.list"
+    done
+    for p in .claude/skills/*; do
+      { [ -e "$p" ] || [ -L "$p" ]; } || continue
+      if owned "$p" && ! tracked "$p"; then echo "/$p" >> "$WORK/exclude.list"; fi
+    done
+  fi
+  {
+    if [ -f "$ex" ]; then
+      awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" '$0 == b { skip = 1; next } $0 == e { skip = 0; next } !skip' "$ex"
+    fi
+    if [ -s "$WORK/exclude.list" ]; then echo "$EXCL_BEGIN"; cat "$WORK/exclude.list"; echo "$EXCL_END"; fi
+  } > "$WORK/exclude.new"
+  if [ -f "$ex" ] && cmp -s "$ex" "$WORK/exclude.new"; then return 0; fi
+  if [ ! -f "$ex" ] && [ ! -s "$WORK/exclude.new" ]; then return 0; fi
+  if [ "$CHECK" -eq 1 ]; then drift "$ex (harness block)"; return 0; fi
+  mkdir -p "$(dirname "$ex")"
+  cat "$WORK/exclude.new" > "$ex"
+  CHANGED=1
+  say "updated the harness block in $ex"
+}
+exclude_block
+
 # Local git hooks appear once git.conf has something for them to enforce.
 if [ "$CHECK" -eq 0 ] && [ -x .agents/bin/gitflow ]; then
   .agents/bin/gitflow install-hooks --quiet | sed 's/^gitflow: /sync: /' || true
@@ -271,7 +360,7 @@ fi
 # zero-width chars, bidi controls, invisible operators, BOM, and Unicode tag characters
 printf '\342\200\213\n\342\200\214\n\342\200\215\n\342\200\216\n\342\200\217\n\342\200\252\n\342\200\253\n\342\200\254\n\342\200\255\n\342\200\256\n\342\201\240\n\342\201\241\n\342\201\242\n\342\201\243\n\342\201\244\n\342\201\246\n\342\201\247\n\342\201\250\n\342\201\251\n\357\273\277\n\363\240\200\n\363\240\201\n' > "$WORK/hidden.pat"
 {
-  for f in AGENTS.md CLAUDE.md GEMINI.md .github/copilot-instructions.md; do if [ -f "$f" ]; then echo "$f"; fi; done
+  for f in AGENTS.md CLAUDE.md CLAUDE.local.md GEMINI.md .github/copilot-instructions.md; do if [ -f "$f" ]; then echo "$f"; fi; done
   find .agents .claude .cursor .github/hooks .github/agents .codex .gemini -type f \
     \( -name '*.md' -o -name '*.conf' -o -name '*.json' -o -name '*.sh' -o -name '*.py' -o -name '*.rules' -o -name '*.toml' -o -name '*.patterns' -o -name '*.allow' \) \
     -not -path '.agents/cache/*' -not -path '.agents/plans/*' -not -path '.agents/evals/results/*' 2>/dev/null || true
