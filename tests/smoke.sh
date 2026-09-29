@@ -24,7 +24,7 @@ HAVE_PY=0; command -v python3 >/dev/null 2>&1 && HAVE_PY=1
 
 echo "fresh install"
 P=$(repo fresh)
-"$HARNESS/install.sh" "$P" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$P" >/dev/null 2>&1
 t    "core block rendered"             grep -q '^## Harness rules' "$P/AGENTS.md"
 t    "core block has no version string" bash -c "! grep -q 'ai-harness [0-9]' '$P/AGENTS.md'"
 t    "skills index lists all built-ins" bash -c "grep -q '\`plan-task\`' '$P/AGENTS.md' && grep -q '\`review-diff\`' '$P/AGENTS.md' && grep -q '\`harness-tailor\`' '$P/AGENTS.md' && grep -q '\`validate\`' '$P/AGENTS.md'"
@@ -54,7 +54,7 @@ echo "re-install keeps tailoring"
 echo "CUSTOM-LINE" >> "$P/AGENTS.md"
 printf '#!/usr/bin/env bash\necho tailored\n' > "$P/.agents/checks/turn.sh"
 cp "$P/AGENTS.md" "$WORK/before.md"
-"$HARNESS/install.sh" "$P" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$P" >/dev/null 2>&1
 t    "AGENTS.md byte-identical"        cmp -s "$P/AGENTS.md" "$WORK/before.md"
 t    "turn.sh kept"                    grep -q tailored "$P/.agents/checks/turn.sh"
 t    "still clean"                     "$P/.agents/bin/sync" --check
@@ -73,7 +73,7 @@ tnot "--check sees new skill"          "$P/.agents/bin/sync" --check
 "$P/.agents/bin/sync" >/dev/null 2>&1
 t    "folded description joined"       grep -q 'deploy-web`: Deploy the web app. Use for releases.' "$P/AGENTS.md"
 t    "new skill mirrored"              test -L "$P/.claude/skills/deploy-web"
-"$HARNESS/install.sh" "$P" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$P" >/dev/null 2>&1
 t    "upgrade keeps project skill"     test -f "$P/.agents/skills/deploy-web/SKILL.md"
 rm -rf "$P/.agents/skills/deploy-web"
 "$P/.agents/bin/sync" >/dev/null 2>&1
@@ -107,7 +107,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   mkdir -p "$M/.claude" "$M/.cursor"
   printf '{\n  "model": "opus",\n  "permissions": {"allow": ["Bash(npm test:*)"], "deny": ["Read(./secrets/**)"]},\n  "hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "prettier --write"}]}]}\n}\n' > "$M/.claude/settings.json"
   printf '{"version": 1, "hooks": {"stop": [{"command": "./my-audit.sh"}]}}\n' > "$M/.cursor/hooks.json"
-  "$HARNESS/install.sh" "$M" >/dev/null 2>&1
+  "$HARNESS/install.sh" --team "$M" >/dev/null 2>&1
   t  "user keys preserved"             grep -q '"model": "opus"' "$M/.claude/settings.json"
   t  "user allow preserved"            grep -q 'Bash(npm test:\*)' "$M/.claude/settings.json"
   t  "user deny preserved"             grep -q 'Read(./secrets/\*\*)' "$M/.claude/settings.json"
@@ -167,7 +167,7 @@ fi
 
 echo "guard"
 G=$(repo guard)
-"$HARNESS/install.sh" "$G" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$G" >/dev/null 2>&1
 printf 'int f();\nTEST(A, B) {}\nTEST(A, C) {}\n' > "$G/a.cpp"; mkdir -p "$G/tests"; printf 'def test_x(): pass\n' > "$G/tests/test_x.py"
 commit "$G" base
 t    "clean diff passes"               "$G/.agents/bin/guard"
@@ -193,7 +193,7 @@ rm "$G/NOTES.md"
 
 echo "verify tiers, shaping, cache"
 V=$(repo verify)
-"$HARNESS/install.sh" "$V" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$V" >/dev/null 2>&1
 cat > "$V/.agents/checks/edit.sh" <<'EOF'
 #!/usr/bin/env bash
 rc=0
@@ -309,7 +309,7 @@ git -C "$R" branch -m main 2>/dev/null || true
 git -C "$R" remote add origin "$WORK/remote.git"
 git -C "$R" push -q origin HEAD:main
 git -C "$R" checkout -q -b develop && git -C "$R" push -q origin develop && git -C "$R" checkout -q main
-"$HARNESS/install.sh" "$R" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$R" >/dev/null 2>&1
 t    "no git hooks without rules"      test ! -e "$R/.git/hooks/commit-msg"
 t    "personal layer applies"          bash -c "cd '$R' && .agents/bin/gitflow config | grep -q '^GIT_MERGE_METHOD *rebase'"
 tnot "personal layer not rendered"     grep -q 'Bash(git push:\*)' "$R/.claude/settings.json"
@@ -365,7 +365,7 @@ edit "$R/.agents/git.conf" 's/^GIT_AGENT_MAY=.*/GIT_AGENT_MAY="branch commit"/'
 t    "push denied natively when not allowed" grep -q 'Bash(git push:\*)' "$R/.claude/settings.json"
 H=$(repo hookspath)
 git -C "$H" config core.hooksPath .husky
-"$HARNESS/install.sh" "$H" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$H" >/dev/null 2>&1
 printf 'GIT_COMMIT="{summary}"\nGIT_COMMIT_PATTERN="^.{5,}$"\n' >> "$H/.agents/git.conf"
 t    "respects existing hooksPath"     bash -c "cd '$H' && .agents/bin/gitflow install-hooks | grep -q 'core.hooksPath is .husky'"
 t    "no hooks written there"          test ! -e "$H/.git/hooks/commit-msg"
@@ -376,7 +376,7 @@ git init -q --bare "$WORK/trunk.git"
 Z=$(repo trunk)
 git -C "$Z" remote add origin "$WORK/trunk.git"
 git -C "$Z" push -q origin HEAD 2>/dev/null
-"$HARNESS/install.sh" "$Z" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$Z" >/dev/null 2>&1
 ZB=$(git -C "$Z" symbolic-ref --short HEAD)
 t    "nothing protected by default"    bash -c "cd '$Z' && .agents/bin/gitflow config | grep -q '^GIT_PROTECTED *$'"
 t    "no git hooks installed"          test ! -e "$Z/.git/hooks/commit-msg"
@@ -408,7 +408,7 @@ D=$(repo devmain)
 git -C "$D" remote add origin "$WORK/devmain.git"
 git -C "$D" push -q origin HEAD:main
 git -C "$D" push -q origin HEAD:dev/main
-"$HARNESS/install.sh" "$D" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$D" >/dev/null 2>&1
 printf 'GIT_BASE="dev/main"\nGIT_PROTECTED="{base} release/*"\nGIT_PUSH_REQUIRES="off"\n' >> "$D/.agents/git.conf"
 "$D/.agents/bin/sync" >/dev/null 2>&1
 commit "$D" harness
@@ -424,7 +424,7 @@ t    "human push to main allowed"      git -C "$D" push -q origin HEAD:main
 
 echo "commit template"
 T=$(repo committpl)
-"$HARNESS/install.sh" "$T" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$T" >/dev/null 2>&1
 cp "$T/.agents/git/commit.example.md" "$T/.agents/git/commit.md"
 printf 'GIT_TICKET="[A-Z]+-[0-9]+"\nGIT_BRANCH="feature/{ticket}-{slug}"\nGIT_COMMIT_TEMPLATE=".agents/git/commit.md"\nGIT_PUSH_REQUIRES="off"\n' >> "$T/.agents/git.conf"
 "$T/.agents/bin/sync" >/dev/null 2>&1; commit "$T" harness
@@ -456,7 +456,7 @@ t    "repo commit.template picked up"  bash -c "cd '$T' && .agents/bin/gitflow c
 echo "gitflow start with unpushed base commits"
 G=$(repo ahead); git -C "$G" branch -M main
 git init -q --bare "$WORK/ahead.git"; git -C "$G" remote add origin "$WORK/ahead.git"; git -C "$G" push -q origin main
-"$HARNESS/install.sh" "$G" >/dev/null 2>&1; commit "$G" harness   # committed, not pushed
+"$HARNESS/install.sh" --team "$G" >/dev/null 2>&1; commit "$G" harness   # committed, not pushed
 out="$(cd "$G" && .agents/bin/gitflow start 'next thing' 2>&1)"
 t    "start keeps unpushed base commits" test -x "$G/.agents/bin/tasks"
 t    "and says why"                    bash -c "printf '%s' \"\$1\" | grep -q 'main has 1 commit(s) not on origin/main; branching from main'" _ "$out"
@@ -466,13 +466,13 @@ git -C "$G" checkout -q main
 trc  "diverged base refuses to start" 1 bash -c "cd '$G' && .agents/bin/gitflow start 'another thing'"
 t    "diverged: still on main"         test "$(git -C "$G" symbolic-ref --short HEAD)" = main
 git clone -q --depth 1 -b main "file://$WORK/ahead.git" "$WORK/ahead-shallow"
-"$HARNESS/install.sh" "$WORK/ahead-shallow" >/dev/null 2>&1; commit "$WORK/ahead-shallow" harness
+"$HARNESS/install.sh" --team "$WORK/ahead-shallow" >/dev/null 2>&1; commit "$WORK/ahead-shallow" harness
 echo more > "$WORK/ahead-other/more.txt"; git -C "$WORK/ahead-other" add -A; git -C "$WORK/ahead-other" -c core.hooksPath=/dev/null commit -qm more; git -C "$WORK/ahead-other" push -q origin main
 out="$(cd "$WORK/ahead-shallow" && .agents/bin/gitflow start 'x' 2>&1 || true)"
 t    "shallow clone: refusal says why" bash -c "printf '%s' \"\$1\" | grep -q 'shallow clone' && printf '%s' \"\$1\" | grep -q 'git fetch --unshallow'" _ "$out"
 H=$(repo hless); git -C "$H" branch -M main
 git init -q --bare "$WORK/hless.git"; git -C "$H" remote add origin "$WORK/hless.git"; git -C "$H" push -q origin main
-git -C "$H" checkout -q -b wip; "$HARNESS/install.sh" "$H" >/dev/null 2>&1; commit "$H" harness   # harness only on wip
+git -C "$H" checkout -q -b wip; "$HARNESS/install.sh" --team "$H" >/dev/null 2>&1; commit "$H" harness   # harness only on wip
 trc  "start refuses a base without the harness" 1 bash -c "cd '$H' && .agents/bin/gitflow start 'x'"
 t    "harness still in place"          test -x "$H/.agents/bin/tasks"
 t    "still on wip"                    test "$(git -C "$H" symbolic-ref --short HEAD)" = wip
@@ -527,10 +527,10 @@ rm -rf "$P/.agents/plans/loose"
 
 echo "migration from 0.1"
 O=$(repo old)
-"$HARNESS/install.sh" "$O" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$O" >/dev/null 2>&1
 printf '#!/usr/bin/env bash\n# ai-harness: verify\n# Project-owned.\nmake test\n' > "$O/.agents/bin/verify"
 rm -f "$O/.agents/checks/turn.sh" "$O/.agents/checks/full.sh"
-"$HARNESS/install.sh" "$O" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$O" >/dev/null 2>&1
 t    "old verify moved to turn.sh"     grep -q 'make test' "$O/.agents/checks/turn.sh"
 t    "old verify moved to full.sh"     grep -q 'make test' "$O/.agents/checks/full.sh"
 t    "verify is the orchestrator now"  grep -q 'verify (orchestrator)' "$O/.agents/bin/verify"
@@ -539,7 +539,7 @@ echo "existing repo with legacy instructions"
 L=$(repo legacy)
 printf '# Legacy App\n\nUse tabs.\n' > "$L/AGENTS.md"
 printf 'Old Claude rules\n' > "$L/CLAUDE.md"
-out=$("$HARNESS/install.sh" "$L" 2>&1)
+out=$("$HARNESS/install.sh" --team "$L" 2>&1)
 t    "legacy content kept"             grep -q 'Use tabs.' "$L/AGENTS.md"
 t    "core inserted after H1"          test "$(line_of "$L/AGENTS.md" '# Legacy App')" -lt "$(line_of "$L/AGENTS.md" 'harness:core:start')"
 t    "core before legacy body"         test "$(line_of "$L/AGENTS.md" 'harness:core:end')" -lt "$(line_of "$L/AGENTS.md" 'Use tabs.')"
@@ -550,13 +550,13 @@ t    "idempotent after insert"         "$L/.agents/bin/sync" --check
 
 echo "broken markers"
 B=$(repo broken)
-"$HARNESS/install.sh" "$B" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$B" >/dev/null 2>&1
 printf '<!-- harness:core:start -->\n' >> "$B/AGENTS.md"
 trc  "duplicate marker is an error" 2  "$B/.agents/bin/sync"
 
 echo "copy mode"
 C=$(repo copymode)
-"$HARNESS/install.sh" "$C" >/dev/null 2>&1
+"$HARNESS/install.sh" --team "$C" >/dev/null 2>&1
 edit "$C/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
 "$C/.agents/bin/sync" >/dev/null 2>&1
 t    "symlinks replaced by copies"     bash -c "test ! -L '$C/.claude/skills/plan-task' && test -f '$C/.claude/skills/plan-task/.harness-copy'"
@@ -573,7 +573,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf 'add() { echo $(( $1 + $2 )); }\n' > "$E/calc.sh"; mkdir -p "$E/tests"
   printf '. ./calc.sh\n[ "$(add 2 3)" = 5 ]\n' > "$E/tests/test_calc.sh"; commit "$E" "Fix add"
   FIXC=$(git -C "$E" rev-parse HEAD)
-  "$HARNESS/install.sh" "$E" >/dev/null 2>&1; commit "$E" harness
+  "$HARNESS/install.sh" --team "$E" >/dev/null 2>&1; commit "$E" harness
   cat > "$WORK/agent.sh" <<'EOF'
 #!/usr/bin/env bash
 [ -f AGENTS.md ] && printf 'add() { echo $(( $1 + $2 )); }\n' > calc.sh
@@ -601,7 +601,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf 'int parse(int n) { return n <= 1500; }\n' > "$W/src/frame.cpp"
   printf '// Verifies: REQ-2\nTEST(Frame, RejectsOversize) {}\n' > "$W/tests/frame_test.cpp"
   commit "$W" base
-  "$HARNESS/install.sh" --workflow req-driven "$W" >/dev/null 2>&1
+  "$HARNESS/install.sh" --team --workflow req-driven "$W" >/dev/null 2>&1
   t  "workflow recorded"               grep -q '^WORKFLOWS="req-driven"' "$W/.agents/harness.conf"
   t  "no message check, no git hooks"  test ! -e "$W/.git/hooks/commit-msg"
   t  "settings appended once"          test "$(grep -c '^REQ_SOURCE=' "$W/.agents/harness.conf")" -eq 1
@@ -611,7 +611,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   edit "$W/.agents/harness.conf" 's|^REQ_SOURCE=""|REQ_SOURCE="docs/requirements.csv"|'
   printf '#!/usr/bin/env bash\nexit 0\n' > "$W/.agents/checks/turn.sh"; cp "$W/.agents/checks/turn.sh" "$W/.agents/checks/full.sh"
   commit "$W" harness
-  "$HARNESS/install.sh" "$W" >/dev/null 2>&1
+  "$HARNESS/install.sh" --team "$W" >/dev/null 2>&1
   t  "upgrade keeps settings"          grep -q '^REQ_SOURCE="docs/requirements.csv"' "$W/.agents/harness.conf"
   t  "clean tree passes"               "$W/.agents/bin/verify"
   printf 'int parse(int n) { return n > 0 && n <= 1500; }\n' > "$W/src/frame.cpp"
@@ -677,7 +677,7 @@ EOF
   printf '#include "pki/cert.h"\nint main() { return days_left(1, 3) == 2 ? 0 : 1; }\n' > "$X/tests/cert_test.cpp"
   printf '#include "net/frame.h"\nint main() { return frame_sum(4) == 10 ? 0 : 1; }\n' > "$X/tests/frame_test.cpp"
   commit "$X" code
-  "$HARNESS/install.sh" --stack cpp-cmake "$X" >/dev/null 2>&1; commit "$X" harness
+  "$HARNESS/install.sh" --team --stack cpp-cmake "$X" >/dev/null 2>&1; commit "$X" harness
   t  "stack recorded"                  grep -q '^STACKS="cpp-cmake"' "$X/.agents/harness.conf"
   t  "stack checks seeded"             grep -q 'cpp_test_affected' "$X/.agents/checks/turn.sh"
   t  "turn passes on clean tree"       "$X/.agents/bin/verify"
@@ -720,7 +720,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   mkdir -p "$F/src" "$F/tests"
   printf 'int total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
   commit "$F" base
-  "$HARNESS/install.sh" --workflow feature-driven "$F" >/dev/null 2>&1
+  "$HARNESS/install.sh" --team --workflow feature-driven "$F" >/dev/null 2>&1
   for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$F/.agents/checks/$tier.sh"; done
   commit "$F" harness
   FD="$F/.agents/fdd"; FDDX="$F/.agents/workflows/feature-driven/bin/fdd"
@@ -890,7 +890,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   git -C "$F" checkout -q src/sale.cpp
   (cd "$F" && .agents/bin/tasks set f-12-total T2 todo >/dev/null)
   edit "$F/.agents/harness.conf" 's|^ *FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
-  "$HARNESS/install.sh" --workflow req-driven "$F" >/dev/null 2>&1
+  "$HARNESS/install.sh" --team --workflow req-driven "$F" >/dev/null 2>&1
   t  "both workflows listed"           grep -q '^WORKFLOWS="feature-driven req-driven"' "$F/.agents/harness.conf"
   printf '// F-12 again\nint total(int a, int b) { return a + b; }\n' > "$F/src/sale.cpp"
   out="$("$F/.agents/bin/verify" || true)"
@@ -919,9 +919,9 @@ mkdir -p "$DP/__pycache__"; touch "$DP/__pycache__/x.pyc"   # left behind by a d
 D3="$HX/workflows/demo3"; mkdir -p "$D3/checks" "$D3/bin" "$D3/skill"   # empty bin/, no .sh in checks/
 printf -- '---\nname: demo3\ndescription: Third test pack.\n---\n\n# Demo 3\n' > "$D3/skill/SKILL.md"
 printf 'notes\n' > "$D3/checks/README"
-trc  "pack with an empty bin/ installs" 0 "$HX/install.sh" --workflow demo3 "$(repo demo3)"
+trc  "pack with an empty bin/ installs" 0 "$HX/install.sh" --team --workflow demo3 "$(repo demo3)"
 D=$(repo demo)
-"$HX/install.sh" --workflow demo "$D" >/dev/null 2>&1
+"$HX/install.sh" --team --workflow demo "$D" >/dev/null 2>&1
 t    "no __pycache__ copied from a pack" test ! -e "$D/.agents/workflows/demo/__pycache__"
 t    "pack rule appended to policy"    grep -qx 'deny-cmd demo-approve   # approving is a human decision' "$D/.agents/policy.conf"
 if [ "$HAVE_PY" -eq 1 ]; then
@@ -939,11 +939,11 @@ echo bad > "$D/.agents/demo/state"
 t    "pack state change refreshes the cache" bash -c "! '$D/.agents/bin/verify' >/dev/null 2>&1"
 echo good > "$D/.agents/demo/state"
 printf 'mine\n' > "$D/.agents/demo/.gitignore"
-"$HX/install.sh" "$D" >/dev/null 2>&1
+"$HX/install.sh" --team "$D" >/dev/null 2>&1
 t    "rule appended once"              bash -c "test \"\$(grep -c '^deny-cmd demo-approve' '$D/.agents/policy.conf')\" = 1"
 t    "seed file never overwritten"     grep -qx mine "$D/.agents/demo/.gitignore"
 edit "$D/.agents/policy.conf" '/^deny-cmd demo-approve/d'
-"$HX/install.sh" "$D" >/dev/null 2>&1
+"$HX/install.sh" --team "$D" >/dev/null 2>&1
 tnot "deleted rule stays deleted"      grep -q '^deny-cmd demo-approve' "$D/.agents/policy.conf"
 t    "message check alone installs hooks" grep -q 'ai-harness gitflow' "$D/.git/hooks/commit-msg"
 echo a > "$D/a.txt"; git -C "$D" add a.txt
@@ -959,7 +959,7 @@ tnot "no commit made"                  bash -c "git -C '$D' log -1 --format=%s |
 git -C "$D" reset -q b.txt
 trc  "check-msg reads stdin" 1         bash -c "cd '$D' && printf 'x SECRET-ID\n' | .agents/bin/gitflow check-msg"
 trc  "exit 2 also rejects" 1           bash -c "cd '$D' && printf 'x BLOCK-ME\n' | .agents/bin/gitflow check-msg"
-"$HX/install.sh" --workflow demo2 "$D" >/dev/null 2>&1
+"$HX/install.sh" --team --workflow demo2 "$D" >/dev/null 2>&1
 trc  "a pack reading stdin can't hide the next" 1 bash -c "cd '$D' && printf 'x OTHER-ID\n' | .agents/bin/gitflow check-msg"
 printf 'X="${UNSET_IN_CONF}"\n' >> "$D/.agents/harness.conf"
 trc  "harness.conf is parsed, not run" 1 bash -c "cd '$D' && printf 'x SECRET-ID\n' | .agents/bin/gitflow check-msg"
@@ -973,11 +973,27 @@ t    "history check sees pack rules"   bash -c "cd '$D' && .agents/bin/gitflow c
 edit "$D/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="demo"/'
 t    "pack out of WORKFLOWS stops checking" bash -c "cd '$D' && printf 'x OTHER-ID\n' | .agents/bin/gitflow check-msg"
 
+echo "local install mode"
+hasl(){ printf '%s' "$1" | grep -qF -- "$2"; }
+LM=$(repo local)
+out="$("$HARNESS/install.sh" "$LM" 2>&1)"
+t    "local is the default"            grep -qx 'HARNESS_MODE="local"' "$LM/.agents/harness.conf"
+t    "install names the mode"          hasl "$out" "install: mode: local"
+TM=$(repo teamfresh)
+"$HARNESS/install.sh" --team "$TM" >/dev/null 2>&1
+t    "--team records team"             grep -qx 'HARNESS_MODE="team"' "$TM/.agents/harness.conf"
+PF=$(repo prefeature)
+"$HARNESS/install.sh" --team "$PF" >/dev/null 2>&1; edit "$PF/.agents/harness.conf" '/^HARNESS_MODE=/d'; commit "$PF" harness
+"$HARNESS/install.sh" "$PF" >/dev/null 2>&1
+t    "a pre-feature install stays team" grep -qx 'HARNESS_MODE="team"' "$PF/.agents/harness.conf"
+"$HARNESS/install.sh" "$LM" >/dev/null 2>&1
+t    "an upgrade keeps local"          grep -qx 'HARNESS_MODE="local"' "$LM/.agents/harness.conf"
+
 echo "guards"
-tnot "refuses harness repo as target"  "$HARNESS/install.sh" "$HARNESS"
-tnot "refuses missing dir"             "$HARNESS/install.sh" "$WORK/nope"
-tnot "refuses unknown stack"           "$HARNESS/install.sh" --stack nope "$P"
-tnot "refuses unknown workflow"        "$HARNESS/install.sh" --workflow nope "$P"
+tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
+tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
+tnot "refuses unknown stack"           "$HARNESS/install.sh" --team --stack nope "$P"
+tnot "refuses unknown workflow"        "$HARNESS/install.sh" --team --workflow nope "$P"
 
 echo
 echo "passed: $PASS  failed: $FAIL  skipped sections: $SKIP"

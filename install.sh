@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ai-harness installer. Installs or upgrades the harness in a project. Safe to re-run.
 #
-#   ./install.sh [--stack <name>]... [--workflow <name>]... <project-dir>
+#   ./install.sh [--local | --team] [--stack <name>]... [--workflow <name>]... <project-dir>
 #
 # Harness-owned files are replaced on every run. Project-owned files are only created when
 # missing, so re-running is the upgrade and never touches tailoring. Stack packs (stacks/<name>)
@@ -15,12 +15,13 @@ SRC="$HARNESS/template"
 VERSION="$(cat "$HARNESS/VERSION")"
 
 usage() {
-  echo "usage: $0 [--stack <name>]... [--workflow <name>]... <project-dir>" >&2
+  echo "usage: $0 [--local | --team] [--stack <name>]... [--workflow <name>]... <project-dir>" >&2
   echo "  stacks: $(ls "$HARNESS/stacks" | tr '\n' ' ')  workflows: $(ls "$HARNESS/workflows" | tr '\n' ' ')" >&2
   exit 2
 }
 NEW_STACKS=""
 NEW_WORKFLOWS=""
+NEW_MODE=""
 DEST=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +29,8 @@ while [ $# -gt 0 ]; do
     --stack=*) NEW_STACKS="$NEW_STACKS ${1#--stack=}"; shift ;;
     --workflow) [ $# -ge 2 ] || usage; NEW_WORKFLOWS="$NEW_WORKFLOWS $2"; shift 2 ;;
     --workflow=*) NEW_WORKFLOWS="$NEW_WORKFLOWS ${1#--workflow=}"; shift ;;
+    --local) NEW_MODE=local; shift ;;
+    --team) NEW_MODE=team; shift ;;
     -h|--help) usage ;;
     -*) echo "install: unknown option $1" >&2; usage ;;
     *) [ -z "$DEST" ] || usage; DEST="$1"; shift ;;
@@ -128,6 +131,19 @@ merge_list() {  # merge_list <existing> <new...>: union, order kept
   for x in "$@"; do case " $out " in *" $x "*) ;; *) out="${out:+$out }$x" ;; esac; done
   printf '%s' "$out"
 }
+
+# --- mode: local (hidden from git in this clone) or team (committed) ---------------------------
+# A fresh install defaults to local; an upgrade keeps the recorded mode, and a missing line
+# (installs from before this setting) means team. Only --local or --team switches.
+OLD_MODE="$(conf_list HARNESS_MODE)"
+if [ -n "$NEW_MODE" ]; then MODE="$NEW_MODE"
+elif [ -z "$PREV" ]; then MODE=local
+else MODE="${OLD_MODE:-team}"; fi
+SWITCH=""
+# shellcheck disable=SC2034  # used by the mode switch (Task 5)
+[ -n "$PREV" ] && [ "${OLD_MODE:-team}" != "$MODE" ] && SWITCH="$MODE"
+conf_list_set HARNESS_MODE "$MODE"
+say "mode: $MODE$([ "$MODE" = local ] && echo ' (hidden from git in this clone; install.sh --team to commit it instead)')"
 
 STACKS="$(merge_list "$(conf_list STACKS)" $NEW_STACKS)"
 conf_list_set STACKS "$STACKS"
