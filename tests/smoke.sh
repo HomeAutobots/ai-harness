@@ -998,6 +998,37 @@ t    "git status clean after sync"     test -z "$(git -C "$LM" status --porcelai
 t    "sync --check up to date"         "$LM/.agents/bin/sync" --check
 printf 'build/\n' >> "$LM/.git/info/exclude"; "$LM/.agents/bin/sync" >/dev/null 2>&1
 t    "own exclude lines kept"          grep -qx 'build/' "$LM/.git/info/exclude"
+if [ "$HAVE_PY" -eq 1 ]; then
+  t   "claude hooks in settings.local.json" grep -q 'pre-tool --tool=claude' "$LM/.claude/settings.local.json"
+  t   "no shared settings.json in local mode" test ! -e "$LM/.claude/settings.json"
+  t   "block hides settings.local.json" grep -qx '/.claude/settings.local.json' "$LM/.git/info/exclude"
+  trc "policy hook works in local mode" 2 hook "$LM" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}'
+  printf '{\n  "model": "opus",\n  "hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": ".agents/hooks/run pre-tool --tool=claude", "timeout": 10}]}]}\n}\n' > "$LM/.claude/settings.json"
+  "$LM/.agents/bin/sync" >/dev/null 2>&1
+  t    "untracked other file keeps user content" grep -q '"model": "opus"' "$LM/.claude/settings.json"
+  tnot "untracked other file loses harness hook" grep -q 'hooks/run pre-tool' "$LM/.claude/settings.json"
+  rm -f "$LM/.claude/settings.json"
+  printf '{\n  "model": "custom"\n}\n' > "$LM/.claude/settings.local.json"
+  git -C "$LM" add -f .claude/settings.local.json
+  commit "$LM" "track settings.local.json"
+  out2="$("$LM/.agents/bin/sync" 2>&1)"
+  t    "tracked settings.local.json left alone" grep -q '"model": "custom"' "$LM/.claude/settings.local.json"
+  tnot "tracked settings.local.json not rehooked" grep -q 'pre-tool --tool=claude' "$LM/.claude/settings.local.json"
+  t    "claude adapter skipped when tracked" hasl "$out2" ".claude/settings.local.json is tracked by the project"
+  t    "status clean with tracked settings.local.json" test -z "$(git -C "$LM" status --porcelain)"
+  TC=$(repo trackedcfg)
+  mkdir -p "$TC/.claude" "$TC/.cursor"
+  printf '{\n  "model": "opus"\n}\n' > "$TC/.claude/settings.json"
+  printf '{\n  "version": 1,\n  "hooks": {}\n}\n' > "$TC/.cursor/hooks.json"
+  commit "$TC" configs
+  out="$("$HARNESS/install.sh" "$TC" 2>&1)"
+  t   "tracked configs untouched"      test -z "$(git -C "$TC" status --porcelain)"
+  t   "cursor adapter skipped, said so" hasl "$out" ".cursor/hooks.json is tracked by the project"
+  t   "claude still wired locally"     grep -q 'pre-tool --tool=claude' "$TC/.claude/settings.local.json"
+  "$HARNESS/install.sh" --team "$TM" >/dev/null 2>&1
+  t   "team mode: shared settings.json" grep -q 'pre-tool --tool=claude' "$TM/.claude/settings.json"
+  t   "team mode: no settings.local.json" test ! -e "$TM/.claude/settings.local.json"
+fi
 TS=$(repo tracked)
 printf '# Project rules\n\nBe kind to the parser.\n' > "$TS/AGENTS.md"
 printf '@AGENTS.md\n\nTeam notes for Claude.\n' > "$TS/CLAUDE.md"
@@ -1012,6 +1043,9 @@ tnot "CLAUDE.local.md doesn't repeat CLAUDE.md's import" grep -qx '@AGENTS.md' "
 t    "tracked skill left alone"        grep -q 'The team version' "$TS/.claude/skills/review-diff/SKILL.md"
 t    "and said so"                     hasl "$out" ".claude/skills/review-diff is tracked by the project"
 t    "AGENTS.md-only tools warned"     hasl "$out" "Copilot, Cursor, and Codex (which read only AGENTS.md)"
+t    "exclude block lists .agents and CLAUDE.local.md" bash -c "grep -qx '/.agents/' '$TS/.git/info/exclude' && grep -qx '/CLAUDE.local.md' '$TS/.git/info/exclude'"
+tnot "exclude block leaves tracked AGENTS.md alone" grep -qx '/AGENTS.md' "$TS/.git/info/exclude"
+tnot "exclude block leaves tracked CLAUDE.md alone" grep -qx '/CLAUDE.md' "$TS/.git/info/exclude"
 printf '@AGENTS.md\n' > "$TM/CLAUDE.local.md"; "$TM/.agents/bin/sync" >/dev/null 2>&1
 t    "team mode keeps a personal CLAUDE.local.md" test -f "$TM/CLAUDE.local.md"
 rm -f "$TM/CLAUDE.local.md"

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -25,7 +26,8 @@ BUILTIN_SKILLS = {"harness-tailor", "plan-task", "review-diff", "validate", "git
 
 
 def load_conf():
-    conf = {"ADAPTERS": "claude", "HOOKS": "policy edit turn questions", "EDIT_BUDGET": "15", "TURN_BUDGET": "300"}
+    conf = {"ADAPTERS": "claude", "HOOKS": "policy edit turn questions", "EDIT_BUDGET": "15", "TURN_BUDGET": "300",
+            "HARNESS_MODE": "team"}
     try:
         with open(os.path.join(ROOT, ".agents", "harness.conf"), encoding="utf-8") as fh:
             for line in fh:
@@ -35,6 +37,15 @@ def load_conf():
     except OSError:
         pass
     return conf
+
+
+def tracked(rel):
+    """True if the project's git index has this path (local mode never modifies such files)."""
+    try:
+        return subprocess.run(["git", "-C", ROOT, "ls-files", "--error-unmatch", "--", rel],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
 
 
 def load_policy():
@@ -298,6 +309,15 @@ def render(check):
     prev_deny = lock.get("claude_deny", [])
     drift, errors, wrote = [], [], []
     new_lock = {"claude_deny": prev_deny}
+    local = conf.get("HARNESS_MODE", "team") == "local"
+    notes = []
+
+    def skip_tracked(rel):
+        if local and tracked(rel):
+            notes.append("%s is tracked by the project; local mode leaves it alone (that adapter is off in this "
+                          "clone)" % rel)
+            return True
+        return False
 
     def settle_json(rel, new_obj, old_obj):
         path = os.path.join(ROOT, rel)
@@ -319,58 +339,72 @@ def render(check):
             fh.write(dump_json(new_obj))
         wrote.append("wrote " + rel)
 
-    # Claude Code
-    rel = os.path.join(".claude", "settings.json")
-    old, err = read_json(os.path.join(ROOT, rel))
-    if err:
-        errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
-    elif old is not None or "claude" in adapters:
-        new, deny = claude_render(old, conf, rules, "claude" in adapters, prev_deny)
-        if old is None and not new:
-            new = None
-        settle_json(rel, new, old)
-        new_lock["claude_deny"] = deny
+    # Claude Code: shared settings.json in team mode, personal settings.local.json in local mode.
+    # The other file keeps no harness entries, unless it's tracked in local mode (never touched).
+    rel = os.path.join(".claude", "settings.local.json" if local else "settings.json")
+    other = os.path.join(".claude", "settings.json" if local else "settings.local.json")
+    if not skip_tracked(rel):
+        old, err = read_json(os.path.join(ROOT, rel))
+        if err:
+            errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+        elif old is not None or "claude" in adapters:
+            new, deny = claude_render(old, conf, rules, "claude" in adapters, prev_deny)
+            if old is None and not new:
+                new = None
+            settle_json(rel, new, old)
+            new_lock["claude_deny"] = deny
+    if not (local and tracked(other)):
+        o_old, o_err = read_json(os.path.join(ROOT, other))
+        if o_old is not None and not o_err:
+            o_new, _ = claude_render(o_old, conf, rules, False, prev_deny)
+            settle_json(other, o_new or None, o_old)
+        elif o_err:
+            errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (other, o_err))
 
     # GitHub Copilot (CLI, cloud agent, VS Code): a file the harness owns outright
     rel = os.path.join(".github", "hooks", "harness.json")
-    old, err = read_json(os.path.join(ROOT, rel))
-    settle_json(rel, copilot_render(conf, "copilot" in adapters), old if not err else {"invalid": True})
+    if not skip_tracked(rel):
+        old, err = read_json(os.path.join(ROOT, rel))
+        settle_json(rel, copilot_render(conf, "copilot" in adapters), old if not err else {"invalid": True})
 
     # Cursor
     rel = os.path.join(".cursor", "hooks.json")
-    old, err = read_json(os.path.join(ROOT, rel))
-    if err:
-        errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
-    elif old is not None or "cursor" in adapters:
-        settle_json(rel, cursor_render(old, conf, "cursor" in adapters), old)
+    if not skip_tracked(rel):
+        old, err = read_json(os.path.join(ROOT, rel))
+        if err:
+            errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+        elif old is not None or "cursor" in adapters:
+            settle_json(rel, cursor_render(old, conf, "cursor" in adapters), old)
 
     # Gemini CLI (context file only; hooks not rendered yet)
     rel = os.path.join(".gemini", "settings.json")
-    old, err = read_json(os.path.join(ROOT, rel))
-    if err:
-        errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
-    elif old is not None or "gemini" in adapters:
-        settle_json(rel, gemini_render(old, "gemini" in adapters), old)
+    if not skip_tracked(rel):
+        old, err = read_json(os.path.join(ROOT, rel))
+        if err:
+            errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+        elif old is not None or "gemini" in adapters:
+            settle_json(rel, gemini_render(old, "gemini" in adapters), old)
 
     # Codex execpolicy rules: a file the harness owns outright
     rel = os.path.join(".codex", "rules", "harness.rules")
-    path = os.path.join(ROOT, rel)
-    want = codex_rules(rules, "codex" in adapters)
-    have = open(path, encoding="utf-8").read() if os.path.exists(path) else None
-    if want is None and have is not None:
-        if check:
-            drift.append(rel + " (remove)")
-        else:
-            os.remove(path)
-            wrote.append("removed " + rel)
-    elif want is not None and want != have:
-        if check:
-            drift.append(rel)
-        else:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(want)
-            wrote.append("wrote " + rel)
+    if not skip_tracked(rel):
+        path = os.path.join(ROOT, rel)
+        want = codex_rules(rules, "codex" in adapters)
+        have = open(path, encoding="utf-8").read() if os.path.exists(path) else None
+        if want is None and have is not None:
+            if check:
+                drift.append(rel + " (remove)")
+            else:
+                os.remove(path)
+                wrote.append("removed " + rel)
+        elif want is not None and want != have:
+            if check:
+                drift.append(rel)
+            else:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(want)
+                wrote.append("wrote " + rel)
 
     # Lock
     if new_lock != lock:
@@ -385,6 +419,9 @@ def render(check):
         print("sync: " + w)
     for d in drift:
         print("sync: out of date: " + d)
+    if not check:
+        for n in notes:
+            print("sync: warning: " + n, file=sys.stderr)
     for e in errors:
         print("sync: error: " + e, file=sys.stderr)
     if errors:
