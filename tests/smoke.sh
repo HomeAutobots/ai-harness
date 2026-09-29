@@ -1064,6 +1064,57 @@ for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$TM/.ag
 commit "$TM" harness
 t    "team mode: tracked harness is fine" "$TM/.agents/bin/verify"
 
+out="$("$HARNESS/install.sh" --local "$PF" 2>&1)"
+t    "switch to local recorded"       grep -qx 'HARNESS_MODE="local"' "$PF/.agents/harness.conf"
+t    "harness files untracked"        test -z "$(git -C "$PF" ls-files .agents .claude/skills CLAUDE.md AGENTS.md)"
+t    "and kept on disk"               test -x "$PF/.agents/bin/verify"
+t    "only removals to commit"        bash -c "test -z \"\$(git -C '$PF' status --porcelain | grep -v '^D ')\""
+t    "install says to commit"         hasl "$out" "commit"
+tnot "no stray AGENTS.local.md"       test -e "$PF/.agents/AGENTS.local.md"
+if [ "$HAVE_PY" -eq 1 ]; then
+  t    "deny rules move to settings.local.json" grep -q '"Bash(git reset --hard' "$PF/.claude/settings.local.json"
+  tnot "no harness deny left in tracked files" bash -c "cd '$PF' && git ls-files -z | xargs -0 grep -l 'Bash(git reset --hard' 2>/dev/null | grep -q ."
+fi
+commit "$PF" "harness goes local"
+t    "clean after the switch commit"  test -z "$(git -C "$PF" status --porcelain)"
+out="$("$HARNESS/install.sh" --team "$PF" 2>&1)"
+t    "switch to team recorded"        grep -qx 'HARNESS_MODE="team"' "$PF/.agents/harness.conf"
+tnot "exclude block gone"             grep -q 'ai-harness (local install' "$PF/.git/info/exclude"
+t    "harness shows up to add"        bash -c "git -C '$PF' status --porcelain | grep -q '^?? .agents/'"
+t    "install says to add"            hasl "$out" "git add -A"
+TT=$(repo tailored)
+"$HARNESS/install.sh" --team "$TT" >/dev/null 2>&1
+edit "$TT/AGENTS.md" 's/^> \*\*Not tailored yet.*$/This parser is safety critical./'
+if [ "$HAVE_PY" -eq 1 ]; then edit "$TT/.claude/settings.json" '1a\
+  "model": "opus",
+'; fi
+commit "$TT" harness
+"$HARNESS/install.sh" --local "$TT" >/dev/null 2>&1
+t    "tailored AGENTS.md stays tracked" git -C "$TT" ls-files --error-unmatch AGENTS.md
+t    "...without the harness blocks"  bash -c "! grep -q 'harness:core' '$TT/AGENTS.md'"
+t    "...keeping project facts"       grep -q 'This parser is safety critical' "$TT/AGENTS.md"
+t    "...and blocks move local"       grep -q 'harness:core:start' "$TT/.agents/AGENTS.local.md"
+if [ "$HAVE_PY" -eq 1 ]; then
+  t    "shared settings.json stays tracked" git -C "$TT" ls-files --error-unmatch .claude/settings.json
+  t    "...keeping project keys"      grep -q '"model": "opus"' "$TT/.claude/settings.json"
+  tnot "...without harness hooks"     grep -q 'hooks/run' "$TT/.claude/settings.json"
+  tnot "...or harness deny rules"     grep -q 'git reset --hard' "$TT/.claude/settings.json"
+fi
+t    "...with no doubled blank lines" bash -c "awk 'p == \"\" && \$0 == \"\" { bad = 1 } { p = \$0 } END { exit bad }' '$TT/AGENTS.md'"
+t    "...ending on content"           bash -c "test -n \"\$(tail -n 1 '$TT/AGENTS.md')\""
+commit "$TT" "harness goes local"
+"$HARNESS/install.sh" --team "$TT" >/dev/null 2>&1
+t    "--team puts the blocks back"    bash -c "test \"\$(grep -cE 'harness:(core|skills):(start|end)' '$TT/AGENTS.md')\" = 4"
+t    "...around the project facts"    grep -q 'This parser is safety critical' "$TT/AGENTS.md"
+HS=$(repo halfswitch)
+"$HARNESS/install.sh" --team "$HS" >/dev/null 2>&1
+edit "$HS/.agents/harness.conf" 's/^HARNESS_MODE=.*/HARNESS_MODE="local"/'; commit "$HS" harness
+"$HARNESS/install.sh" --local "$HS" >/dev/null 2>&1
+t    "--local finishes a half-done switch" test -z "$(git -C "$HS" ls-files .agents)"
+NG="$WORK/nogit"; mkdir -p "$NG"
+"$HARNESS/install.sh" --team "$NG" >/dev/null 2>&1
+t    "switch outside git succeeds"    "$HARNESS/install.sh" --local "$NG"
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"

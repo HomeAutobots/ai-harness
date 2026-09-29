@@ -9,6 +9,7 @@ re-render replaces exactly what the harness added and never touches anything els
   harness.py render [--check]                        write (or just diff) adapter configs
   harness.py lock-skill <name> <source> <ref>        pin a third-party skill by content hash
   harness.py check-skills                            verify pinned skills are unchanged
+  harness.py unshare                                 strip harness entries from tracked configs
 """
 import fnmatch
 import hashlib
@@ -429,6 +430,36 @@ def render(check):
     return 1 if drift else 0
 
 
+def unshare():
+    """install.sh --local on a team install: harness entries leave tracked shared configs.
+    Prints "untrack <path>" when nothing but harness entries remain, else strips in place."""
+    conf = load_conf()
+    rules = load_policy()
+    lock, _ = read_json(LOCK)
+    prev = (lock or {}).get("claude_deny", [])
+    for rel in (os.path.join(".claude", "settings.json"), os.path.join(".cursor", "hooks.json")):
+        path = os.path.join(ROOT, rel)
+        if not tracked(rel):
+            continue
+        old, err = read_json(path)
+        if old is None or err:
+            continue
+        if rel.startswith(".claude"):
+            new, _ = claude_render(old, conf, rules, False, prev)
+        else:
+            new = cursor_render(old, conf, False)
+        if not new:
+            print("untrack " + rel)
+        elif new != old:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(dump_json(new))
+            print("stripped " + rel)
+    for rel in (os.path.join(".github", "hooks", "harness.json"), os.path.join(".codex", "rules", "harness.rules")):
+        if tracked(rel):
+            print("untrack " + rel)
+    return 0
+
+
 # ------------------------------------------------------------------ skills lock
 
 def dir_hash(path):
@@ -510,6 +541,8 @@ def main(argv):
         return lock_skill(argv[2], argv[3], argv[4])
     if cmd == "check-skills":
         return check_skills()
+    if cmd == "unshare":
+        return unshare()
     print(__doc__.strip().split("\n\n")[-1], file=sys.stderr)
     return 2
 

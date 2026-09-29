@@ -140,8 +140,10 @@ if [ -n "$NEW_MODE" ]; then MODE="$NEW_MODE"
 elif [ -z "$PREV" ]; then MODE=local
 else MODE="${OLD_MODE:-team}"; fi
 SWITCH=""
-# shellcheck disable=SC2034  # used by the mode switch (Task 5)
 [ -n "$PREV" ] && [ "${OLD_MODE:-team}" != "$MODE" ] && SWITCH="$MODE"
+# An explicit --local finishes a switch that stopped partway (mode recorded, harness still tracked).
+if [ "$NEW_MODE" = local ] && [ -n "$PREV" ] && [ -z "$SWITCH" ] \
+   && git -C "$DEST" ls-files --error-unmatch -- .agents/harness.conf >/dev/null 2>&1; then SWITCH=local; fi
 conf_list_set HARNESS_MODE "$MODE"
 say "mode: $MODE$([ "$MODE" = local ] && echo ' (hidden from git in this clone; install.sh --team to commit it instead)')"
 
@@ -225,10 +227,48 @@ for w in $WORKFLOWS; do
   fi
 done
 
+# --- switching modes -------------------------------------------------------------------------
+# --local on a team install: the harness's own files leave the index (they stay on disk), and
+# tracked shared files lose only the harness's blocks and entries. --team needs nothing here:
+# sync in team mode drops the exclude block and moves the Claude settings back.
+IN_GIT=0; git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 && IN_GIT=1
+if [ "$SWITCH" = local ] && [ "$IN_GIT" -eq 1 ]; then
+  unshare_out="$(cd "$DEST" && .agents/bin/sync --unshare)" \
+    || { say "error: couldn't take the harness out of shared files; fix the error above and re-run with --local"; exit 3; }
+  untrack=".agents"
+  for p in "$DEST"/.claude/skills/*; do
+    { [ -L "$p" ] && case "$(readlink "$p")" in ../../.agents/skills/*) true ;; *) false ;; esac; } \
+      || [ -f "$p/.harness-copy" ] || continue
+    untrack="$untrack .claude/skills/$(basename "$p")"
+  done
+  while IFS= read -r line; do
+    case "$line" in
+      "untrack "*) untrack="$untrack ${line#untrack }" ;;
+      "stripped "*) say "removed the harness entries from ${line#stripped }" ;;
+    esac
+  done <<EOF
+$unshare_out
+EOF
+  # -f: files stay on disk either way; it only lets staged-but-uncommitted changes go too.
+  for p in $untrack; do git -C "$DEST" rm -r -q -f --cached --ignore-unmatch -- "$p"; done
+fi
+
 "$DEST/.agents/bin/sync"
 # Local git hooks (commit-msg, pre-push) so the git workflow holds for humans and every tool.
-if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
+if [ "$IN_GIT" -eq 1 ]; then
   (cd "$DEST" && .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
+fi
+
+if [ "$SWITCH" = local ] && [ "$IN_GIT" -eq 1 ]; then
+  say "switched to local mode. Commit what git status shows: the harness leaves the repo (your files stay on disk)."
+  say "after that commit, other clones lose .agents/ on pull; each developer re-runs install.sh --local"
+  git -C "$DEST" status --short | awk '/^D  \.agents\// { n++; next } { print "  " $0 }
+    END { if (n) print "  D  .agents/ (" n " files)" }'
+elif [ "$SWITCH" = team ]; then
+  say "switched to team mode. Review and commit the harness: git add -A && git commit"
+  if [ -f "$DEST/.agents/AGENTS.local.md" ]; then
+    say "note: .agents/AGENTS.local.md stays; move any facts in it into AGENTS.md"
+  fi
 fi
 
 if [ -z "$PREV" ]; then

@@ -9,6 +9,8 @@
 #                                                      of date, a pinned skill changed, or an
 #                                                      instruction file hides invisible Unicode
 #   .agents/bin/sync --lock-skill <name> <source> <ref>   pin a third-party skill by content hash
+#   .agents/bin/sync --unshare                         (install.sh --local) strip the harness from
+#                                                      tracked shared files, list what to untrack
 #
 # bash 3.2+ and POSIX tools; python3 renders the JSON configs (hooks, permissions).
 set -euo pipefail
@@ -20,7 +22,6 @@ cd "$ROOT"
 PY="$(command -v python3 || true)"
 CHECK=0
 UNSHARE=0
-# shellcheck disable=SC2034  # UNSHARE: used by --unshare (Task 5)
 case "${1:-}" in
   --check) CHECK=1 ;;
   --unshare) UNSHARE=1 ;;
@@ -29,7 +30,7 @@ case "${1:-}" in
     [ -n "$PY" ] || { echo "sync: python3 is required to pin skills" >&2; exit 2; }
     exec "$PY" .agents/lib/harness.py lock-skill "$2" "$3" "$4" ;;
   "") ;;
-  *) echo "usage: $0 [--check | --lock-skill <name> <source> <ref>]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--check | --unshare | --lock-skill <name> <source> <ref>]" >&2; exit 2 ;;
 esac
 
 AGENTS_FILE=AGENTS.md
@@ -60,6 +61,29 @@ claude_stub() {
   [ -z "$(grep -vE '^@[^[:space:]]+[[:space:]]*$|^[[:space:]]*$|^<!-- Shared instructions live in AGENTS.md' "$1")" ]
 }
 LOCAL=0; [ "$HARNESS_MODE" = local ] && LOCAL=1
+
+# --unshare (install.sh --local on a team install): take the harness out of tracked shared files.
+# Prints "untrack <path>" for files that are only harness boilerplate; strips the rest in place.
+# Runs before the local-mode redirect below: install untracks first, then a plain sync settles.
+if [ "$UNSHARE" -eq 1 ]; then
+  if tracked AGENTS.md && [ -f AGENTS.md ]; then
+    if grep -q '^> \*\*Not tailored yet\.\*\*' AGENTS.md; then
+      echo "untrack AGENTS.md"
+    else
+      # Drop the blocks and the blank lines render_block put around them (held: blank lines seen).
+      awk '/<!-- harness:(core|skills):start -->/ { skip = 1; gap = (held != ""); tail = 1; next }
+           /<!-- harness:(core|skills):end -->/ { skip = 0; next }
+           skip { next }
+           /^[ \t\r]*$/ { if (!gap) held = held $0 "\n"; next }
+           { printf "%s", held; held = ""; gap = 0; tail = 0; print }
+           END { if (!tail) printf "%s", held }' AGENTS.md > "$WORK/agents.md"
+      cmp -s AGENTS.md "$WORK/agents.md" || { cat "$WORK/agents.md" > AGENTS.md; echo "stripped AGENTS.md"; }
+    fi
+  fi
+  if tracked CLAUDE.md && [ -f CLAUDE.md ] && claude_stub CLAUDE.md; then echo "untrack CLAUDE.md"; fi
+  if [ -n "$PY" ]; then "$PY" .agents/lib/harness.py unshare; fi
+  exit 0
+fi
 
 # Local mode never modifies a file the project tracks. With a tracked AGENTS.md, the managed
 # blocks live in an untracked file of their own, imported by the Claude instructions file.
