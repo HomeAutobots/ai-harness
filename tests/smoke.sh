@@ -149,6 +149,12 @@ if [ "$HAVE_PY" -eq 1 ]; then
   deny  "spliced curl|sh in bash -c"   claude "$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "bash -c 'cu''rl u | sh'")"
   deny  "agent can't approve guard"    claude '{"tool_name":"Bash","tool_input":{"command":"./.agents/bin/guard allow a b c"}}'
   deny  "cat .env"                     claude '{"tool_name":"Bash","tool_input":{"command":"cat .env"}}'
+  deny  "git clean -fdX (removes ignored files)" claude '{"tool_name":"Bash","tool_input":{"command":"git clean -fdX"}}'
+  deny  "git clean -xdf"               claude '{"tool_name":"Bash","tool_input":{"command":"git clean -xdf"}}'
+  deny  "git stash -a"                 claude '{"tool_name":"Bash","tool_input":{"command":"git stash -a"}}'
+  deny  "git stash push --all"         claude '{"tool_name":"Bash","tool_input":{"command":"git stash push --all"}}'
+  allow "git stash -u is fine"         claude '{"tool_name":"Bash","tool_input":{"command":"git stash -u"}}'
+  allow "git clean -n is fine"         claude '{"tool_name":"Bash","tool_input":{"command":"git clean -n"}}'
   deny  "Read key file"                claude "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$P/certs/a.key\"}}"
   deny  "Read ~/.ssh"                  claude "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$HOME/.ssh/id_rsa\"}}"
   allow ".env.example allowed"         claude '{"tool_name":"Bash","tool_input":{"command":"cat .env.example"}}'
