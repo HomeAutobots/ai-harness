@@ -1780,6 +1780,84 @@ out="$("$HARNESS/install.sh" "$NG" 2>&1)"
 t    "outside git, set-asides stay in .agents/library/.migrated" grep -q 'My own step.' "$NG/.agents/library/.migrated/skills/review-diff/SKILL.md"
 t    "...with the summary"             hasl "$out" "install: kept 1 old copy that differs from the shipped version in .agents/library/.migrated; review and delete it when done"
 
+echo "personal libraries in team mode"
+PT=$(repo personalteam)
+printf 'my-own-line\n' >> "$PT/.git/info/exclude"; cp "$PT/.git/info/exclude" "$WORK/pt-exclude.before"
+PP="$WORK/pers-team"
+mkskill "$PP" mine "Mine only."; mkskill "$PP" review-diff "My review-diff."
+mkdir -p "$PP/workflows/pflow/checks" "$PP/workflows/pflow/skill"
+printf -- '---\nname: pflow\ndescription: My flow.\n---\n' > "$PP/workflows/pflow/skill/SKILL.md"
+printf '#!/usr/bin/env bash\ngrep -q PFLOW-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [pflow] mine"; exit 1; }\nexit 0\n' > "$PP/workflows/pflow/checks/turn.sh"
+out="$(AGENTS_PERSONAL_DIR="$PP" "$HARNESS/install.sh" --team --workflow pflow "$PT" 2>&1)"
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$PT/.agents/checks/$tier.sh"; done
+# shellcheck disable=SC2120  # t and tnot pass --check through
+psync(){ AGENTS_PERSONAL_DIR="$PP" "$PT/.agents/bin/sync" "$@"; }
+t    "a personal skill renders in team mode" test "$(readlink "$PT/.agents/skills/mine")" = "$PP/skills/mine"
+t    "...and Claude's mirror of it resolves" test -f "$PT/.claude/skills/mine/SKILL.md"
+t    "...kept out of git"              bash -c "grep -qx '/.agents/skills/mine' '$PT/.git/info/exclude' && grep -qx '/.claude/skills/mine' '$PT/.git/info/exclude'"
+tnot "...so git status shows no personal path" bash -c "git -C '$PT' status --porcelain --untracked-files=all | grep -E 'skills/(mine|pflow)'"
+t    "...so git add -A leaves personal renders out" bash -c "cd '$PT' && git add -A && ! git diff --cached --name-only | grep -qE 'mine|pflow'"
+tnot "...and out of the committed skills index" grep -q '`mine`' "$PT/AGENTS.md"
+tnot "...nor the personal workflow's skill" grep -q '`pflow`' "$PT/AGENTS.md"
+t    "the shared built-in wins in team mode" test "$(readlink "$PT/.agents/skills/review-diff")" = ../../.agents/builtin/skills/review-diff
+t    "...and sync says so"             hasl "$out" "your personal skill 'review-diff' isn't used in team mode"
+tnot "...instead of a shadow warning"  hasl "$out" "skill 'review-diff' from the personal library"
+t    "a personal workflow's skill stays out of git" grep -qx '/.agents/skills/pflow' "$PT/.git/info/exclude"
+t    "sync notes a personal workflow in a team repo" hasl "$out" "workflow 'pflow' comes from your personal library"
+t    "sync --check clean with the personal library" psync --check
+commit "$PT" harness
+echo PFLOW-BAD > "$PT/notes.txt"
+t    "...and its checks run here"      bash -c "AGENTS_PERSONAL_DIR='$PP' '$PT/.agents/bin/verify' | grep -qF '[pflow]'"
+rm -f "$PT/notes.txt"
+git clone -q "$PT" "$WORK/pt-ci"
+t    "a clone without the personal library: sync --check clean" "$WORK/pt-ci/.agents/bin/sync" --check
+printf 'Sneaky\342\200\213 text.\n' >> "$PP/skills/mine/SKILL.md"
+tnot "invisible Unicode in a personal skill fails --check" psync --check
+mkskill "$PP" mine "Mine only."
+printf '# Sneaky\342\200\213\n' >> "$PP/workflows/pflow/checks/turn.sh"
+tnot "invisible Unicode in an active personal pack fails --check" psync --check
+printf '#!/usr/bin/env bash\nexit 0\n' > "$PP/workflows/pflow/checks/turn.sh"
+t    "...and passes once it's gone"    psync --check
+mkskill "$PP" teamtracked "Mine."
+mkskill "$PT/.claude" teamtracked "The team's."; commit "$PT" "team skill"
+out="$(psync 2>&1)"
+t    "a personal skill never replaces a tracked file" bash -c "test ! -e '$PT/.agents/skills/teamtracked' && grep -q \"The team's.\" '$PT/.claude/skills/teamtracked/SKILL.md'"
+t    "...and says why"                 hasl "$out" "your personal skill 'teamtracked' isn't rendered here"
+t    "...and git status stays clean"   test -z "$(git -C "$PT" status --porcelain)"
+if [ "$HAVE_PY" -eq 1 ]; then
+  tnot "team mode won't pin a personal skill (skills.lock is committed)" psync --lock-skill mine me v1
+  psync --lock-skill review-diff upstream v1 >/dev/null 2>&1
+  t    "...and pins the shared copy of a name both have" psync --check
+  git -C "$PT" checkout -q -- .agents/skills.lock 2>/dev/null || rm -f "$PT/.agents/skills.lock"
+fi
+rm -f "$PT/.agents/cache/rendered-skills"; mkskill "$WORK/pers-other" other "Other."
+AGENTS_PERSONAL_DIR="$WORK/pers-other" "$PT/.agents/bin/sync" >/dev/null 2>&1
+t    "a personal render is never adopted into the shared library, even with the cache wiped" bash -c "test ! -e '$PT/.agents/library/skills/mine' && test ! -L '$PT/.agents/skills/mine'"
+psync >/dev/null 2>&1
+t    "...and comes back with its library" test -L "$PT/.agents/skills/mine"
+rm -rf "$PP/skills" "$PP/workflows"; edit "$PT/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS=""/'
+psync >/dev/null 2>&1
+t    "no personal skills: renders gone" bash -c "test ! -L '$PT/.agents/skills/mine' && test ! -L '$PT/.claude/skills/mine'"
+tnot "...and so is the exclude block"  grep -q '# >>> ai-harness' "$PT/.git/info/exclude"
+t    "...leaving the exclude file as it was" cmp -s "$PT/.git/info/exclude" "$WORK/pt-exclude.before"
+PSUB=$(repo personalsub); mkdir -p "$PSUB/app"
+mkskill "$WORK/pers-sub" subskill "Mine."
+AGENTS_PERSONAL_DIR="$WORK/pers-sub" "$HARNESS/install.sh" --team "$PSUB/app" >/dev/null 2>&1
+t    "an install in a subdirectory excludes personal renders under its prefix" grep -qx '/app/.agents/skills/subskill' "$PSUB/.git/info/exclude"
+tnot "...so git status shows none"     bash -c "git -C '$PSUB' status --porcelain --untracked-files=all | grep subskill"
+edit "$PSUB/app/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+AGENTS_PERSONAL_DIR="$WORK/pers-sub" "$PSUB/app/.agents/bin/sync" >/dev/null 2>&1
+t    "LINK_MODE=copy: a personal skill renders as a copy" test -f "$PSUB/app/.agents/skills/subskill/.harness-copy"
+tnot "...kept out of git too"          bash -c "git -C '$PSUB' status --porcelain --untracked-files=all | grep subskill"
+UL=$(repo unicodelib)
+"$HARNESS/install.sh" --team "$UL" >/dev/null 2>&1
+mkskill "$UL/vendor/lib" libbed "From a library."
+edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
+"$UL/.agents/bin/sync" >/dev/null 2>&1
+t    "an in-repo listed library: sync --check clean" "$UL/.agents/bin/sync" --check
+printf 'Sneaky\342\200\213 text.\n' >> "$UL/vendor/lib/skills/libbed/SKILL.md"
+tnot "invisible Unicode in an in-repo listed library fails --check" "$UL/.agents/bin/sync" --check
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"

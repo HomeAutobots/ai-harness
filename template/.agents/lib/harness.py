@@ -24,6 +24,7 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 LOCK = os.path.join(ROOT, ".agents", "generated.lock")
 SKILLS_LOCK = os.path.join(ROOT, ".agents", "skills.lock")
+PERSONAL = ("personal", "personal-listed")   # library sources that are one person's own
 LIBRARIES = os.path.join(ROOT, ".agents", "lib", "libraries.sh")
 
 
@@ -50,10 +51,11 @@ def tracked(rel):
         return False
 
 
-def resolve(kind, name=None):
+def resolve(kind, name=None, command="resolve"):
     """What the libraries resolve to, as (name, path, library) tuples. The resolver is
-    .agents/lib/libraries.sh (bash, so verify and git hooks work without python3); this asks it."""
-    cmd = ["bash", LIBRARIES, "resolve", kind] + ([name] if name else [])
+    .agents/lib/libraries.sh (bash, so verify and git hooks work without python3); this asks it.
+    command="items" lists every library's copy instead of the winners."""
+    cmd = ["bash", LIBRARIES, command, kind] + ([name] if name else [])
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, AGENTS_ROOT=ROOT)).stdout
     except OSError:
@@ -503,11 +505,18 @@ def read_skills_lock():
 
 
 def lock_skill(name, source, ref):
-    found = [p for n, p, _ in resolve("skills") if n == name]
-    if not found or not os.path.isfile(os.path.join(found[0], "SKILL.md")):
+    found = [(p, lib) for n, p, lib in resolve("skills", command="items") if n == name]
+    if load_conf().get("HARNESS_MODE", "team") != "local":
+        # Team mode renders (and checks) the shared copy, as sync does; skills.lock is committed.
+        found = [f for f in found if f[1] not in PERSONAL] + [f for f in found if f[1] in PERSONAL]
+        if found and found[0][1] in PERSONAL:
+            print("skill %s comes from your personal library, and team mode commits skills.lock: pins are for "
+                  "skills the project shares (put it in .agents/library/skills/ first)" % name, file=sys.stderr)
+            return 1
+    if not found or not os.path.isfile(os.path.join(found[0][0], "SKILL.md")):
         print("no skill named %s in any library (a project's own go in .agents/library/skills/)" % name, file=sys.stderr)
         return 1
-    path = found[0]
+    path = found[0][0]
     entries = read_skills_lock()
     entries[name] = (dir_hash(path), source, ref)
     with open(SKILLS_LOCK, "w", encoding="utf-8") as fh:
@@ -550,7 +559,7 @@ def check_skills(set_path=None):
     for name, (path, lib) in sorted(skills.items()):
         # Built-ins ship with the harness and a personal library is your own; pins are for
         # skills that came into the project from somewhere else.
-        if name in entries or lib in ("builtin", "personal", "personal-listed") or not os.path.isdir(path):
+        if name in entries or lib == "builtin" or lib in PERSONAL or not os.path.isdir(path):
             continue
         scripts = [f for b, _, fs in os.walk(path) for f in fs
                    if f.endswith((".sh", ".py", ".js", ".ts", ".rb", ".pl")) or

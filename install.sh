@@ -463,7 +463,8 @@ chmod +x "$DEST"/.agents/bin/* "$DEST"/.agents/hooks/run "$DEST"/.agents/checks/
 # --- switching modes -------------------------------------------------------------------------
 # --local on a team install: the harness's own files leave the index (they stay on disk), and
 # tracked shared files lose only the harness's blocks and entries. --team needs nothing here:
-# sync in team mode drops the exclude block and moves the Claude settings back.
+# sync in team mode drops the exclude block (keeping only your personal skill renders) and moves
+# the Claude settings back.
 IN_GIT=0; git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 && IN_GIT=1
 if [ "$SWITCH" = local ] && [ "$IN_GIT" -eq 1 ]; then
   unshare_out="$(cd "$DEST" && .agents/bin/sync --unshare)" \
