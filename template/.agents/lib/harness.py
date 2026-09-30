@@ -7,6 +7,7 @@ their command path (.agents/hooks/) or, for permission rules, by .agents/generat
 re-render replaces exactly what the harness added and never touches anything else.
 
   harness.py render [--check]                        write (or just diff) adapter configs
+  harness.py resolve <kind> [name]                   what the libraries resolve to (.agents/lib/libraries.sh)
   harness.py lock-skill <name> <source> <ref>        pin a third-party skill by content hash
   harness.py check-skills                            verify pinned skills are unchanged
   harness.py unshare                                 strip harness entries from tracked configs
@@ -23,6 +24,7 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 LOCK = os.path.join(ROOT, ".agents", "generated.lock")
 SKILLS_LOCK = os.path.join(ROOT, ".agents", "skills.lock")
+LIBRARIES = os.path.join(ROOT, ".agents", "lib", "libraries.sh")
 BUILTIN_SKILLS = {"harness-tailor", "plan-task", "review-diff", "validate", "git-workflow"}
 
 
@@ -545,6 +547,9 @@ def main(argv):
         return check_skills()
     if cmd == "unshare":
         return unshare()
+    if cmd == "resolve" and len(argv) in (3, 4):
+        # The resolver is bash (verify and git hooks run without python3); this just asks it.
+        return subprocess.call(["bash", LIBRARIES, "resolve"] + argv[2:], env=dict(os.environ, AGENTS_ROOT=ROOT))
     print(__doc__.strip().split("\n\n")[-1], file=sys.stderr)
     return 2
 

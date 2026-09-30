@@ -7,6 +7,7 @@ HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 
 PASS=0; FAIL=0; SKIP=0
 ok()  { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
@@ -21,6 +22,9 @@ line_of(){ grep -nF "$2" "$1" | head -1 | cut -d: -f1; }
 json_ok(){ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1"; }
 hook(){ local p="$1" ev="$2" tool="$3" payload="$4"; printf '%s' "$payload" | (cd "$p" && .agents/hooks/run "$ev" --tool="$tool"); }
 HAVE_PY=0; command -v python3 >/dev/null 2>&1 && HAVE_PY=1
+hasl(){ printf '%s' "$1" | grep -qF -- "$2"; }
+row(){ local IFS; IFS="$(printf '\t')"; printf '%s' "$*"; }   # row a b c: a<TAB>b<TAB>c, as the resolver prints
+mkskill(){ mkdir -p "$1/skills/$2"; printf -- '---\nname: %s\ndescription: %s\n---\n' "$2" "${3:-A skill.}" > "$1/skills/$2/SKILL.md"; }
 
 echo "fresh install"
 P=$(repo fresh)
@@ -990,7 +994,6 @@ edit "$D/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="demo"/'
 t    "pack out of WORKFLOWS stops checking" bash -c "cd '$D' && printf 'x OTHER-ID\n' | .agents/bin/gitflow check-msg"
 
 echo "local install mode"
-hasl(){ printf '%s' "$1" | grep -qF -- "$2"; }
 LM=$(repo local)
 out="$("$HARNESS/install.sh" "$LM" 2>&1)"
 t    "local is the default"            grep -qx 'HARNESS_MODE="local"' "$LM/.agents/harness.conf"
@@ -1363,6 +1366,68 @@ t    "team mode keeps no backup"       test ! -e "$TM/.git/ai-harness"
 t    "subdirectory local install backs up per prefix" test -f "$SQ/.git/ai-harness/backup-a[1]/.agents/harness.conf"
 "$HARNESS/install.sh" --team "$SQ/a[1]" >/dev/null 2>&1
 t    "switching to team removes a subdirectory backup" test ! -e "$SQ/.git/ai-harness/backup-a[1]"
+
+echo "libraries and the resolver"
+LB=$(repo libs)
+"$HARNESS/install.sh" --team "$LB" >/dev/null 2>&1
+LP="$WORK/lib-personal"; LC="$WORK/lib-clone"; LBI="$WORK/lib-builtin"
+res(){ (cd "$LB" && AGENTS_ROOT="$LB" AGENTS_PERSONAL_DIR="$LP" AGENTS_BUILTIN_DIR="$LBI" HOME="$WORK" bash .agents/lib/libraries.sh "$@"); }
+t    "absence: empty libraries resolve nothing" test -z "$(res resolve skills)"
+mkskill "$LB/.agents/library" shared "Project version."
+mkdir -p "$LB/vendor/lib"; mkskill "$LB/vendor/lib" shared "Team version."; mkskill "$LB/vendor/lib" team-only
+mkskill "$LP" shared "Personal version."; mkskill "$LP" mine
+mkskill "$LC" cloned
+mkskill "$LBI" shared "Built-in version."; mkskill "$LBI" builtin-only
+printf 'LIBRARIES="vendor/lib nope vendor/lib"\n' >> "$LB/.agents/harness.conf"
+# shellcheck disable=SC2088  # literal ~/ written into the config file, not shell-expanded here
+printf 'LIBRARIES="~/lib-clone"\n' > "$LP/harness.conf"
+t    "libraries in search order, each once" test "$(res libraries | cut -f1 | tr '\n' ' ')" = "project project-listed personal personal-listed builtin "
+tnot "a listed path that doesn't exist is skipped" bash -c "printf '%s' \"\$1\" | grep -q nope" _ "$(res libraries)"
+t    "a ~/ path in the personal LIBRARIES" test "$(res libraries | awk -F '\t' '$1 == "personal-listed" { print $2 }')" = "$LC"
+t    "the project library wins"        test "$(res resolve skills shared)" = "$(row shared "$LB/.agents/library/skills/shared" project)"
+t    "project-listed next"             test "$(res resolve skills team-only)" = "$(row team-only "$LB/vendor/lib/skills/team-only" project-listed)"
+t    "then personal"                   test "$(res resolve skills mine)" = "$(row mine "$LP/skills/mine" personal)"
+t    "then personal-listed"            test "$(res resolve skills cloned)" = "$(row cloned "$LC/skills/cloned" personal-listed)"
+t    "built-ins last"                  test "$(res resolve skills builtin-only)" = "$(row builtin-only "$LBI/skills/builtin-only" builtin)"
+t    "resolve lists the winners by name" test "$(res resolve skills | cut -f1 | tr '\n' ' ')" = "builtin-only cloned mine shared team-only "
+t    "every shadowed copy is reported" test "$(res shadows skills | grep -c '^shared')" = 3
+t    "items lists every copy, including shadowed" test "$(res items skills | grep -c '^shared')" = 4
+t    "a shadow names winner and loser" bash -c "printf '%s\n' \"\$1\" | grep -qxF \"\$2\"" _ "$(res shadows skills)" "$(row shared project "$LB/.agents/library/skills/shared" builtin "$LBI/skills/shared")"
+mkdir -p "$LP/workflows/pflow/skill"
+printf -- '---\nname: pflow\ndescription: Flow.\n---\n' > "$LP/workflows/pflow/skill/SKILL.md"
+tnot "an inactive workflow's skill doesn't resolve" res resolve skills pflow
+t    "workflows resolve by name"       test "$(res resolve workflows pflow)" = "$(row pflow "$LP/workflows/pflow" personal)"
+printf 'WORKFLOWS="pflow"\n' >> "$LB/.agents/harness.conf"
+t    "an active workflow's skill does" test "$(res resolve skills pflow)" = "$(row pflow "$LP/workflows/pflow/skill" personal)"
+trc  "names can't leave a library" 1   res resolve workflows ../../etc
+trc  "an unknown kind is a usage error" 2 res resolve widgets
+mkdir -p "$WORK/xdg-lib/ai-harness"
+t    "the personal library defaults to XDG_CONFIG_HOME/ai-harness" bash -c "cd '$LB' && AGENTS_ROOT='$LB' AGENTS_PERSONAL_DIR= XDG_CONFIG_HOME='$WORK/xdg-lib' bash .agents/lib/libraries.sh libraries | grep -qxF \"\$1\"" _ "$(row personal "$WORK/xdg-lib/ai-harness")"
+t    "agents_libraries_pin caches the scan until re-pinned" bash -c '
+  cd "$1" || exit 1
+  export AGENTS_ROOT="$1" AGENTS_PERSONAL_DIR="$2" AGENTS_BUILTIN_DIR="$3" HOME="$4"
+  . .agents/lib/libraries.sh
+  agents_libraries_pin
+  mkdir -p "$1/nope"
+  agents_libraries | grep -q "nope" && exit 1
+  agents_libraries_pin
+  agents_libraries | grep -q "nope"
+' _ "$LB" "$LP" "$LBI" "$WORK"
+t    "a pin is scoped to its project root" bash -c '
+  cd "$1" || exit 1
+  export AGENTS_ROOT="$1" AGENTS_PERSONAL_DIR="$2" AGENTS_BUILTIN_DIR="$3" HOME="$4"
+  . .agents/lib/libraries.sh
+  agents_libraries_pin
+  mkdir -p "$5/.agents/library"
+  AGENTS_ROOT="$5"
+  agents_libraries | grep -F "$5/.agents/library" | cut -f1 | grep -qx project
+' _ "$LB" "$LP" "$LBI" "$WORK" "$WORK/other-root"
+if [ "$HAVE_PY" -eq 1 ]; then
+  t  "harness.py resolve asks the same resolver" test "$(cd "$LB" && AGENTS_PERSONAL_DIR="$LP" AGENTS_BUILTIN_DIR="$LBI" HOME="$WORK" python3 .agents/lib/harness.py resolve skills mine)" = "$(row mine "$LP/skills/mine" personal)"
+fi
+printf 'LIBRARIES="$(touch %s/pwned)"\n' "$WORK" >> "$LP/harness.conf"
+res libraries >/dev/null 2>&1
+t    "the personal harness.conf is parsed, never run" test ! -e "$WORK/pwned"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
