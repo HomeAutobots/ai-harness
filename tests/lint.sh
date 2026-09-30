@@ -87,6 +87,17 @@ n="$(wc -l < template/.agents/core/AGENTS.core.md | tr -d ' ')"
 v="$(tr -d '[:space:]' < VERSION)"
 grep -q "^## $v\( \|$\)" CHANGELOG.md || finding "CHANGELOG.md:1" version "VERSION is $v but CHANGELOG.md has no '## $v' heading"
 
+# 8b. One CODEOWNERS list everywhere it's suggested. Looks at each line naming CODEOWNERS plus
+# the line after it, with backticks, commas, and a closing period read as separators.
+CODEOWNERS_LIST="AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/"
+for f in install.sh README.md template/.agents/skills/harness-tailor/SKILL.md; do
+  for e in $CODEOWNERS_LIST; do
+    awk -v e="$e" '/CODEOWNERS/ { n = 2 } n > 0 { n--; t = " " $0 " "; gsub(/[`,]/, " ", t); gsub(/\. /, " ", t); if (index(t, " " e " ")) found = 1 }
+                   END { exit !found }' "$f" \
+      || finding "$f:1" codeowners "the CODEOWNERS suggestion is missing '$e' (keep it to: $CODEOWNERS_LIST)"
+  done
+done
+
 # 9. Docs voice and hidden characters
 grep -E '\.(md|conf|patterns|snippet|agent)$' "$OUT.all" | xargs grep -nF "$(printf '\342\200\224')" 2>/dev/null \
   | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" em-dash "no em dashes in docs or templates; use a colon, comma, or new sentence"; done

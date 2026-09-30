@@ -56,7 +56,7 @@ It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing
 .agents/bin/sync --check && .agents/bin/verify --tier=full
 ```
 
-Add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
+Add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
 
 ### Local mode
 
@@ -214,7 +214,7 @@ Symlinked skills need Developer Mode plus `git config core.symlinks true`. Other
 Never install the harness into this repo; try changes in a scratch repo under /tmp instead.
 
 ```sh
-bash tests/lint.sh       # seconds: syntax, shellcheck, portability, ownership lists, budgets, docs voice
+bash tests/lint.sh       # seconds: syntax, shellcheck, portability, ownership lists, budgets, CODEOWNERS list, docs voice
 bash tests/smoke.sh      # ~40s, ~270 checks; the C++ section runs when cmake and a compiler exist
 bash tests/all.sh        # lint, then smoke under every awk on the machine (the release gate)
 bash scripts/package.sh  # dist/ai-harness-<version>.zip plus its SHA-256
