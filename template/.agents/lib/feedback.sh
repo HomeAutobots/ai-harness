@@ -27,6 +27,47 @@ agents_load_conf() {
   return 0
 }
 
+# agents_backup_dir: where local mode keeps its backup, inside the git dir (git clean, git stash -a,
+# and checkouts never reach it). One per install prefix, so subdirectory installs don't collide.
+# install.sh computes the same path; keep the two in step.
+agents_backup_dir() {
+  local gd pfx
+  gd="$(git -C "$AGENTS_ROOT" rev-parse --git-path ai-harness 2>/dev/null)" || return 1
+  [ -n "$gd" ] || return 1
+  case "$gd" in /*) ;; *) gd="$AGENTS_ROOT/$gd" ;; esac
+  pfx="$(git -C "$AGENTS_ROOT" rev-parse --show-prefix 2>/dev/null || true)"
+  pfx="${pfx%/}"
+  printf '%s/backup%s\n' "$gd" "${pfx:+-$(printf '%s' "$pfx" | tr '/' '_')}"
+}
+
+# agents_backup: local mode only. Copies .agents/ (minus the cache) and the untracked root
+# instruction files into agents_backup_dir, replacing the previous copy. A local AGENTS.md the
+# project has since started tracking is kept aside once, as AGENTS.md.before-tracked.
+agents_backup() {
+  [ "${HARNESS_MODE:-team}" = local ] || return 0
+  [ -d "$AGENTS_ROOT/.agents" ] || return 0
+  local dest tmp f
+  dest="$(agents_backup_dir)" || return 0
+  tmp="$dest.new.$$"
+  rm -rf "$tmp"
+  mkdir -p "$tmp" && cp -R "$AGENTS_ROOT/.agents" "$tmp/.agents" 2>/dev/null || { rm -rf "$tmp"; return 0; }
+  rm -rf "$tmp/.agents/cache"
+  for f in AGENTS.md CLAUDE.md CLAUDE.local.md; do
+    if git -C "$AGENTS_ROOT" ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+      if [ -f "$dest/$f.before-tracked" ]; then
+        cp "$dest/$f.before-tracked" "$tmp/"
+      elif [ "$f" = AGENTS.md ] && [ -f "$dest/$f" ] && ! cmp -s "$dest/$f" "$AGENTS_ROOT/$f"; then
+        cp "$dest/$f" "$tmp/$f.before-tracked"
+        echo "sync: warning: the project now tracks AGENTS.md, which replaced your local one. Your copy is in $dest/AGENTS.md.before-tracked; move its facts into .agents/AGENTS.local.md" >&2
+      fi
+    elif [ -f "$AGENTS_ROOT/$f" ]; then
+      cp "$AGENTS_ROOT/$f" "$tmp/$f"
+    fi
+  done
+  rm -rf "$dest" && mv "$tmp" "$dest"
+  return 0
+}
+
 # agents_hash: content hash of stdin (git's blob hash; git is the one tool we can count on)
 agents_hash() { git hash-object --stdin; }
 

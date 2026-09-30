@@ -58,6 +58,23 @@ fi
 command -v python3 >/dev/null 2>&1 \
   || say "warning: python3 not found. Hooks and permission rules won't be rendered until it is installed."
 
+# Local mode recovery: .agents/ is gone (git clean -X, git stash -a, a checkout) but sync kept a
+# backup in the git dir, where none of those reach. Restore it before seeding anything, so the
+# project's tailoring comes back instead of blank templates. Same path as agents_backup_dir.
+if [ ! -d "$DEST/.agents" ] && git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
+  bk="$(git -C "$DEST" rev-parse --git-path ai-harness)"
+  case "$bk" in /*) ;; *) bk="$DEST/$bk" ;; esac
+  pfx="$(git -C "$DEST" rev-parse --show-prefix)"; pfx="${pfx%/}"
+  bk="$bk/backup${pfx:+-$(printf '%s' "$pfx" | tr '/' '_')}"
+  if [ -d "$bk/.agents" ]; then
+    cp -R "$bk/.agents" "$DEST/.agents"
+    for f in AGENTS.md CLAUDE.md CLAUDE.local.md; do
+      if [ -f "$bk/$f" ] && [ ! -e "$DEST/$f" ]; then cp "$bk/$f" "$DEST/$f"; fi
+    done
+    say "restored your local harness files from $bk (.agents/ was missing)"
+  fi
+fi
+
 PREV="$(cat "$DEST/.agents/HARNESS_VERSION" 2>/dev/null || true)"
 
 # Harness-owned: replaced every run.
@@ -281,7 +298,8 @@ Next:
        "Use the harness-tailor skill to tailor the AI harness for this repo."
   2. Review what it proposes. Everything stays out of git in this clone; teammates see nothing.
   3. A new clone or worktree needs its own install.sh run.
-  Careful: git clean -fdX (or -fdx) deletes these git-ignored files, tailoring included.
+  git stash -u is fine. git clean -fdX and git stash -a take these files away; re-run install.sh
+  to restore them from the backup in .git/ai-harness/.
   To share the harness with the team instead: install.sh --team $DEST
 EOF
 elif [ -z "$PREV" ]; then

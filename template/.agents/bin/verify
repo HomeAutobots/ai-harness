@@ -205,4 +205,5 @@ if [ -n "$KEY" ]; then
   echo "$RC" > "$C.rc"
   echo "$KEY" > "$C.key"
 fi
+[ "$TIER" = edit ] || agents_backup   # local mode: keep the backup current each turn
 exit "$RC"

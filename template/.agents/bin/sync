@@ -427,6 +427,14 @@ exclude_block() {
 }
 exclude_block
 
+# Local mode: back up the local files where git clean, git stash -a, and checkouts can't reach.
+if [ "$CHECK" -eq 0 ] && [ "$LOCAL" -eq 1 ]; then
+  export AGENTS_ROOT="$ROOT"   # read by feedback.sh
+  # shellcheck source=/dev/null
+  . .agents/lib/feedback.sh
+  agents_backup
+fi
+
 # Local git hooks appear once git.conf has something for them to enforce.
 if [ "$CHECK" -eq 0 ] && [ -x .agents/bin/gitflow ]; then
   .agents/bin/gitflow install-hooks --quiet | sed 's/^gitflow: /sync: /' || true

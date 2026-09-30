@@ -3,7 +3,7 @@
 Installed by [ai-harness](https://github.com/). One source of truth for AI coding agents in this
 repo, rendered into whatever each tool reads, plus deterministic feedback tools the agents use.
 
-In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything here stays out of git in this clone: an exclude block in `.git/info/exclude` hides it, along with the harness's other files (`AGENTS.md`, `CLAUDE.md` or `CLAUDE.local.md`, `.claude/settings.local.json`, skill mirrors) when the project doesn't track them. If the project tracks `AGENTS.md`, the managed blocks go to `AGENTS.local.md` instead; if it tracks `CLAUDE.md`, `CLAUDE.local.md` imports the harness. Claude Code hooks and deny rules live in `.claude/settings.local.json`. `git clean -fdX` deletes all of it, tailoring included.
+In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything here stays out of git in this clone: an exclude block in `.git/info/exclude` hides it, along with the harness's other files (`AGENTS.md`, `CLAUDE.md` or `CLAUDE.local.md`, `.claude/settings.local.json`, skill mirrors) when the project doesn't track them. If the project tracks `AGENTS.md`, the managed blocks go to `AGENTS.local.md` instead; if it tracks `CLAUDE.md`, `CLAUDE.local.md` imports the harness. Claude Code hooks and deny rules live in `.claude/settings.local.json`. `git clean -fdX` and `git stash -a` take all of it away (`git stash -u` is fine); `sync` keeps a backup in `.git/ai-harness/backup/`, and re-running `install.sh` restores from it.
 
 ## Layout and ownership
 
