@@ -979,9 +979,16 @@ LM=$(repo local)
 out="$("$HARNESS/install.sh" "$LM" 2>&1)"
 t    "local is the default"            grep -qx 'HARNESS_MODE="local"' "$LM/.agents/harness.conf"
 t    "install names the mode"          hasl "$out" "install: mode: local"
+LN=$(repo localnext)
+out="$("$HARNESS/install.sh" "$LN" 2>&1)"
+next="$(printf '%s' "$out" | awk '/^Next:/,0')"
+t    "local next steps mention staying out of git" hasl "$next" "stays out of git"
+tnot "local next steps don't ask for a commit" hasl "$next" "commit"
+tnot "local next steps skip CODEOWNERS" hasl "$next" "CODEOWNERS"
 TM=$(repo teamfresh)
-"$HARNESS/install.sh" --team "$TM" >/dev/null 2>&1
+outtm="$("$HARNESS/install.sh" --team "$TM" 2>&1)"
 t    "--team records team"             grep -qx 'HARNESS_MODE="team"' "$TM/.agents/harness.conf"
+t    "team next steps mention CODEOWNERS" hasl "$outtm" "CODEOWNERS"
 PF=$(repo prefeature)
 "$HARNESS/install.sh" --team "$PF" >/dev/null 2>&1; edit "$PF/.agents/harness.conf" '/^HARNESS_MODE=/d'; commit "$PF" harness
 "$HARNESS/install.sh" "$PF" >/dev/null 2>&1

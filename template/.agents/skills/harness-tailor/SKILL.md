@@ -42,6 +42,7 @@ If `WORKFLOWS` in `.agents/harness.conf` lists any, fill their settings there fr
 Propose `.agents/git.conf` from evidence, uncommenting only what this repo actually requires: the default branch (`git symbolic-ref refs/remotes/origin/HEAD`), branch naming (`git branch -r`), commit subjects (`git log --format=%s -50`), CONTRIBUTING, existing PR templates (point `GIT_PR_TEMPLATE` at one if it exists), and any protected branches you can see. If the repo already has a commit template (a local `commit.template`, a `.gitmessage`, or one described in CONTRIBUTING), point `GIT_COMMIT_TEMPLATE` at it, or convert it to `.agents/git/commit.md` with placeholders. Personal preferences belong in `~/.config/ai-harness/git.conf`, not here. Check the result with `.agents/bin/gitflow config` and name the settings you guessed in your report.
 
 ### 4. AGENTS.md
+If `.agents/AGENTS.local.md` exists (`HARNESS_MODE="local"` in harness.conf and the project tracks its own AGENTS.md), put these facts there instead, below the harness's blocks; leave the tracked AGENTS.md alone.
 Replace every `TODO(harness-tailor)` and remove the "Not tailored yet" note. Fill only what applies, delete empty sections:
 - **Title and one or two lines** on what matters most (for example "hard real-time, no heap after init"). This steers judgment calls.
 - **Commands**: only ones an agent would get wrong: running a single test, codegen, required setup. The standard checks live in `verify`.
@@ -54,7 +55,8 @@ Replace every `TODO(harness-tailor)` and remove the "Not tailored yet" note. Fil
 - Everything else: don't delete. List them in the report with a recommendation.
 
 ### 6. Review hardening (recommend, don't apply)
-Recommend the human add CODEOWNERS entries so agent-steering files need review:
+In local mode (`HARNESS_MODE="local"` in harness.conf), skip this: nothing the harness added is tracked, so there's nothing yet for CODEOWNERS to cover.
+Otherwise, recommend the human add CODEOWNERS entries so agent-steering files need review:
 `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`.
 Point out anything in `.agents/policy.conf` that looks wrong for this repo.
 

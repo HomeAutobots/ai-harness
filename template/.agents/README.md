@@ -3,6 +3,8 @@
 Installed by [ai-harness](https://github.com/). One source of truth for AI coding agents in this
 repo, rendered into whatever each tool reads, plus deterministic feedback tools the agents use.
 
+In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything here stays out of git in this clone: an exclude block in `.git/info/exclude` hides it, and if the project already tracks `AGENTS.md` its managed blocks go to `AGENTS.local.md` instead.
+
 ## Layout and ownership
 
 | Path | Owner | What it is |

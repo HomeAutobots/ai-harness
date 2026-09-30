@@ -40,15 +40,29 @@ git clone <your-remote>/ai-harness.git ~/code/ai-harness
 ~/code/ai-harness/install.sh --workflow req-driven ~/code/my-project    # with a workflow pack
 ```
 
+Installs are local by default: everything the harness adds stays out of git in your clone, and files the project already tracks are never touched. Add `--team` to commit the harness instead, so the whole team and CI see it.
+
 Then open the project in any agent and say:
 
 > Use the harness-tailor skill to tailor the AI harness for this repo.
 
-It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing lint findings. Review the diff and commit. In CI:
+It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing lint findings. Review what it proposes; in team mode, commit the diff.
+
+### Team mode
+
+`install.sh --team <project-dir>` puts the harness under git, so the whole team and CI see the same thing once you commit it. Review the tailoring proposal (AGENTS.md, .agents/checks/, CLAUDE.md), then commit. In CI:
 
 ```sh
 .agents/bin/sync --check && .agents/bin/verify --tier=full
 ```
+
+Add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
+
+### Local mode
+
+Local (the default) puts the harness's files in the project as usual, but `sync` also writes a marked block to `.git/info/exclude` (works with worktrees and submodules) listing every path it created, so none of it shows up in `git status` or gets committed. Claude Code hooks and deny rules go in `.claude/settings.local.json` instead of the shared `.claude/settings.json`. If the project already tracks `AGENTS.md` or `CLAUDE.md`, those files are never touched: the harness's managed blocks go to `.agents/AGENTS.local.md` when `AGENTS.md` is tracked, and a personal `CLAUDE.local.md` takes over when `CLAUDE.md` is tracked, both excluded the same way. Copilot, Cursor, and Codex read only `AGENTS.md`, so with a tracked one they miss the harness's rules in this clone. Copilot and Cursor hooks still enforce checks and policy; Codex has no hooks yet, so only its native rule file (command blocking, not checks) applies. `verify`'s turn and full tiers add a `harness-tracked` finding, with the exact fix, if any of this gets committed by accident.
+
+A new clone or worktree starts with none of this, so each one needs its own `install.sh` run. Switch a project with `install.sh --local` or `install.sh --team`; each tells you what changed and what to commit. Once a switch to local is committed, other clones lose `.agents/` on their next pull, so each developer re-runs `install.sh` (local by default) to get it back.
 
 ## The feedback loop
 
@@ -149,15 +163,13 @@ A pack can also ship:
 - a pinned third-party skill changed (`sync --lock-skill <name> <source> <ref>` pins by SHA-256 content hash),
 - any instruction or config file an agent reads contains invisible Unicode (zero-width, bidi controls, tag characters).
 
-Also add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
-
 ## What lands in a project
 
 ```
 my-project/
 ├── AGENTS.md                    project-owned, except the two harness:* blocks
 ├── CLAUDE.md                    @AGENTS.md stub                          (claude)
-├── .claude/settings.json        hooks + deny rules merged in             (claude)
+├── .claude/settings.json        hooks + deny rules merged in; settings.local.json in local mode (claude)
 ├── .claude/skills/*             mirrors of .agents/skills/*              (claude)
 ├── .github/hooks/harness.json   hooks                                    (copilot)
 ├── .cursor/hooks.json           hooks merged in                          (cursor)
@@ -215,6 +227,9 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 ## Known gaps
 
 - Codex and Gemini CLI hooks aren't rendered yet; their formats need verifying first. Codex execpolicy rule syntax is also unverified against a live Codex.
+- Copilot and Cursor have no documented personal hook location, so a tracked `.github/hooks/harness.json` or `.cursor/hooks.json` turns that adapter off in local mode (sync warns and leaves the tracked file alone); the Copilot cloud agent, which works from the remote repo, gets nothing in local mode either.
+- Switching to local doesn't unshare a tracked `.gemini/settings.json`; its context entries stay, and local mode then leaves that tracked file alone.
+- Without python3, `install.sh --local` can't strip or untrack tracked JSON configs (`.claude/settings.json`, `.cursor/hooks.json`, `.github/hooks/harness.json`, `.codex/rules/harness.rules`); only `AGENTS.md` and `CLAUDE.md` are handled without it.
 - Hooks were tested with recorded payload shapes, not yet inside live Claude Code, Copilot, and Cursor sessions. Watch `.agents/cache/hook-events.log` on first use. The question-tool payloads (AskUserQuestion input and answers, Copilot ask_user) are the least certain; the capture falls back to recording the raw answer text.
 - `gitflow` was tested against a local bare remote and a stand-in `gh`, not live GitHub, GitLab, or Jira. `gitflow review` lists all PR comments (inline ones as `path:line`), not only unresolved threads.
 - Duplicate-question detection is word overlap with light stemming, not semantics. It catches rewordings of the same question; it can miss a paraphrase and, rarely, flag two different questions that share most words (`--force` overrides).

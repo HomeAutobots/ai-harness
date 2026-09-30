@@ -260,21 +260,33 @@ if [ "$IN_GIT" -eq 1 ]; then
 fi
 
 if [ "$SWITCH" = local ] && [ "$IN_GIT" -eq 1 ]; then
-  say "switched to local mode. Commit what git status shows: the harness leaves the repo (your files stay on disk)."
-  say "after that commit, other clones lose .agents/ on pull; each developer re-runs install.sh --local"
+  say "switched to local mode. Commit what git status shows (git add the modified files, or git commit -a): the harness leaves the repo (your files stay on disk)."
+  say "after that commit, other clones lose .agents/ on pull; each developer re-runs install.sh (local by default)"
   git -C "$DEST" status --short | awk '/^D  \.agents\// { n++; next } { print "  " $0 }
     END { if (n) print "  D  .agents/ (" n " files)" }'
 elif [ "$SWITCH" = team ]; then
   say "switched to team mode. Review and commit the harness: git add -A && git commit"
   if [ -f "$DEST/.agents/AGENTS.local.md" ]; then
-    say "note: .agents/AGENTS.local.md stays; move any facts in it into AGENTS.md"
+    say "note: .agents/AGENTS.local.md stays; move any facts in it into AGENTS.md, then delete it (git add -A would otherwise commit it)"
   fi
 fi
 
-if [ -z "$PREV" ]; then
+if [ -z "$PREV" ] && [ "$MODE" = local ]; then
   cat <<EOF
 
-ai-harness $VERSION installed in $DEST
+ai-harness $VERSION installed in $DEST (local mode)
+
+Next:
+  1. Open the project in any agent and say:
+       "Use the harness-tailor skill to tailor the AI harness for this repo."
+  2. Review what it proposes. Everything stays out of git in this clone; teammates see nothing.
+  3. A new clone or worktree needs its own install.sh run.
+  To share the harness with the team instead: install.sh --team $DEST
+EOF
+elif [ -z "$PREV" ]; then
+  cat <<EOF
+
+ai-harness $VERSION installed in $DEST (team mode)
 
 Next:
   1. Open the project in any agent and say:
