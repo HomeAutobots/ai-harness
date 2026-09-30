@@ -50,9 +50,18 @@ cmd_new() {
   echo "created .agents/evals/tasks/$id.task (tests: ${tests:-none found}). Edit CHECK and PROMPT."
 }
 
+harness_paths() {  # the harness's files, plus libraries in LIBRARIES that live inside the repo
+  local src lib
+  printf '%s\n' $HARNESS_PATHS
+  while IFS="$AGENTS_TAB" read -r src lib; do
+    [ "$src" = project-listed ] || continue
+    case "$lib" in "$ROOT"/*) printf '%s\n' "${lib#"$ROOT"/}" ;; esac
+  done < <(agents_libraries)
+}
+
 copy_harness() {  # copy_harness <dest>: this repo's harness files into a worktree
   local paths=() p
-  for p in $HARNESS_PATHS; do [ -e "$ROOT/$p" ] && paths+=("$p"); done
+  for p in $(harness_paths); do [ -e "$ROOT/$p" ] && paths+=("$p"); done
   [ ${#paths[@]} -gt 0 ] || return 0
   (cd "$ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/plans "${paths[@]}") | tar -C "$1" -xf -
 }
@@ -93,7 +102,7 @@ cmd_run() {
         tag="$id-$arm-$r"; wt="$out/wt/$tag"
         echo "eval: $tag"
         git worktree add --detach -q "$wt" "$BASE" 2>/dev/null || { echo "eval: worktree failed for $tag" >&2; r=$((r + 1)); continue; }
-        for p in $HARNESS_PATHS; do rm -rf "${wt:?}/$p"; done
+        for p in $(harness_paths); do rm -rf "${wt:?}/$p"; done
         [ "$arm" != A ] && copy_harness "$wt"
         local hooks=on
         [ "$arm" = B ] && hooks=off

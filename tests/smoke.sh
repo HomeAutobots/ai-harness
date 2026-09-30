@@ -1858,6 +1858,24 @@ t    "an in-repo listed library: sync --check clean" "$UL/.agents/bin/sync" --ch
 printf 'Sneaky\342\200\213 text.\n' >> "$UL/vendor/lib/skills/libbed/SKILL.md"
 tnot "invisible Unicode in an in-repo listed library fails --check" "$UL/.agents/bin/sync" --check
 
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "evals with a library kept inside the repo"
+  EV=$(repo evallib)
+  printf 'add() { echo $(( $1 - $2 )); }\n' > "$EV/calc.sh"; commit "$EV" calc
+  printf 'add() { echo $(( $1 + $2 )); }\n' > "$EV/calc.sh"; mkdir -p "$EV/tests"
+  printf '. ./calc.sh\n[ "$(add 2 3)" = 5 ]\n' > "$EV/tests/test_calc.sh"; commit "$EV" "Fix add"
+  FIXV=$(git -C "$EV" rev-parse HEAD)
+  "$HARNESS/install.sh" --team "$EV" >/dev/null 2>&1; commit "$EV" harness
+  mkskill "$EV/teamlib" team-skill "Team skill."
+  echo '/teamlib/' >> "$EV/.git/info/exclude"   # a clone kept inside the repo, untracked
+  edit "$EV/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="teamlib"|'
+  (cd "$EV" && .agents/bin/eval new add-fix "$FIXV" >/dev/null)
+  edit "$EV/.agents/evals/tasks/add-fix.task" "s|^CHECK=.*|CHECK='test -f teamlib/skills/team-skill/SKILL.md \&\& bash tests/test_calc.sh'|"
+  (cd "$EV" && EVAL_AGENT_CMD="$WORK/agent.sh" .agents/bin/eval run --arms=C --runs=1 >/dev/null 2>&1) || true
+  R=$(ls -d "$EV"/.agents/evals/results/*/ | tail -1)
+  t  "eval copies a project-listed library inside the repo" grep -q '^add-fix,C,1,1,' "$R/results.csv"
+fi
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
