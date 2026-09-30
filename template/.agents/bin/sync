@@ -368,20 +368,22 @@ fi
 EXCL_BEGIN="# >>> ai-harness (local install; managed by .agents/bin/sync)"
 EXCL_END="# <<< ai-harness"
 exclude_block() {
-  local ex p
+  local ex p pre
   ex="$(git rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   [ -n "$ex" ] || return 0
+  # Patterns there are relative to the repo top, so an install in a subdirectory prefixes them.
+  pre="$(git rev-parse --show-prefix 2>/dev/null || true)"
   : > "$WORK/exclude.list"
   if [ "$LOCAL" -eq 1 ]; then
-    echo "/.agents/" >> "$WORK/exclude.list"
+    echo "/${pre}.agents/" >> "$WORK/exclude.list"
     for p in AGENTS.md CLAUDE.md CLAUDE.local.md .claude/settings.local.json .github/hooks/harness.json \
              .cursor/hooks.json .gemini/settings.json .codex/rules/harness.rules; do
       { [ -e "$p" ] || [ -L "$p" ]; } || continue
-      tracked "$p" || echo "/$p" >> "$WORK/exclude.list"
+      tracked "$p" || echo "/$pre$p" >> "$WORK/exclude.list"
     done
     for p in .claude/skills/*; do
       { [ -e "$p" ] || [ -L "$p" ]; } || continue
-      if owned "$p" && ! tracked "$p"; then echo "/$p" >> "$WORK/exclude.list"; fi
+      if owned "$p" && ! tracked "$p"; then echo "/$pre$p" >> "$WORK/exclude.list"; fi
     done
   fi
   {

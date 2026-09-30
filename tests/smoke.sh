@@ -1154,6 +1154,30 @@ t    "--local strips only the harness's lines from it" bash -c "git -C '$IU' ls-
 "$LM/.agents/bin/sync" >/dev/null 2>&1
 t    "a stub keeps an import someone added" bash -c "grep -qx '@docs/style.md' '$LM/CLAUDE.md' && grep -qx '@AGENTS.md' '$LM/CLAUDE.md'"
 t    "...and is stable"               "$LM/.agents/bin/sync" --check
+ST=$(repo stale)
+"$HARNESS/install.sh" "$ST" >/dev/null 2>&1
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$ST/.agents/checks/$tier.sh"; done
+printf '# Team rules\n' > "$ST/AGENTS.md"; git -C "$ST" add -f AGENTS.md; commit "$ST" "a teammate's AGENTS.md"
+t    "stale block still lists the project's AGENTS.md" grep -qx '/AGENTS.md' "$ST/.git/info/exclude"
+out="$("$ST/.agents/bin/verify" 2>&1 || true)"
+tnot "project's own tracked AGENTS.md is no finding" hasl "$out" "harness-tracked"
+git -C "$ST" add -f .agents/harness.conf
+out="$("$ST/.agents/bin/verify" 2>&1 || true)"
+t    "tracked .agents is a finding"   hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
+tnot "...not the project's AGENTS.md" hasl "$out" "AGENTS.md:1: error"
+t    "...fix offers --team first"     bash -c "printf '%s\n' \"\$1\" | grep 'fix:' | awk '{ exit !(index(\$0, \"install.sh --team\") && index(\$0, \"install.sh --team\") < index(\$0, \"git rm\")) }'" _ "$out"
+SB=$(repo subdir)
+mkdir -p "$SB/app"; printf 'x\n' > "$SB/app/main.c"; commit "$SB" app
+"$HARNESS/install.sh" "$SB/app" >/dev/null 2>&1
+t    "subdirectory install: status clean" test -z "$(git -C "$SB" status --porcelain)"
+t    "...block entries carry the subdirectory" grep -qx '/app/.agents/' "$SB/.git/info/exclude"
+t    "...sync --check up to date"     "$SB/app/.agents/bin/sync" --check
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$SB/app/.agents/checks/$tier.sh"; done
+t    "...verify clean"                "$SB/app/.agents/bin/verify"
+git -C "$SB" add -f app/.agents/harness.conf
+out="$("$SB/app/.agents/bin/verify" 2>&1 || true)"
+t    "...tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
+git -C "$SB" rm -q --cached app/.agents/harness.conf
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
