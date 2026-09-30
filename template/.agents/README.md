@@ -3,7 +3,7 @@
 Installed by [ai-harness](https://github.com/). One source of truth for AI coding agents in this
 repo, rendered into whatever each tool reads, plus deterministic feedback tools the agents use.
 
-In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything here stays out of git in this clone: an exclude block in `.git/info/exclude` hides it, and if the project already tracks `AGENTS.md` its managed blocks go to `AGENTS.local.md` instead.
+In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything here stays out of git in this clone: an exclude block in `.git/info/exclude` hides it, along with the harness's other files (`AGENTS.md`, `CLAUDE.md` or `CLAUDE.local.md`, `.claude/settings.local.json`, skill mirrors) when the project doesn't track them. If the project tracks `AGENTS.md`, the managed blocks go to `AGENTS.local.md` instead; if it tracks `CLAUDE.md`, `CLAUDE.local.md` imports the harness. Claude Code hooks and deny rules live in `.claude/settings.local.json`. `git clean -fdX` deletes all of it, tailoring included.
 
 ## Layout and ownership
 
@@ -48,4 +48,4 @@ Exit codes everywhere: 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 
 - Approve a suppression (humans only): `.agents/bin/guard allow <file-glob> <text> <reason>`.
 - Turn hooks off for a session: `AGENTS_HOOKS=off`.
 - See this repo's git workflow: `.agents/bin/gitflow config`, then `gitflow status`.
-- CI: `.agents/bin/sync --check && .agents/bin/verify --tier=full`.
+- CI (team mode only; local mode keeps the harness out of CI): `.agents/bin/sync --check && .agents/bin/verify --tier=full`.

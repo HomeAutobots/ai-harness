@@ -281,6 +281,7 @@ Next:
        "Use the harness-tailor skill to tailor the AI harness for this repo."
   2. Review what it proposes. Everything stays out of git in this clone; teammates see nothing.
   3. A new clone or worktree needs its own install.sh run.
+  Careful: git clean -fdX (or -fdx) deletes these git-ignored files, tailoring included.
   To share the harness with the team instead: install.sh --team $DEST
 EOF
 elif [ -z "$PREV" ]; then
