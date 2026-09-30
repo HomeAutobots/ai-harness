@@ -9,7 +9,7 @@ re-render replaces exactly what the harness added and never touches anything els
   harness.py render [--check]                        write (or just diff) adapter configs
   harness.py resolve <kind> [name]                   what the libraries resolve to (.agents/lib/libraries.sh)
   harness.py lock-skill <name> <source> <ref>        pin a third-party skill by content hash
-  harness.py check-skills                            verify pinned skills are unchanged
+  harness.py check-skills [<skill-set>]              verify pinned skills are unchanged
   harness.py unshare                                 strip harness entries from tracked configs
 """
 import fnmatch
@@ -25,7 +25,6 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 LOCK = os.path.join(ROOT, ".agents", "generated.lock")
 SKILLS_LOCK = os.path.join(ROOT, ".agents", "skills.lock")
 LIBRARIES = os.path.join(ROOT, ".agents", "lib", "libraries.sh")
-BUILTIN_SKILLS = {"harness-tailor", "plan-task", "review-diff", "validate", "git-workflow"}
 
 
 def load_conf():
@@ -49,6 +48,17 @@ def tracked(rel):
                               capture_output=True).returncode == 0
     except OSError:
         return False
+
+
+def resolve(kind, name=None):
+    """What the libraries resolve to, as (name, path, library) tuples. The resolver is
+    .agents/lib/libraries.sh (bash, so verify and git hooks work without python3); this asks it."""
+    cmd = ["bash", LIBRARIES, "resolve", kind] + ([name] if name else [])
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, AGENTS_ROOT=ROOT)).stdout
+    except OSError:
+        return []
+    return [tuple(line.split("\t")) for line in out.splitlines() if line.count("\t") == 2]
 
 
 def load_policy():
@@ -493,10 +503,11 @@ def read_skills_lock():
 
 
 def lock_skill(name, source, ref):
-    path = os.path.join(ROOT, ".agents", "skills", name)
-    if not os.path.isfile(os.path.join(path, "SKILL.md")):
-        print("no skill at .agents/skills/%s" % name, file=sys.stderr)
+    found = [p for n, p, _ in resolve("skills") if n == name]
+    if not found or not os.path.isfile(os.path.join(found[0], "SKILL.md")):
+        print("no skill named %s in any library (a project's own go in .agents/library/skills/)" % name, file=sys.stderr)
         return 1
+    path = found[0]
     entries = read_skills_lock()
     entries[name] = (dir_hash(path), source, ref)
     with open(SKILLS_LOCK, "w", encoding="utf-8") as fh:
@@ -510,30 +521,43 @@ def lock_skill(name, source, ref):
     return 0
 
 
-def check_skills():
+def skill_set(set_path=None):
+    """{name: (path, library)} for the skills sync renders: sync's list when given, else the resolver's."""
+    rows = []
+    if set_path:
+        try:
+            with open(set_path, encoding="utf-8") as fh:
+                rows = [tuple(line.rstrip("\n").split("\t")) for line in fh]
+        except OSError:
+            rows = []
+    else:
+        rows = resolve("skills")
+    return {r[0]: (r[1], r[2]) for r in rows if len(r) == 3}
+
+
+def check_skills(set_path=None):
     entries = read_skills_lock()
+    skills = skill_set(set_path)
     bad = 0
-    skills_dir = os.path.join(ROOT, ".agents", "skills")
     for name, (digest, source, ref) in sorted(entries.items()):
-        path = os.path.join(skills_dir, name)
-        if not os.path.isdir(path):
+        if name not in skills:
             print("sync: pinned skill '%s' is missing" % name)
             bad = 1
-        elif dir_hash(path) != digest:
+        elif dir_hash(skills[name][0]) != digest:
             print("sync: skill '%s' changed since it was pinned (%s @ %s). Review the diff, then "
                   "re-pin with: .agents/bin/sync --lock-skill %s %s <ref>" % (name, source, ref, name, source))
             bad = 1
-    if os.path.isdir(skills_dir):
-        for name in sorted(os.listdir(skills_dir)):
-            path = os.path.join(skills_dir, name)
-            if name in entries or name in BUILTIN_SKILLS or not os.path.isdir(path):
-                continue
-            scripts = [f for b, _, fs in os.walk(path) for f in fs
-                       if f.endswith((".sh", ".py", ".js", ".ts", ".rb", ".pl")) or
-                       os.access(os.path.join(b, f), os.X_OK)]
-            if scripts:
-                print("sync: warning: skill '%s' ships scripts but isn't pinned in .agents/skills.lock. "
-                      "If it came from outside this repo, pin it." % name, file=sys.stderr)
+    for name, (path, lib) in sorted(skills.items()):
+        # Built-ins ship with the harness and a personal library is your own; pins are for
+        # skills that came into the project from somewhere else.
+        if name in entries or lib in ("builtin", "personal", "personal-listed") or not os.path.isdir(path):
+            continue
+        scripts = [f for b, _, fs in os.walk(path) for f in fs
+                   if f.endswith((".sh", ".py", ".js", ".ts", ".rb", ".pl")) or
+                   os.access(os.path.join(b, f), os.X_OK)]
+        if scripts:
+            print("sync: warning: skill '%s' ships scripts but isn't pinned in .agents/skills.lock. "
+                  "If it came from outside this repo, pin it." % name, file=sys.stderr)
     return bad
 
 
@@ -544,7 +568,7 @@ def main(argv):
     if cmd == "lock-skill" and len(argv) == 5:
         return lock_skill(argv[2], argv[3], argv[4])
     if cmd == "check-skills":
-        return check_skills()
+        return check_skills(argv[2] if len(argv) > 2 else None)
     if cmd == "unshare":
         return unshare()
     if cmd == "resolve" and len(argv) in (3, 4):

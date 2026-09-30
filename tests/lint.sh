@@ -58,7 +58,7 @@ xargs grep -nE '\.removeprefix\(|\.removesuffix\(|^[[:space:]]*match [^=]*:$|: (
   | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" py38 "Python 3.9+ feature; keep to 3.8"; done
 
 # 5. Ownership lists: every bin tool installed, every template entry placed, every built-in source
-# copied into .agents/builtin/, every built-in skill known
+# copied into .agents/builtin/
 for f in template/.agents/bin/*; do
   n="$(basename "$f")"
   grep -Eq "for tool in ([^;]*[[:space:]])?$n([[:space:]]|;)" install.sh \
@@ -69,11 +69,6 @@ for f in template/.agents/* template/.agents/.[a-z]*; do
   n="$(basename "$f")"
   case "$n" in bin|skills|checks|HARNESS_VERSION) continue ;; esac
   grep -Fq ".agents/$n" install.sh || finding "install.sh:1" ownership "template/.agents/$n is neither replaced nor seeded by install.sh"
-done
-for d in template/.agents/skills/*/; do
-  n="$(basename "$d")"
-  grep -q "BUILTIN_SKILLS = .*\"$n\"" template/.agents/lib/harness.py \
-    || finding "template/.agents/lib/harness.py:1" ownership "built-in skill '$n' is missing from BUILTIN_SKILLS"
 done
 for s in '"$SRC/.agents/skills/."' '"$HARNESS/workflows/."' '"$HARNESS/stacks/."'; do
   grep -qF "cp -R $s" install.sh \

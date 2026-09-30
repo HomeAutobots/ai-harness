@@ -125,9 +125,10 @@ replace .agents/.gitignore
 for tool in sync verify check guard tasks eval gitflow; do
   replace ".agents/bin/$tool"
 done
-for skill in "$SRC"/.agents/skills/*/; do
-  replace ".agents/skills/$(basename "$skill")"
-done
+# An upgrade from before libraries: any link in .agents/skills/ was made by hand then. A local
+# install restored from its backup lacks .agents/builtin/ too, but has .agents/library/.
+OLD_LAYOUT=0
+if [ -n "$PREV" ] && [ ! -d "$DEST/.agents/builtin" ] && [ ! -d "$DEST/.agents/library" ]; then OLD_LAYOUT=1; fi
 
 # Built-in library: every skill, workflow pack, and stack pack this harness ships, active or not.
 # Replaced wholesale on every run; other libraries shadow it by name.
@@ -208,6 +209,25 @@ repath() {  # repath <dir> <old> <new>: point whole-name mentions of path <old> 
   done
   return 0
 }
+# shipped_copy <shipped> <copy> [diff args]: true if <copy> is an unchanged copy of what this
+# harness ships (a Python cache from running it doesn't count as a change)
+shipped_copy() {
+  local a="$1" b="$2"
+  shift 2
+  diff -rq -x __pycache__ "$@" "$a" "$b" >/dev/null 2>&1
+}
+# set_aside <kind> <path> <shipped-at>: an old copy of something the harness ships that differs
+# from it (edited, or from an older version) goes where no library looks, never deleted
+set_aside() {
+  local n dest i=1
+  n="$(basename "$2")"
+  dest="$DEST/.agents/library/.migrated/$1/$n"
+  while [ -e "$dest" ] || [ -L "$dest" ]; do dest="$DEST/.agents/library/.migrated/$1/$n.$i"; i=$((i + 1)); done
+  mkdir -p "$(dirname "$dest")"
+  mv "$2" "$dest"
+  migrated "moved ${2#"$DEST"/} to ${dest#"$DEST"/} (it differs from the shipped copy)"
+  say "note: kept ${2#"$DEST"/} in ${dest#"$DEST"/}: it differs from the shipped copy, which runs from $3 now. Put any changes you want into .agents/library/$1/$n, then delete it"
+}
 STACK_SHIM_MARK="ai-harness: stack shim"
 write_stack_shim() {  # write_stack_shim <name>: .agents/stacks/<name>/lib.sh forwards to the resolved pack
   local d="$DEST/.agents/stacks/$1"
@@ -234,8 +254,13 @@ if [ -d "$DEST/.agents/workflows" ]; then
     if ! agents_valid_name "$w" || [ -L "${d%/}" ]; then
       say "warning: .agents/workflows/$w isn't a plain pack directory with a valid name; left in place, move it into .agents/library/workflows/ yourself"
     elif [ -d "$HARNESS/workflows/$w" ]; then
-      rm -rf "${DEST:?}/.agents/workflows/$w"
-      migrated "removed .agents/workflows/$w (the pack runs from .agents/builtin/workflows/$w)"
+      # The old layout copied the pack without its skill and config snippets.
+      if shipped_copy "$HARNESS/workflows/$w" "${d%/}" -x skill -x harness.conf.snippet -x policy.conf.snippet; then
+        rm -rf "${DEST:?}/.agents/workflows/$w"
+        migrated "removed .agents/workflows/$w (the pack runs from .agents/builtin/workflows/$w)"
+      else
+        set_aside workflows "$DEST/.agents/workflows/$w" ".agents/builtin/workflows/$w"
+      fi
     elif [ -e "$DEST/.agents/library/workflows/$w" ] || [ -L "$DEST/.agents/library/workflows/$w" ]; then
       say "warning: .agents/workflows/$w and .agents/library/workflows/$w both exist; keep the one you want in .agents/library/workflows/ and delete .agents/workflows/$w"
     else
@@ -272,6 +297,7 @@ if [ -d "$DEST/.agents/stacks" ]; then
     if ! agents_valid_name "$s" || [ -L "${d%/}" ]; then
       say "warning: .agents/stacks/$s isn't a plain pack directory with a valid name; left in place, move it into .agents/library/stacks/ yourself"
     elif [ -d "$HARNESS/stacks/$s" ]; then
+      shipped_copy "$HARNESS/stacks/$s" "${d%/}" || set_aside stacks "$DEST/.agents/stacks/$s" ".agents/builtin/stacks/$s"
       write_stack_shim "$s"
       migrated "replaced .agents/stacks/$s with a shim (the pack runs from .agents/builtin/stacks/$s)"
     elif [ -e "$DEST/.agents/library/stacks/$s" ] || [ -L "$DEST/.agents/library/stacks/$s" ]; then
@@ -286,6 +312,56 @@ if [ -d "$DEST/.agents/stacks" ]; then
       if awk -v s=".agents/stacks/$s/" -v l=".agents/stacks/$s/lib.sh" 'index($0, s) && !index($0, l) { f = 1 } END { exit !f }' "$DEST"/.agents/checks/*.sh 2>/dev/null; then
         say "warning: .agents/checks/ uses files in .agents/stacks/$s/ besides lib.sh; they're in .agents/library/stacks/$s/ now"
       fi
+    fi
+  done
+fi
+# .agents/skills/ is rendered by sync now. Copies of shipped skills (and of shipped packs' skills)
+# go; the project's own skills move to .agents/library/skills/. Before this layout nothing in
+# .agents/skills/ was a link unless someone made it, so an old install's links move too.
+# Marked copies (.harness-copy) are renders: sync replaces or removes them.
+if [ -d "$DEST/.agents/skills" ]; then
+  for d in "$DEST"/.agents/skills/*; do
+    { [ -e "$d" ] || [ -L "$d" ]; } || continue
+    n="$(basename "$d")"
+    [ -f "$d/SKILL.md" ] || continue
+    agents_valid_name "$n" || continue
+    lib="$DEST/.agents/library/skills/$n"
+    # Local mode never touches what the project tracks (a repo may keep its own skills here).
+    if [ "$MODE" = local ] && git -C "$DEST" ls-files --error-unmatch -- ".agents/skills/$n" >/dev/null 2>&1; then continue; fi
+    if [ -L "$d" ]; then
+      [ "$OLD_LAYOUT" -eq 1 ] || continue   # a render
+      tp="$(cd "$d" && pwd -P)"
+      case "$tp" in "$(cd "$DEST" && pwd -P)/.agents/builtin/"*) continue ;; esac   # a render too
+      if [ -e "$lib" ] || [ -L "$lib" ]; then
+        say "warning: .agents/skills/$n and .agents/library/skills/$n both exist; keep the one you want in .agents/library/skills/ and delete .agents/skills/$n"
+        continue
+      fi
+      # Same target: relative (from its new place) inside the project, as it was outside it.
+      t="$(readlink "$d")"; rp="$(cd "$DEST" && pwd -P)"
+      case "$tp" in "$rp"/*) t="../../../${tp#"$rp"/}" ;; *) case "$t" in /*) ;; *) t="$tp" ;; esac ;; esac
+      mkdir -p "$DEST/.agents/library/skills"
+      ln -s "$t" "$lib"
+      rm -f "$d"
+      migrated "moved your link .agents/skills/$n to .agents/library/skills/$n"
+      continue
+    fi
+    [ -f "$d/.harness-copy" ] && continue   # a render
+    shipped=""
+    if [ -d "$SRC/.agents/skills/$n" ]; then shipped="$SRC/.agents/skills/$n"; at=".agents/builtin/skills/$n"
+    elif [ -d "$HARNESS/workflows/$n/skill" ]; then shipped="$HARNESS/workflows/$n/skill"; at=".agents/builtin/workflows/$n/skill"; fi
+    if [ -n "$shipped" ]; then
+      if shipped_copy "$shipped" "$d"; then
+        rm -rf "${d:?}"
+        migrated "removed .agents/skills/$n (built in: $at)"
+      else
+        set_aside skills "$d" "$at"
+      fi
+    elif [ -e "$lib" ] || [ -L "$lib" ]; then
+      say "warning: .agents/skills/$n and .agents/library/skills/$n both exist; keep the one you want in .agents/library/skills/ and delete .agents/skills/$n"
+    else
+      mkdir -p "$DEST/.agents/library/skills"
+      mv "$d" "$lib"
+      migrated "moved .agents/skills/$n to .agents/library/skills/$n"
     fi
   done
 fi
@@ -326,23 +402,6 @@ for w in $WORKFLOWS; do
   if ! wp="$(agents_resolve workflows "$w")"; then
     say "warning: WORKFLOWS lists '$w' but no library has it; skipped"
     continue
-  fi
-  # Until sync renders skills from the libraries (next change), the pack's skill is copied in,
-  # marked as a copy so the migration above never takes it for a hand-made skill.
-  # Never over a skill the project made, and in team mode never a personal library's (it'd be committed).
-  sk="$DEST/.agents/skills/$w"
-  wsrc="$(agents_lookup workflows "$w" | cut -f3)"
-  if [ -e "$sk" ] && [ ! -L "$sk" ] && [ ! -f "$sk/.harness-copy" ] && [ ! -d "$HARNESS/workflows/$w" ]; then
-    say "warning: .agents/skills/$w is a skill of yours, so workflow $w's skill isn't copied over it; rename one of them"
-  elif [ "$MODE" = team ] && case "$wsrc" in personal*) true ;; *) false ;; esac; then
-    if [ -f "$sk/.harness-copy" ]; then rm -rf "${sk:?}"; fi
-  elif [ -f "$wp/skill/SKILL.md" ]; then
-    rm -rf "${DEST:?}/.agents/skills/$w"
-    mkdir -p "$DEST/.agents/skills"
-    cp -R "$wp/skill" "$DEST/.agents/skills/$w"
-    : > "$DEST/.agents/skills/$w/.harness-copy"
-  elif [ -f "$DEST/.agents/skills/$w/.harness-copy" ]; then
-    rm -rf "${DEST:?}/.agents/skills/$w"   # the pack dropped its skill
   fi
   # Settings are project-owned: appended once, never overwritten.
   snip="$wp/harness.conf.snippet"

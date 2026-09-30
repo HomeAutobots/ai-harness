@@ -2,8 +2,9 @@
 # ai-harness: sync
 # Harness-owned. Replaced on upgrade, so don't customize it in a project.
 #
-# Renders the managed blocks in AGENTS.md and maintains tool adapters (instructions, skills,
-# hooks, permissions). Also the CI gate for harness integrity.
+# Renders the managed blocks in AGENTS.md, renders skills from the libraries into .agents/skills/
+# (.agents/lib/libraries.sh resolves them), and maintains tool adapters (instructions, skill
+# mirrors, hooks, permissions). Also the CI gate for harness integrity.
 #   .agents/bin/sync                                   apply
 #   .agents/bin/sync --check                           change nothing; exit 1 if anything is out
 #                                                      of date, a pinned skill changed, or an
@@ -126,6 +127,11 @@ fi
 [ -n "$AGENTS_IN" ] || AGENTS_IN="$AGENTS_FILE"
 [ -f "$AGENTS_IN" ] || die "no $AGENTS_FILE at repo root. Run install.sh from the ai-harness repo first."
 [ -f "$CORE_SRC" ]    || die "missing $CORE_SRC. Re-run install.sh."
+[ -f .agents/lib/libraries.sh ] || die "missing .agents/lib/libraries.sh. Re-run install.sh."
+export AGENTS_ROOT="$ROOT"
+# shellcheck source=../lib/libraries.sh
+. .agents/lib/libraries.sh
+TAB="$AGENTS_TAB"
 
 # put <target> <generated>: write target only when content differs
 put() {
@@ -199,6 +205,139 @@ skill_meta() {
 }
 
 # ---------------------------------------------------------------------------
+# 0. Skills from the libraries. .agents/skills/ is their rendered view (most tools read it
+#    natively); .claude/skills/ mirrors it.
+# ---------------------------------------------------------------------------
+shown() { case "$1" in "$ROOT"/*) printf '%s' "${1#"$ROOT"/}" ;; *) printf '%s' "$1" ;; esac; }
+rendered() { [ -L "$1" ] || [ -f "$1/.harness-copy" ]; }   # sync made it: a link or a marked copy
+SKILL_SET="$WORK/skills.set"   # what gets rendered: name<TAB>path<TAB>library, by name
+: > "$SKILL_SET"
+in_set() { awk -F '\t' -v n="$1" '$1 == n { f = 1 } END { exit !f }' "$SKILL_SET"; }
+
+# A skill someone put straight into .agents/skills/ moves to the project library: that dir is
+# rendered now, and sync would otherwise remove what it didn't make.
+adopt_skills() {
+  local d n
+  for d in "$SKILLS_DIR"/*/; do
+    d="${d%/}"; n="${d##*/}"
+    [ -L "$d" ] && continue
+    [ -f "$d/SKILL.md" ] || continue
+    [ -f "$d/.harness-copy" ] && continue
+    agents_valid_name "$n" || continue
+    [ "$LOCAL" -eq 1 ] && tracked "$d" && continue   # the project's own; compute_skill_set lists it
+    if [ -e ".agents/library/skills/$n" ] || [ -L ".agents/library/skills/$n" ]; then
+      warn "$d and .agents/library/skills/$n both exist; keep the one you want in .agents/library/skills/ and delete $d (sync renders .agents/skills/)"
+      continue
+    fi
+    if [ "$CHECK" -eq 1 ]; then drift "$d (added by hand; sync moves it to .agents/library/skills/$n)"; continue; fi
+    mkdir -p .agents/library/skills
+    mv "$d" ".agents/library/skills/$n"
+    CHANGED=1
+    say "moved $d to .agents/library/skills/$n (.agents/skills/ is rendered from the libraries)"
+  done
+}
+
+# The skills to render: first match by name wins. Local mode never touches what the project
+# tracks, so a skill it keeps in .agents/skills/ itself stays there and takes its name.
+compute_skill_set() {
+  local d n
+  agents_resolve_all skills > "$SKILL_SET"
+  [ "$LOCAL" -eq 1 ] || return 0
+  for d in "$SKILLS_DIR"/*/; do
+    d="${d%/}"; n="${d##*/}"
+    [ -L "$d" ] && continue
+    [ -f "$d/SKILL.md" ] || continue
+    agents_valid_name "$n" && tracked "$d" || continue
+    awk -F '\t' -v n="$n" '$1 != n' "$SKILL_SET" > "$WORK/skills.tmp"
+    printf '%s\t%s\t%s\n' "$n" "$ROOT/$d" tracked >> "$WORK/skills.tmp"
+    LC_ALL=C sort "$WORK/skills.tmp" > "$SKILL_SET"
+  done
+}
+
+# The same name in two libraries: the higher one wins, with a warning naming both. Workflows and
+# stacks only matter while they're active.
+report_shadows() {  # report_shadows <kind> <ALL | active names>
+  local n ws wp lsrc lpath
+  agents_shadows "$1" | while IFS="$TAB" read -r n ws wp lsrc lpath; do
+    [ "$2" = ALL ] || case " $2 " in *" $n "*) ;; *) continue ;; esac
+    warn "${1%s} '$n' from the $ws library ($(shown "$wp")) shadows the one in $lsrc ($(shown "$lpath"))"
+  done
+}
+
+# render_skills: .agents/skills/<name> for each skill in the set. A relative link for a source
+# inside the project, an absolute one outside it; a copy with LINK_MODE=copy, or when team mode
+# commits a shared skill from outside the repo (a link there can't be committed).
+render_skills() {
+  local name src lib target rel copy how
+  while IFS="$TAB" read -r name src lib; do
+    target="$SKILLS_DIR/$name"
+    [ "$src" = "$ROOT/$target" ] && continue   # a tracked skill in place (local mode)
+    copy=0; [ "$LINK_MODE" = copy ] && copy=1
+    case "$src" in
+      "$ROOT"/*) rel="../../${src#"$ROOT"/}" ;;
+      *) rel="$src"
+         if [ "$LOCAL" -eq 0 ]; then case "$lib" in personal|personal-listed) ;; *) copy=1 ;; esac; fi ;;
+    esac
+    if [ "$LOCAL" -eq 1 ] && tracked "$target"; then
+      warn "$target is tracked by the project; local mode leaves it alone"
+      continue
+    fi
+    if { [ -e "$target" ] || [ -L "$target" ]; } && ! rendered "$target"; then
+      warn "$target wasn't made by sync, leaving it alone (move it into .agents/library/skills/ if it's yours)"
+      continue
+    fi
+    if [ "$copy" -eq 1 ]; then
+      if [ ! -L "$target" ] && [ -d "$target" ] \
+         && diff -rq -x .harness-copy "$src" "$target" >/dev/null 2>&1; then continue; fi
+    else
+      if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then continue; fi
+    fi
+    if [ "$CHECK" -eq 1 ]; then drift "$target"; continue; fi
+    mkdir -p "$SKILLS_DIR"
+    rm -rf "$target"
+    if [ "$copy" -eq 1 ]; then
+      mkdir -p "$target"
+      cp -R "$src/." "$target/"
+      : > "$target/.harness-copy"
+      how=copy
+    else
+      ln -s "$rel" "$target"
+      how="link"
+    fi
+    CHANGED=1
+    say "rendered $target ($how)"
+  done < "$SKILL_SET"
+  # Remove renders whose skill no longer resolves.
+  [ -d "$SKILLS_DIR" ] || return 0
+  for target in "$SKILLS_DIR"/*; do
+    { [ -e "$target" ] || [ -L "$target" ]; } || continue
+    name="${target##*/}"
+    in_set "$name" && continue
+    rendered "$target" || continue
+    [ "$LOCAL" -eq 1 ] && tracked "$target" && continue
+    if [ "$CHECK" -eq 1 ]; then drift "$target (stale)"; continue; fi
+    rm -rf "$target"
+    CHANGED=1
+    say "removed stale $target"
+  done
+}
+
+adopt_skills
+compute_skill_set
+report_shadows skills ALL
+report_shadows workflows "${WORKFLOWS:-}"
+report_shadows stacks "${STACKS:-}"
+set -f   # the names are split on spaces; a glob character stays literal
+for w in ${WORKFLOWS:-}; do
+  agents_resolve workflows "$w" >/dev/null || warn "WORKFLOWS lists '$w', but no library has it; its checks and skill are skipped"
+done
+for s in ${STACKS:-}; do
+  agents_resolve stacks "$s" >/dev/null || warn "STACKS lists '$s', but no library has it; tier scripts that source .agents/stacks/$s/lib.sh stop with a tooling problem"
+done
+set +f
+render_skills
+
+# ---------------------------------------------------------------------------
 # 1. AGENTS.md managed blocks
 # ---------------------------------------------------------------------------
 CORE_BODY="$WORK/core.md"
@@ -210,23 +349,22 @@ CORE_BODY="$WORK/core.md"
 SKILLS_BODY="$WORK/skills.md"
 {
   echo "## Skills index"
-  echo "Generated from \`.agents/skills/*/SKILL.md\` by \`.agents/bin/sync\`. If your tool doesn't load skills on its own, read the matching SKILL.md before starting that kind of task."
+  echo "Generated by \`.agents/bin/sync\` from the skill libraries into \`.agents/skills/\`. If your tool doesn't load skills on its own, read \`.agents/skills/<name>/SKILL.md\` before starting that kind of task."
   echo
   found=0
-  for dir in "$SKILLS_DIR"/*/; do
-    f="${dir}SKILL.md"
+  while IFS="$TAB" read -r dname src _; do
+    f="$src/SKILL.md"
     [ -f "$f" ] || continue
-    dname="$(basename "$dir")"
     meta="$(skill_meta "$f")"
     sname="${meta%%$'\t'*}"
     sdesc="${meta#*$'\t'}"
-    [ -n "$sname" ] || warn "$f has no 'name' in its frontmatter"
+    [ -n "$sname" ] || warn "$(shown "$f") has no 'name' in its frontmatter"
     [ -z "$sname" ] || [ "$sname" = "$dname" ] \
-      || warn "$f: name '$sname' doesn't match folder '$dname' (the Agent Skills spec requires a match)"
-    [ -n "$sdesc" ] || warn "$f has no 'description', so agents won't know when to use it"
+      || warn "$(shown "$f"): name '$sname' doesn't match '$dname' (the Agent Skills spec requires a match)"
+    [ -n "$sdesc" ] || warn "$(shown "$f") has no 'description', so agents won't know when to use it"
     echo "- \`$dname\`: $sdesc"
     found=1
-  done
+  done < "$SKILL_SET"
   [ "$found" -eq 1 ] || echo "_No skills yet._"
 } > "$SKILLS_BODY"
 
@@ -253,13 +391,10 @@ owned() {
   [ -f "$1/.harness-copy" ]
 }
 
-# mirror_skills <tool-skills-dir>: expose each .agents/skills/<name> in a tool's own skills dir
+# mirror_skills <tool-skills-dir>: expose each rendered skill in a tool's own skills dir
 mirror_skills() {
-  local dest="$1" dir src name target rel
-  for dir in "$SKILLS_DIR"/*/; do
-    [ -f "${dir}SKILL.md" ] || continue
-    src="${dir%/}"
-    name="$(basename "$src")"
+  local dest="$1" name src target rel
+  while IFS="$TAB" read -r name src _; do
     target="$dest/$name"
     rel="../../$SKILLS_DIR/$name"
 
@@ -284,21 +419,22 @@ mirror_skills() {
     mkdir -p "$dest"
     rm -rf "$target"
     if [ "$LINK_MODE" = copy ]; then
-      cp -R "$src" "$target"
+      mkdir -p "$target"
+      cp -R "$src/." "$target/"
       : > "$target/.harness-copy"
     else
       ln -s "$rel" "$target"
     fi
     CHANGED=1
     say "mirrored $target ($LINK_MODE)"
-  done
+  done < "$SKILL_SET"
 
-  # Remove harness-made entries whose skill no longer exists.
+  # Remove harness-made entries whose skill no longer renders.
   [ -d "$dest" ] || return 0
   for target in "$dest"/*; do
     { [ -e "$target" ] || [ -L "$target" ]; } || continue
     name="$(basename "$target")"
-    [ -f "$SKILLS_DIR/$name/SKILL.md" ] && continue
+    in_set "$name" && continue
     owned "$target" || continue
     [ "$LOCAL" -eq 1 ] && tracked "$target" && continue
     if [ "$CHECK" -eq 1 ]; then drift "$target (stale)"; continue; fi
@@ -380,7 +516,7 @@ if [ -n "$PY" ]; then
     [ -n "$OUT" ] && { printf '%s\n' "$OUT"; CHANGED=1; }
     [ "$RENDER_RC" -eq 0 ] || warn "adapter rendering reported errors (see above)"
   fi
-  "$PY" .agents/lib/harness.py check-skills || DRIFT=1
+  "$PY" .agents/lib/harness.py check-skills "$SKILL_SET" || DRIFT=1
 else
   warn "python3 not found: hooks and permission rules were not rendered. Install python3 and re-run."
 fi

