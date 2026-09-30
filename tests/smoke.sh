@@ -153,7 +153,17 @@ if [ "$HAVE_PY" -eq 1 ]; then
   deny  "git clean -xdf"               claude '{"tool_name":"Bash","tool_input":{"command":"git clean -xdf"}}'
   deny  "git stash -a"                 claude '{"tool_name":"Bash","tool_input":{"command":"git stash -a"}}'
   deny  "git stash push --all"         claude '{"tool_name":"Bash","tool_input":{"command":"git stash push --all"}}'
+  deny  "git -C . clean -fdx"          claude '{"tool_name":"Bash","tool_input":{"command":"git -C . clean -fdx"}}'
+  deny  "git clean --force -x"         claude '{"tool_name":"Bash","tool_input":{"command":"git clean --force -x"}}'
+  deny  "git -c k=v stash -a"          claude '{"tool_name":"Bash","tool_input":{"command":"git -c core.x=y stash -a"}}'
+  deny  "git stash push --al (prefix)" claude '{"tool_name":"Bash","tool_input":{"command":"git stash push --al"}}'
   allow "git stash -u is fine"         claude '{"tool_name":"Bash","tool_input":{"command":"git stash -u"}}'
+  allow "git stash push -m wip is fine" claude '{"tool_name":"Bash","tool_input":{"command":"git stash push -m wip"}}'
+  deny  "git -P clean -x"              claude '{"tool_name":"Bash","tool_input":{"command":"git -P clean -x"}}'
+  deny  "git -C \"a b\" clean -fdx"     claude '{"tool_name":"Bash","tool_input":{"command":"git -C \"a b\" clean -fdx"}}'
+  allow "git stash list --date=local"  claude '{"tool_name":"Bash","tool_input":{"command":"git stash list --date=local"}}'
+  allow "git stash show -p"            claude '{"tool_name":"Bash","tool_input":{"command":"git stash show -p"}}'
+  allow "git clean -n -e build"        claude '{"tool_name":"Bash","tool_input":{"command":"git clean -n -e build"}}'
   allow "git clean -n is fine"         claude '{"tool_name":"Bash","tool_input":{"command":"git clean -n"}}'
   deny  "Read key file"                claude "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$P/certs/a.key\"}}"
   deny  "Read ~/.ssh"                  claude "{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$HOME/.ssh/id_rsa\"}}"

@@ -91,7 +91,7 @@ Three tiers, each a project-owned script in `.agents/checks/`, all run through o
 
 **Guard** scans only lines added in the working tree and blocks the ways to get green without fixing anything: new suppressions (NOLINT, cppcheck-suppress, pragma ignores, `-Wno-`, noqa, eslint-disable, ts-ignore, and friends), skipped or disabled tests, `.only`, deleted test files, and removed test cases. A human can approve an exception with `guard allow <file-glob> <text> <reason>`; the policy blocks agents from running that.
 
-**Policy** lives in `.agents/policy.conf`: `deny-cmd` (command prefix, checked per segment of chains and pipelines, including inside `bash -c`), `deny-arg`, `deny-regex`, `deny-read` and `allow-read` (paths, also when named in a shell command). Defaults block `reset --hard`, `clean -f`, history rewrites, `--no-verify`, piping downloads into a shell, `sudo`, and reads of `.env` files, key material, and credential directories. Git workflow rules (pushes, PRs, merges, branch and commit formats) live in `.agents/git.conf`.
+**Policy** lives in `.agents/policy.conf`: `deny-cmd` (command prefix, checked per segment of chains and pipelines, including inside `bash -c`), `deny-arg`, `deny-regex`, `deny-read` and `allow-read` (paths, also when named in a shell command). Defaults block `reset --hard`, `clean -f`, `git clean -x`/`-X`, `git stash -a`, history rewrites, `--no-verify`, piping downloads into a shell, `sudo`, and reads of `.env` files, key material, and credential directories. Git workflow rules (pushes, PRs, merges, branch and commit formats) live in `.agents/git.conf`.
 
 ## Validation gates
 
