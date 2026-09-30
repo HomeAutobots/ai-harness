@@ -127,11 +127,12 @@ harness_content() {  # harness_content <path>: true if the file (or skill mirror
 LOCAL_RC=0
 if [ "$TIER" != edit ] && [ "${HARNESS_MODE:-team}" = local ]; then
   ex="$(git rev-parse --git-path info/exclude 2>/dev/null)"
-  pre="$(git rev-parse --show-prefix 2>/dev/null || true)"
+  # Same escaping as sync's entries; passed through the environment, since awk -v eats backslashes.
+  pre="$(git rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
   paths=""
-  [ -f "$ex" ] && paths="$(awk -v pre="$pre" '$0 == "# >>> ai-harness (local install; managed by .agents/bin/sync)" { f = 1; next }
+  [ -f "$ex" ] && paths="$(pre="$pre" awk '$0 == "# >>> ai-harness (local install; managed by .agents/bin/sync)" { f = 1; next }
                                $0 == "# <<< ai-harness" { f = 0 }
-                               f { sub(/^\//, ""); sub(/\/$/, "")
+                               f { sub(/^\//, ""); sub(/\/$/, ""); pre = ENVIRON["pre"]
                                    if (pre != "") { if (index($0, pre) != 1) next; $0 = substr($0, length(pre) + 1) }
                                    print }' "$ex")"
   [ -n "$paths" ] || paths=".agents"

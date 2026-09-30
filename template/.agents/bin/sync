@@ -61,16 +61,28 @@ CLAUDE_MARK='<!-- Shared instructions live in AGENTS.md'
 claude_stub() {
   [ -z "$(grep -vE "^@[^[:space:]]+[[:space:]]*\$|^[[:space:]]*\$|^$CLAUDE_MARK" "$1")" ]
 }
+# strip_claude <file> <keep-agents>: the file minus the harness's lines (the marker line, the
+# blank lines before it, @.agents/AGENTS.local.md, and @AGENTS.md unless keep-agents is 1).
+strip_claude() {
+  awk -v m="$CLAUDE_MARK" -v keep="$2" '/^@\.agents\/AGENTS\.local\.md[ \t\r]*$/ { next }
+       !keep && /^@AGENTS\.md[ \t\r]*$/ { next }
+       index($0, m) == 1 { held = ""; next }
+       /^[ \t\r]*$/ { held = held $0 "\n"; next }
+       { printf "%s", held; held = ""; print }
+       END { printf "%s", held }' "$1"
+}
 LOCAL=0; [ "$HARNESS_MODE" = local ] && LOCAL=1
 
 # --unshare (install.sh --local on a team install): take the harness out of tracked shared files.
 # Prints "untrack <path>" for files that are only harness boilerplate; strips the rest in place.
 # Runs before the local-mode redirect below: install untracks first, then a plain sync settles.
 if [ "$UNSHARE" -eq 1 ]; then
+  KEEP_AGENTS=0   # 1: AGENTS.md stays tracked with the project's facts, so imports of it stay too
   if tracked AGENTS.md && [ -f AGENTS.md ]; then
     if grep -q '^> \*\*Not tailored yet\.\*\*' AGENTS.md; then
       echo "untrack AGENTS.md"
     else
+      KEEP_AGENTS=1
       # Drop the blocks and the blank lines render_block put around them (held: blank lines seen).
       awk '/<!-- harness:(core|skills):start -->/ { skip = 1; gap = (held != ""); tail = 1; next }
            /<!-- harness:(core|skills):end -->/ { skip = 0; next }
@@ -84,11 +96,7 @@ if [ "$UNSHARE" -eq 1 ]; then
   # CLAUDE.md: only the harness's lines go (its imports and the marker line it writes), and only
   # when the marker says the harness wrote the file. A project's own CLAUDE.md stays as it is.
   if tracked CLAUDE.md && [ -f CLAUDE.md ] && grep -q "^$CLAUDE_MARK" CLAUDE.md; then
-    awk -v m="$CLAUDE_MARK" '/^@(AGENTS\.md|\.agents\/AGENTS\.local\.md)[ \t\r]*$/ { next }
-         index($0, m) == 1 { held = ""; next }
-         /^[ \t\r]*$/ { held = held $0 "\n"; next }
-         { printf "%s", held; held = ""; print }
-         END { printf "%s", held }' CLAUDE.md > "$WORK/claude.md"
+    strip_claude CLAUDE.md "$KEEP_AGENTS" > "$WORK/claude.md"
     if ! grep -q '[^[:space:]]' "$WORK/claude.md"; then
       echo "untrack CLAUDE.md"
     elif ! cmp -s CLAUDE.md "$WORK/claude.md"; then
@@ -101,19 +109,22 @@ fi
 
 # Local mode never modifies a file the project tracks. With a tracked AGENTS.md, the managed
 # blocks live in an untracked file of their own, imported by the Claude instructions file.
+AGENTS_IN=""   # what the blocks render into; differs from AGENTS_FILE only for --check on a new file
 if [ "$LOCAL" -eq 1 ] && tracked AGENTS.md; then
   AGENTS_FILE=.agents/AGENTS.local.md
-  if [ ! -f "$AGENTS_FILE" ] && [ "$CHECK" -eq 0 ]; then
+  if [ ! -f "$AGENTS_FILE" ]; then
     printf '%s\n' '# Harness instructions (local)' '' \
       'This clone runs the AI harness in local mode and the project tracks AGENTS.md, so the harness keeps its instructions here. Project facts from harness-tailor go below the blocks.' \
-      > "$AGENTS_FILE"
+      > "$WORK/agents.local.md"
+    if [ "$CHECK" -eq 1 ]; then AGENTS_IN="$WORK/agents.local.md"; else cp "$WORK/agents.local.md" "$AGENTS_FILE"; fi
   fi
   case " $ADAPTERS " in *" copilot "*|*" cursor "*|*" codex "*)
     [ "$CHECK" -eq 1 ] || warn "the project tracks AGENTS.md, so Copilot, Cursor, and Codex (which read only AGENTS.md) won't see the harness rules in this clone; their hooks still enforce the checks and policy" ;;
   esac
 fi
 
-[ -f "$AGENTS_FILE" ] || die "no $AGENTS_FILE at repo root. Run install.sh from the ai-harness repo first."
+[ -n "$AGENTS_IN" ] || AGENTS_IN="$AGENTS_FILE"
+[ -f "$AGENTS_IN" ] || die "no $AGENTS_FILE at repo root. Run install.sh from the ai-harness repo first."
 [ -f "$CORE_SRC" ]    || die "missing $CORE_SRC. Re-run install.sh."
 
 # put <target> <generated>: write target only when content differs
@@ -225,7 +236,7 @@ if [ "$LOCAL" -eq 1 ] && [ "$CHECK" -eq 0 ] && [ "$AGENTS_FILE" = AGENTS.md ] \
    && ! grep -qF '<!-- harness:core:start -->' AGENTS.md; then
   warn "AGENTS.md was here before the harness and git doesn't track it, so local mode now hides it from git status too. To share it, take the harness blocks out, commit it, and re-run sync."
 fi
-render_block core   "$CORE_BODY"   "$AGENTS_FILE" "$WORK/step1.md"
+render_block core   "$CORE_BODY"   "$AGENTS_IN" "$WORK/step1.md"
 render_block skills "$SKILLS_BODY" "$WORK/step1.md" "$WORK/step2.md"
 put "$AGENTS_FILE" "$WORK/step2.md"
 
@@ -335,10 +346,16 @@ adapter_claude() {
       done
     fi
   fi
-  # Team mode: a CLAUDE.local.md the harness made (marker line included) would load AGENTS.md twice.
-  if [ "$LOCAL" -eq 0 ] && [ -f CLAUDE.local.md ] && claude_stub CLAUDE.local.md \
-     && grep -q "^$CLAUDE_MARK" CLAUDE.local.md; then
-    if [ "$CHECK" -eq 1 ]; then drift "CLAUDE.local.md (remove)"; else rm -f CLAUDE.local.md; CHANGED=1; say "removed CLAUDE.local.md (team mode uses CLAUDE.md)"; fi
+  # A CLAUDE.local.md the harness made (marker line) that isn't wanted any more (team mode, or the
+  # tracked CLAUDE.md now imports AGENTS.md itself) would load AGENTS.md twice. Only the harness's
+  # lines go; the file goes only if nothing else is left.
+  if [ -f CLAUDE.local.md ] && grep -q "^$CLAUDE_MARK" CLAUDE.local.md \
+     && ! { [ "$LOCAL" -eq 1 ] && { { [ "$cf" = CLAUDE.local.md ] && [ -n "$imports" ]; } || tracked CLAUDE.local.md; }; }; then
+    strip_claude CLAUDE.local.md 0 > "$WORK/claude.local.md"
+    if grep -q '[^[:space:]]' "$WORK/claude.local.md"; then
+      put CLAUDE.local.md "$WORK/claude.local.md"
+    elif [ "$CHECK" -eq 1 ]; then drift "CLAUDE.local.md (remove)"
+    else rm -f CLAUDE.local.md; CHANGED=1; say "removed CLAUDE.local.md (CLAUDE.md imports AGENTS.md)"; fi
   fi
   mirror_skills .claude/skills
 }
@@ -378,7 +395,7 @@ exclude_block() {
   ex="$(git rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   [ -n "$ex" ] || return 0
   # Patterns there are relative to the repo top, so an install in a subdirectory prefixes them.
-  pre="$(git rev-parse --show-prefix 2>/dev/null || true)"
+  pre="$(git rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
   # Team mode with no block: nothing of ours to remove, so the file isn't even rewritten.
   if [ "$LOCAL" -eq 0 ] && ! { [ -f "$ex" ] && grep -qxF "$EXCL_BEGIN" "$ex"; }; then return 0; fi
   : > "$WORK/exclude.list"

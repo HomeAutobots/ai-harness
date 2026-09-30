@@ -1101,6 +1101,7 @@ t    "tailored AGENTS.md stays tracked" git -C "$TT" ls-files --error-unmatch AG
 t    "...without the harness blocks"  bash -c "! grep -q 'harness:core' '$TT/AGENTS.md'"
 t    "...keeping project facts"       grep -q 'This parser is safety critical' "$TT/AGENTS.md"
 t    "...and blocks move local"       grep -q 'harness:core:start' "$TT/.agents/AGENTS.local.md"
+t    "...CLAUDE.md stays tracked, still importing the shared AGENTS.md" bash -c "git -C '$TT' ls-files --error-unmatch CLAUDE.md && grep -qx '@AGENTS.md' '$TT/CLAUDE.md'"
 if [ "$HAVE_PY" -eq 1 ]; then
   t    "shared settings.json stays tracked" git -C "$TT" ls-files --error-unmatch .claude/settings.json
   t    "...keeping project keys"      grep -q '"model": "opus"' "$TT/.claude/settings.json"
@@ -1268,6 +1269,25 @@ EOF
   t  "eval copies CLAUDE.local.md into its worktrees" grep -q '^add-fix,C,1,1,' "$R/results.csv"
   t  "...git status still clean"      test -z "$(git -C "$EL" status --porcelain)"
 fi
+printf '@~/my-prefs.md\n' | cat - "$TS/CLAUDE.local.md" > "$WORK/cl.md"; cat "$WORK/cl.md" > "$TS/CLAUDE.local.md"
+"$HARNESS/install.sh" --team "$TS" >/dev/null 2>&1
+t    "--team keeps a personal import in CLAUDE.local.md" grep -qx '@~/my-prefs.md' "$TS/CLAUDE.local.md"
+tnot "...dropping the harness's"      grep -qx '@.agents/AGENTS.local.md' "$TS/CLAUDE.local.md"
+printf '@AGENTS.md\n\nTeam notes.\n' > "$NI/CLAUDE.md"; commit "$NI" "CLAUDE.md imports AGENTS.md"
+"$NI/.agents/bin/sync" >/dev/null 2>&1
+tnot "a CLAUDE.local.md no longer needed goes" test -e "$NI/CLAUDE.local.md"
+printf '# Team rules\n' > "$WI/AGENTS.md"; git -C "$WI" add -f AGENTS.md; commit "$WI" "a teammate's AGENTS.md"
+trc  "sync --check reports a missing AGENTS.local.md as drift" 1 "$WI/.agents/bin/sync" --check
+"$WI/.agents/bin/sync" >/dev/null 2>&1
+t    "...sync creates it"             grep -q 'harness:core:start' "$WI/.agents/AGENTS.local.md"
+SQ=$(repo oddsub)
+mkdir -p "$SQ/a[1]"; printf 'x\n' > "$SQ/a[1]/main.c"; commit "$SQ" app
+"$HARNESS/install.sh" "$SQ/a[1]" >/dev/null 2>&1
+t    "subdirectory with glob characters: status clean" test -z "$(git -C "$SQ" status --porcelain)"
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$SQ/a[1]/.agents/checks/$tier.sh"; done
+git -C "$SQ" add -f 'a[[]1]/.agents/harness.conf'
+out="$("$SQ/a[1]/.agents/bin/verify" 2>&1 || true)"
+t    "...tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
