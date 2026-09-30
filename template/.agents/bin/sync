@@ -428,11 +428,25 @@ exclude_block() {
 exclude_block
 
 # Local mode: back up the local files where git clean, git stash -a, and checkouts can't reach.
-if [ "$CHECK" -eq 0 ] && [ "$LOCAL" -eq 1 ]; then
+# Team mode keeps none: a stale one could flip a later restore back to local. The one exception
+# is AGENTS.md.before-tracked, the only copy of an old local AGENTS.md: that stays, with a warning.
+if [ "$CHECK" -eq 0 ] && [ -f .agents/lib/feedback.sh ]; then
   export AGENTS_ROOT="$ROOT"   # read by feedback.sh
   # shellcheck source=/dev/null
   . .agents/lib/feedback.sh
-  agents_backup
+  if [ "$LOCAL" -eq 1 ]; then
+    agents_backup
+  elif bk="$(agents_backup_dir)"; then
+    rm -rf "$bk".new.* "$bk".old.* 2>/dev/null || true
+    if [ -f "$bk/AGENTS.md.before-tracked" ]; then
+      if [ -e "$bk/.agents" ]; then
+        find "$bk" -mindepth 1 -maxdepth 1 ! -name AGENTS.md.before-tracked -exec rm -rf {} + 2>/dev/null || true
+        echo "sync: warning: team mode keeps no backup, except your last local AGENTS.md in $bk/AGENTS.md.before-tracked; move its facts into AGENTS.md, then delete it" >&2
+      fi
+    elif [ -e "$bk" ]; then
+      rm -rf "$bk" 2>/dev/null || true
+    fi
+  fi
 fi
 
 # Local git hooks appear once git.conf has something for them to enforce.

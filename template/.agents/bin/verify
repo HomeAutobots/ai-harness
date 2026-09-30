@@ -90,6 +90,7 @@ if [ "$CACHE" -eq 1 ]; then
   KEY="$TIER-$JSON-$KEY"
   C="$AGENTS_CACHE/verify-$TIER-$JSON"
   if [ -f "$C.key" ] && [ "$(cat "$C.key")" = "$KEY" ]; then
+    [ "$TIER" = edit ] || agents_backup quiet   # local mode: the key ignores .agents/, so refresh anyway
     cat "$C.out"
     exit "$(cat "$C.rc")"
   fi
@@ -205,5 +206,5 @@ if [ -n "$KEY" ]; then
   echo "$RC" > "$C.rc"
   echo "$KEY" > "$C.key"
 fi
-[ "$TIER" = edit ] || agents_backup   # local mode: keep the backup current each turn
+[ "$TIER" = edit ] || agents_backup quiet   # local mode: refresh the backup on the turn and full tiers
 exit "$RC"

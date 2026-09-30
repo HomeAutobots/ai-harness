@@ -27,8 +27,10 @@ agents_load_conf() {
   return 0
 }
 
-# agents_backup_dir: where local mode keeps its backup, inside the git dir (git clean, git stash -a,
-# and checkouts never reach it). One per install prefix, so subdirectory installs don't collide.
+# agents_backup_dir: where local mode keeps its backup, inside this worktree's git dir
+# (git rev-parse --git-path ai-harness), where git clean, git stash -a, and checkouts never reach.
+# One per install prefix (backup-<prefix>, / turned into _), so subdirectory installs don't
+# collide. Known limit: prefixes a/b and a_b map to the same directory.
 # install.sh computes the same path; keep the two in step.
 agents_backup_dir() {
   local gd pfx
@@ -40,31 +42,52 @@ agents_backup_dir() {
   printf '%s/backup%s\n' "$gd" "${pfx:+-$(printf '%s' "$pfx" | tr '/' '_')}"
 }
 
-# agents_backup: local mode only. Copies .agents/ (minus the cache) and the untracked root
-# instruction files into agents_backup_dir, replacing the previous copy. A local AGENTS.md the
-# project has since started tracking is kept aside once, as AGENTS.md.before-tracked.
+# agents_backup [quiet]: local mode only. Copies .agents/ (minus the cache and eval results) and
+# the untracked root instruction files into agents_backup_dir, replacing the previous copy.
+# A local AGENTS.md the project has since started tracking is kept aside once, as
+# AGENTS.md.before-tracked, with a warning. Only sync does that: with quiet (verify), the old
+# backup's AGENTS.md is carried forward unchanged and nothing is printed, so the one-time
+# warning isn't lost in verify's output. Always returns 0: a backup must never fail its caller,
+# so any copy problem (say tar reporting a file that changed while read) skips this refresh
+# silently and leaves the previous backup in place.
 agents_backup() {
   [ "${HARNESS_MODE:-team}" = local ] || return 0
   [ -d "$AGENTS_ROOT/.agents" ] || return 0
-  local dest tmp f
+  local quiet="${1:-}" dest tmp f o
   dest="$(agents_backup_dir)" || return 0
+  # A run killed mid-swap leaves only $dest.old.*: put it back before cleaning up.
+  if [ ! -e "$dest" ]; then
+    for o in "$dest".old.*; do [ -d "$o/.agents" ] && mv "$o" "$dest" 2>/dev/null && break; done
+  fi
+  rm -rf "$dest".new.* "$dest".old.* 2>/dev/null || true
   tmp="$dest.new.$$"
-  rm -rf "$tmp"
-  mkdir -p "$tmp" && cp -R "$AGENTS_ROOT/.agents" "$tmp/.agents" 2>/dev/null || { rm -rf "$tmp"; return 0; }
-  rm -rf "$tmp/.agents/cache"
+  mkdir -p "$tmp" 2>/dev/null || return 0
+  if ! (cd "$AGENTS_ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results .agents) 2>/dev/null \
+       | tar -C "$tmp" -xf - 2>/dev/null || [ ! -d "$tmp/.agents" ]; then
+    rm -rf "$tmp"; return 0
+  fi
   for f in AGENTS.md CLAUDE.md CLAUDE.local.md; do
     if git -C "$AGENTS_ROOT" ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
       if [ -f "$dest/$f.before-tracked" ]; then
-        cp "$dest/$f.before-tracked" "$tmp/"
-      elif [ "$f" = AGENTS.md ] && [ -f "$dest/$f" ] && ! cmp -s "$dest/$f" "$AGENTS_ROOT/$f"; then
-        cp "$dest/$f" "$tmp/$f.before-tracked"
-        echo "sync: warning: the project now tracks AGENTS.md, which replaced your local one. Your copy is in $dest/AGENTS.md.before-tracked; move its facts into .agents/AGENTS.local.md" >&2
+        cp "$dest/$f.before-tracked" "$tmp/" 2>/dev/null || true
+      elif [ "$f" != AGENTS.md ] || [ ! -f "$dest/$f" ]; then
+        :
+      elif [ "$quiet" = quiet ]; then
+        cp "$dest/$f" "$tmp/$f" 2>/dev/null || true
+      elif ! cmp -s "$dest/$f" "$AGENTS_ROOT/$f" && cp "$dest/$f" "$tmp/$f.before-tracked" 2>/dev/null; then
+        echo "sync: warning: the project now tracks AGENTS.md; your last local copy is in $dest/AGENTS.md.before-tracked; move its facts into .agents/AGENTS.local.md" >&2
       fi
     elif [ -f "$AGENTS_ROOT/$f" ]; then
-      cp "$AGENTS_ROOT/$f" "$tmp/$f"
+      cp "$AGENTS_ROOT/$f" "$tmp/$f" 2>/dev/null || true
     fi
   done
-  rm -rf "$dest" && mv "$tmp" "$dest"
+  # Swap in the new copy so a whole backup stays on disk (as $dest or $dest.old.*) if killed midway.
+  if [ -e "$dest" ] && ! mv "$dest" "$dest.old.$$" 2>/dev/null; then rm -rf "$tmp"; return 0; fi
+  if mv "$tmp" "$dest" 2>/dev/null; then
+    rm -rf "$dest.old.$$"
+  else
+    rm -rf "$tmp"; mv "$dest.old.$$" "$dest" 2>/dev/null || true
+  fi
   return 0
 }
 
