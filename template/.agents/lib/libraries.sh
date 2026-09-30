@@ -81,6 +81,12 @@ _agents_libraries_scan() {  # the ones that exist, each directory once (compared
   return 0
 }
 
+# agents_library_paths: every directory the resolver would search, one per line, whether or not
+# it exists (sync uses it to tell its own links from ones made by hand)
+agents_library_paths() {
+  _agents_lib_candidates | cut -f2
+}
+
 # agents_libraries_pin: scan once for this process and its children (verify does: it resolves
 # several packs per run). Tied to the project root, so a run for another project scans its own.
 agents_libraries_pin() {

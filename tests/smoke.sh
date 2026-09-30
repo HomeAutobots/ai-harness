@@ -1656,6 +1656,50 @@ t    "absence: the index lists exactly the built-in skills" test "$(sed -n '/har
 t    "absence: sync says nothing about libraries" bash -c "! printf '%s' \"\$1\" | grep -qiE 'librar|shadow|lists|personal|moved'" _ "$out"
 t    "absence: .agents/skills holds only renders" test -z "$(find "$AB/.agents/skills" -mindepth 1 -maxdepth 1 ! -type l)"
 
+echo "links in .agents/skills"
+HL=$(repo handlinks)
+"$HARNESS/install.sh" --team "$HL" >/dev/null 2>&1
+mkdir -p "$HL/tools/skills/handy"; printf -- '---\nname: handy\ndescription: Handy.\n---\n' > "$HL/tools/skills/handy/SKILL.md"
+mkskill "$WORK/far" farlink "Far away."
+ln -s ../../tools/skills/handy "$HL/.agents/skills/handy"
+ln -s "$WORK/far/skills/farlink" "$HL/.agents/skills/farlink"
+commit "$HL" "hand-made links"
+tnot "--check sees a link added by hand" "$HL/.agents/bin/sync" --check
+t    "...and moves nothing"            bash -c "test -L '$HL/.agents/skills/handy' && test ! -e '$HL/.agents/library/skills/handy'"
+out="$("$HL/.agents/bin/sync" 2>&1)"
+t    "a link added by hand moves to the project library" test -L "$HL/.agents/library/skills/handy"
+t    "...pointing at the same place"   test "$(readlink "$HL/.agents/library/skills/handy")" = ../../../tools/skills/handy
+t    "...and says so"                  hasl "$out" "moved .agents/skills/handy to .agents/library/skills/handy"
+t    "...and still renders"            bash -c "test \"\$(readlink '$HL/.agents/skills/handy')\" = ../../.agents/library/skills/handy && test -f '$HL/.agents/skills/handy/SKILL.md'"
+t    "an absolute link keeps its target" test "$(readlink "$HL/.agents/library/skills/farlink")" = "$WORK/far/skills/farlink"
+t    "...and renders too"              test -f "$HL/.agents/skills/farlink/SKILL.md"
+t    "sync --check clean after"        "$HL/.agents/bin/sync" --check
+mkskill "$HL/vendor/lib" libbed "From a library."
+edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
+"$HL/.agents/bin/sync" >/dev/null 2>&1
+t    "a listed library's skill renders" test "$(readlink "$HL/.agents/skills/libbed")" = ../../vendor/lib/skills/libbed
+rm -rf "$HL/vendor/lib"
+out="$("$HL/.agents/bin/sync" 2>&1)"
+t    "a render whose library is gone is removed as stale" bash -c "test ! -L '$HL/.agents/skills/libbed' && test ! -e '$HL/.agents/library/skills/libbed'"
+t    "...and says so"                  hasl "$out" "removed stale .agents/skills/libbed"
+mkskill "$HL/vendor/lib" libbed "From a library."
+edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
+"$HL/.agents/bin/sync" >/dev/null 2>&1
+edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES=""|'
+out="$("$HL/.agents/bin/sync" 2>&1)"
+t    "a render from a library taken off LIBRARIES is removed, not adopted" bash -c "test ! -L '$HL/.agents/skills/libbed' && test ! -e '$HL/.agents/library/skills/libbed'"
+mkskill "$WORK/pd-hl" pskill "Personal."
+AGENTS_PERSONAL_DIR="$WORK/pd-hl" "$HL/.agents/bin/sync" >/dev/null 2>&1
+t    "a personal skill renders"        test -L "$HL/.agents/skills/pskill"
+"$HL/.agents/bin/sync" >/dev/null 2>&1
+t    "...and goes, not adopted, when sync runs with another personal library" bash -c "test ! -L '$HL/.agents/skills/pskill' && test ! -e '$HL/.agents/library/skills/pskill'"
+edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="."|'
+mkdir -p "$HL/tools/other"; printf -- '---\nname: other\ndescription: Other.\n---\n' > "$HL/tools/other/SKILL.md"
+ln -s ../../tools/other "$HL/.agents/skills/other"
+"$HL/.agents/bin/sync" >/dev/null 2>&1
+t    "a hand-made link is adopted even when a library holds the whole project" test "$(readlink "$HL/.agents/library/skills/other")" = ../../../tools/other
+edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES=""|'
+
 echo "migration to libraries: skills"
 MS=$(repo migskills)
 "$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1; commit "$MS" harness
@@ -1672,7 +1716,8 @@ t    "...and renders from there"       test "$(readlink "$MS/.agents/skills/ours
 t    "a hand-made link moves too, same target" bash -c "test -L '$MS/.agents/library/skills/linked' && test -f '$MS/.agents/library/skills/linked/SKILL.md'"
 t    "claude mirrors still resolve"    test -f "$MS/.claude/skills/ours/SKILL.md"
 t    "team mode lists the skill moves" hasl "$out" "moved .agents/skills/ours to .agents/library/skills/ours"
-t    "unedited copies of shipped skills leave nothing behind" test ! -e "$MS/.agents/library/.migrated"
+t    "unedited copies of shipped skills leave nothing behind" bash -c "test ! -e '$MS/.agents/library/.migrated' && test ! -e '$MS/.git/ai-harness/migrated'"
+tnot "...and keep no note"            hasl "$out" "old cop"
 t    "sync --check clean after"        "$MS/.agents/bin/sync" --check
 commit "$MS" "library layout"
 out="$("$HARNESS/install.sh" "$MS" 2>&1)"
@@ -1693,15 +1738,47 @@ printf 'My own step.\n' >> "$MX/.agents/skills/review-diff/SKILL.md"
 printf '# my change\n' >> "$MX/.agents/workflows/req-driven/checks/turn.sh"
 printf '# my change\n' >> "$MX/.agents/stacks/cpp-cmake/lib.sh"
 out="$("$HARNESS/install.sh" "$MX" 2>&1)"
-t    "a hand-edited copy of a shipped skill survives the upgrade" grep -q 'My own step.' "$MX/.agents/library/.migrated/skills/review-diff/SKILL.md"
-t    "...with a notice"                hasl "$out" "note: kept .agents/skills/review-diff in .agents/library/.migrated/skills/review-diff: it differs from the shipped copy"
+MXG="$MX/.git/ai-harness/migrated"
+t    "a hand-edited copy of a shipped skill survives the upgrade, in the git dir" grep -q 'My own step.' "$MXG/skills/review-diff/SKILL.md"
+t    "...with one summary line"        test "$(printf '%s\n' "$out" | grep -c 'old copies')" = 1
+t    "...naming the count and the place" hasl "$out" "install: kept 3 old copies that differ from the shipped versions in .git/ai-harness/migrated; review and delete them when done"
+t    "...and nothing in the project"   test ! -e "$MX/.agents/library/.migrated"
 t    "...where no library looks"       test "$(readlink "$MX/.agents/skills/review-diff")" = ../../.agents/builtin/skills/review-diff
-t    "an unedited copy is removed"     bash -c "test ! -e '$MX/.agents/library/.migrated/skills/plan-task' && test ! -e '$MX/.agents/skills/req-driven' && test ! -e '$MX/.agents/library/.migrated/skills/req-driven'"
-t    "edited copies of shipped packs survive too" bash -c "grep -q '# my change' '$MX/.agents/library/.migrated/workflows/req-driven/checks/turn.sh' && grep -q '# my change' '$MX/.agents/library/.migrated/stacks/cpp-cmake/lib.sh'"
+t    "an unedited copy is removed"     bash -c "test ! -e '$MXG/skills/plan-task' && test ! -e '$MX/.agents/skills/req-driven' && test ! -e '$MXG/skills/req-driven'"
+t    "edited copies of shipped packs survive too" bash -c "grep -q '# my change' '$MXG/workflows/req-driven/checks/turn.sh' && grep -q '# my change' '$MXG/stacks/cpp-cmake/lib.sh'"
 t    "...and the stack still gets its shim" grep -q 'ai-harness: stack shim' "$MX/.agents/stacks/cpp-cmake/lib.sh"
 t    "...status clean"                 test -z "$(git -C "$MX" status --porcelain)"
 out="$("$HARNESS/install.sh" "$MX" 2>&1)"
-tnot "a second run keeps nothing new"  hasl "$out" "note: kept"
+tnot "a second run keeps nothing new"  hasl "$out" "old cop"
+t    "the local backup doesn't copy them" bash -c "test -d '$MX/.git/ai-harness/backup/.agents' && ! find '$MX/.git/ai-harness/backup' -path '*migrated*' | grep -q ."
+oldlayout "$MX"; printf 'Again.\n' >> "$MX/.agents/skills/review-diff/SKILL.md"
+out="$("$HARNESS/install.sh" "$MX" 2>&1)"
+t    "a clash gets a numeric suffix"   bash -c "grep -q 'Again.' '$MXG/skills/review-diff.1/SKILL.md' && grep -q 'My own step.' '$MXG/skills/review-diff/SKILL.md'"
+t    "...and one copy is counted"      hasl "$out" "install: kept 1 old copy that differs from the shipped version in .git/ai-harness/migrated; review and delete it when done"
+MXT=$(repo migeditedteam)
+"$HARNESS/install.sh" --team "$MXT" >/dev/null 2>&1; commit "$MXT" harness
+oldlayout "$MXT"
+printf 'My own step.\n' >> "$MXT/.agents/skills/review-diff/SKILL.md"
+commit "$MXT" "old layout"
+out="$("$HARNESS/install.sh" "$MXT" 2>&1)"
+t    "team mode: the edited copy goes to the git dir" grep -q 'My own step.' "$MXT/.git/ai-harness/migrated/skills/review-diff/SKILL.md"
+t    "...survives sync dropping the local backup" bash -c "'$MXT/.agents/bin/sync' >/dev/null 2>&1; test -f '$MXT/.git/ai-harness/migrated/skills/review-diff/SKILL.md'"
+t    "...with one summary line"        test "$(printf '%s\n' "$out" | grep -c 'old cop')" = 1
+tnot "...and no move to commit for it" bash -c "printf '%s' \"\$1\" | grep -q 'migrated/'" _ "$out"
+commit "$MXT" "library layout"
+t    "...and git status shows no migrated dir" bash -c "test ! -e '$MXT/.agents/library/.migrated' && test -z \"\$(git -C '$MXT' status --porcelain)\""
+MXO=$(repo migonlyedited)
+"$HARNESS/install.sh" --team "$MXO" >/dev/null 2>&1; commit "$MXO" harness
+rm -f "$MXO/.agents/skills/review-diff"; cp -R "$HARNESS/template/.agents/skills/review-diff" "$MXO/.agents/skills/"
+printf 'Mine.\n' >> "$MXO/.agents/skills/review-diff/SKILL.md"; commit "$MXO" "an edited copy"
+out="$("$HARNESS/install.sh" "$MXO" 2>&1)"
+t    "team mode: set-asides alone still ask for a commit" hasl "$out" "Commit what git status shows"
+NG="$WORK/nogit-mig"; mkdir -p "$NG"
+"$HARNESS/install.sh" --team "$NG" >/dev/null 2>&1
+oldlayout "$NG"; printf 'My own step.\n' >> "$NG/.agents/skills/review-diff/SKILL.md"
+out="$("$HARNESS/install.sh" "$NG" 2>&1)"
+t    "outside git, set-asides stay in .agents/library/.migrated" grep -q 'My own step.' "$NG/.agents/library/.migrated/skills/review-diff/SKILL.md"
+t    "...with the summary"             hasl "$out" "install: kept 1 old copy that differs from the shipped version in .agents/library/.migrated; review and delete it when done"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

@@ -209,7 +209,60 @@ skill_meta() {
 #    natively); .claude/skills/ mirrors it.
 # ---------------------------------------------------------------------------
 shown() { case "$1" in "$ROOT"/*) printf '%s' "${1#"$ROOT"/}" ;; *) printf '%s' "$1" ;; esac; }
-rendered() { [ -L "$1" ] || [ -f "$1/.harness-copy" ]; }   # sync made it: a link or a marked copy
+# norm_path <path>: . and .. resolved as text (the path needn't exist)
+norm_path() {
+  printf '%s\n' "$1" | awk '{
+    abs = substr($0, 1, 1) == "/"; n = split($0, a, "/"); k = 0
+    for (i = 1; i <= n; i++) {
+      if (a[i] == "" || a[i] == ".") continue
+      if (a[i] == "..") {
+        if (k > 0 && s[k] != "..") k--
+        else if (!abs) s[++k] = ".."
+        continue
+      }
+      s[++k] = a[i]
+    }
+    out = ""
+    for (i = 1; i <= k; i++) out = out (i > 1 ? "/" : "") s[i]
+    if (abs) out = "/" out; else if (out == "") out = "."
+    print out
+  }'
+}
+# Every directory a library could be in, as written and physically. Listed ones that are gone
+# count too, so the links sync made into them still go as stale.
+LIB_PATHS="$WORK/libpaths"
+agents_library_paths | while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  norm_path "$p"
+  if [ -d "$p" ]; then (cd "$p" 2>/dev/null && pwd -P) || true; fi
+done > "$LIB_PATHS"
+# What this clone's sync linked last time (name<TAB>target), so a render still counts after its
+# library leaves the search path (taken off LIBRARIES, another personal dir) and goes as stale.
+RENDERED_LOG=.agents/cache/rendered-skills
+RENDERED_NEW="$WORK/rendered-skills"
+: > "$RENDERED_NEW"
+# in_library <link>: it points where sync renders a skill of that name from: <library>/skills/<name>
+# or <library>/workflows/<name>/skill (the target read as text, and physically if it exists)
+in_library() {
+  local t n="${1##*/}"
+  t="$(readlink "$1")"
+  if [ -f "$RENDERED_LOG" ] && AGENTS_LINK_NAME="$n" AGENTS_LINK_TARGET="$t" \
+     awk -F '\t' '$1 == ENVIRON["AGENTS_LINK_NAME"] && $2 == ENVIRON["AGENTS_LINK_TARGET"] { f = 1 } END { exit !f }' "$RENDERED_LOG"; then
+    return 0
+  fi
+  case "$t" in /*) ;; *) t="$ROOT/$(dirname "$1")/$t" ;; esac
+  t="$(norm_path "$t")"
+  { printf '%s\n' "$t"; if [ -d "$t" ]; then (cd "$t" 2>/dev/null && pwd -P) || true; fi; } \
+    | AGENTS_LINK_NAME="$n" awk 'NR == FNR { if ($0 != "") lib[++k] = $0; next }
+           { n = ENVIRON["AGENTS_LINK_NAME"]
+             for (i = 1; i <= k; i++) if ($0 == lib[i] "/skills/" n || $0 == lib[i] "/workflows/" n "/skill") f = 1 }
+           END { exit !f }' "$LIB_PATHS" -
+}
+# rendered <path>: sync made it, a link into a library or a marked copy. Any other link was made
+# by hand, and is adopted like a hand-made directory.
+rendered() {
+  if [ -L "$1" ]; then in_library "$1"; else [ -f "$1/.harness-copy" ]; fi
+}
 SKILL_SET="$WORK/skills.set"   # what gets rendered: name<TAB>path<TAB>library, by name
 : > "$SKILL_SET"
 in_set() { awk -F '\t' -v n="$1" '$1 == n { f = 1 } END { exit !f }' "$SKILL_SET"; }
@@ -217,12 +270,11 @@ in_set() { awk -F '\t' -v n="$1" '$1 == n { f = 1 } END { exit !f }' "$SKILL_SET
 # A skill someone put straight into .agents/skills/ moves to the project library: that dir is
 # rendered now, and sync would otherwise remove what it didn't make.
 adopt_skills() {
-  local d n
+  local d n t
   for d in "$SKILLS_DIR"/*/; do
     d="${d%/}"; n="${d##*/}"
-    [ -L "$d" ] && continue
     [ -f "$d/SKILL.md" ] || continue
-    [ -f "$d/.harness-copy" ] && continue
+    rendered "$d" && continue
     agents_valid_name "$n" || continue
     [ "$LOCAL" -eq 1 ] && tracked "$d" && continue   # the project's own; compute_skill_set lists it
     if [ -e ".agents/library/skills/$n" ] || [ -L ".agents/library/skills/$n" ]; then
@@ -231,7 +283,15 @@ adopt_skills() {
     fi
     if [ "$CHECK" -eq 1 ]; then drift "$d (added by hand; sync moves it to .agents/library/skills/$n)"; continue; fi
     mkdir -p .agents/library/skills
-    mv "$d" ".agents/library/skills/$n"
+    if [ -L "$d" ]; then
+      # Still a link to the same place: a relative target is rewritten for the new spot.
+      t="$(readlink "$d")"
+      case "$t" in /*) ;; *) t="$(norm_path "../../skills/$t")" ;; esac
+      ln -s "$t" ".agents/library/skills/$n"
+      rm -f "$d"
+    else
+      mv "$d" ".agents/library/skills/$n"
+    fi
     CHANGED=1
     say "moved $d to .agents/library/skills/$n (.agents/skills/ is rendered from the libraries)"
   done
@@ -245,7 +305,7 @@ compute_skill_set() {
   [ "$LOCAL" -eq 1 ] || return 0
   for d in "$SKILLS_DIR"/*/; do
     d="${d%/}"; n="${d##*/}"
-    [ -L "$d" ] && continue
+    [ -L "$d" ] && rendered "$d" && continue
     [ -f "$d/SKILL.md" ] || continue
     agents_valid_name "$n" && tracked "$d" || continue
     awk -F '\t' -v n="$n" '$1 != n' "$SKILL_SET" > "$WORK/skills.tmp"
@@ -290,7 +350,7 @@ render_skills() {
       if [ ! -L "$target" ] && [ -d "$target" ] \
          && diff -rq -x .harness-copy "$src" "$target" >/dev/null 2>&1; then continue; fi
     else
-      if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then continue; fi
+      if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then printf '%s\t%s\n' "$name" "$rel" >> "$RENDERED_NEW"; continue; fi
     fi
     if [ "$CHECK" -eq 1 ]; then drift "$target"; continue; fi
     mkdir -p "$SKILLS_DIR"
@@ -302,6 +362,7 @@ render_skills() {
       how=copy
     else
       ln -s "$rel" "$target"
+      printf '%s\t%s\n' "$name" "$rel" >> "$RENDERED_NEW"
       how="link"
     fi
     CHANGED=1
@@ -320,6 +381,9 @@ render_skills() {
     CHANGED=1
     say "removed stale $target"
   done
+  if [ "$CHECK" -eq 0 ] && ! cmp -s "$RENDERED_NEW" "$RENDERED_LOG"; then
+    mkdir -p .agents/cache && cat "$RENDERED_NEW" > "$RENDERED_LOG"
+  fi
 }
 
 adopt_skills

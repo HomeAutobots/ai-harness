@@ -216,17 +216,29 @@ shipped_copy() {
   shift 2
   diff -rq -x __pycache__ "$@" "$a" "$b" >/dev/null 2>&1
 }
-# set_aside <kind> <path> <shipped-at>: an old copy of something the harness ships that differs
-# from it (edited, or from an older version) goes where no library looks, never deleted
+# set_aside <kind> <path>: an old copy of something the harness ships that differs from it
+# (edited, or just from an older version) is kept, never deleted, where no library looks and git
+# never commits it: the worktree's git dir, next to local mode's backup (not inside it: team mode
+# removes the backup). Outside git, .agents/library/.migrated/. One summary line at the end.
+SET_ASIDE=0
+SET_ASIDE_DIR=""
 set_aside() {
   local n dest i=1
+  if [ -z "$SET_ASIDE_DIR" ]; then
+    if SET_ASIDE_DIR="$(git -C "$DEST" rev-parse --git-path ai-harness 2>/dev/null)" && [ -n "$SET_ASIDE_DIR" ]; then
+      case "$SET_ASIDE_DIR" in /*) ;; *) SET_ASIDE_DIR="$DEST/$SET_ASIDE_DIR" ;; esac
+      pfx="$(git -C "$DEST" rev-parse --show-prefix 2>/dev/null || true)"; pfx="${pfx%/}"
+      SET_ASIDE_DIR="$SET_ASIDE_DIR/migrated${pfx:+-$(printf '%s' "$pfx" | tr '/' '_')}"   # per install, like the backup
+    else
+      SET_ASIDE_DIR="$DEST/.agents/library/.migrated"
+    fi
+  fi
   n="$(basename "$2")"
-  dest="$DEST/.agents/library/.migrated/$1/$n"
-  while [ -e "$dest" ] || [ -L "$dest" ]; do dest="$DEST/.agents/library/.migrated/$1/$n.$i"; i=$((i + 1)); done
+  dest="$SET_ASIDE_DIR/$1/$n"
+  while [ -e "$dest" ] || [ -L "$dest" ]; do dest="$SET_ASIDE_DIR/$1/$n.$i"; i=$((i + 1)); done
   mkdir -p "$(dirname "$dest")"
   mv "$2" "$dest"
-  migrated "moved ${2#"$DEST"/} to ${dest#"$DEST"/} (it differs from the shipped copy)"
-  say "note: kept ${2#"$DEST"/} in ${dest#"$DEST"/}: it differs from the shipped copy, which runs from $3 now. Put any changes you want into .agents/library/$1/$n, then delete it"
+  SET_ASIDE=$((SET_ASIDE + 1))
 }
 STACK_SHIM_MARK="ai-harness: stack shim"
 write_stack_shim() {  # write_stack_shim <name>: .agents/stacks/<name>/lib.sh forwards to the resolved pack
@@ -259,7 +271,7 @@ if [ -d "$DEST/.agents/workflows" ]; then
         rm -rf "${DEST:?}/.agents/workflows/$w"
         migrated "removed .agents/workflows/$w (the pack runs from .agents/builtin/workflows/$w)"
       else
-        set_aside workflows "$DEST/.agents/workflows/$w" ".agents/builtin/workflows/$w"
+        set_aside workflows "$DEST/.agents/workflows/$w"
       fi
     elif [ -e "$DEST/.agents/library/workflows/$w" ] || [ -L "$DEST/.agents/library/workflows/$w" ]; then
       say "warning: .agents/workflows/$w and .agents/library/workflows/$w both exist; keep the one you want in .agents/library/workflows/ and delete .agents/workflows/$w"
@@ -297,7 +309,7 @@ if [ -d "$DEST/.agents/stacks" ]; then
     if ! agents_valid_name "$s" || [ -L "${d%/}" ]; then
       say "warning: .agents/stacks/$s isn't a plain pack directory with a valid name; left in place, move it into .agents/library/stacks/ yourself"
     elif [ -d "$HARNESS/stacks/$s" ]; then
-      shipped_copy "$HARNESS/stacks/$s" "${d%/}" || set_aside stacks "$DEST/.agents/stacks/$s" ".agents/builtin/stacks/$s"
+      shipped_copy "$HARNESS/stacks/$s" "${d%/}" || set_aside stacks "$DEST/.agents/stacks/$s"
       write_stack_shim "$s"
       migrated "replaced .agents/stacks/$s with a shim (the pack runs from .agents/builtin/stacks/$s)"
     elif [ -e "$DEST/.agents/library/stacks/$s" ] || [ -L "$DEST/.agents/library/stacks/$s" ]; then
@@ -354,7 +366,7 @@ if [ -d "$DEST/.agents/skills" ]; then
         rm -rf "${d:?}"
         migrated "removed .agents/skills/$n (built in: $at)"
       else
-        set_aside skills "$d" "$at"
+        set_aside skills "$d"
       fi
     elif [ -e "$lib" ] || [ -L "$lib" ]; then
       say "warning: .agents/skills/$n and .agents/library/skills/$n both exist; keep the one you want in .agents/library/skills/ and delete .agents/skills/$n"
@@ -371,6 +383,15 @@ if [ -f "$DEST/.agents/policy.conf" ] && grep -q '^deny-cmd \.agents/workflows/f
   sed 's|^deny-cmd \.agents/workflows/feature-driven/bin/fdd approve|deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve|' "$DEST/.agents/policy.conf" > "$tmp"
   cat "$tmp" > "$DEST/.agents/policy.conf"; rm -f "$tmp"
   migrated "pointed the fdd approve rule in .agents/policy.conf at .agents/builtin/workflows/feature-driven/bin/fdd"
+fi
+
+if [ "$SET_ASIDE" -gt 0 ]; then
+  case "$SET_ASIDE_DIR" in "$DEST"/*) kept_in="${SET_ASIDE_DIR#"$DEST"/}" ;; *) kept_in="$SET_ASIDE_DIR" ;; esac
+  if [ "$SET_ASIDE" -eq 1 ]; then
+    say "kept 1 old copy that differs from the shipped version in $kept_in; review and delete it when done"
+  else
+    say "kept $SET_ASIDE old copies that differ from the shipped versions in $kept_in; review and delete them when done"
+  fi
 fi
 
 # --- packs: turned on by name, run in place from whichever library has them ------------------
@@ -471,7 +492,7 @@ if [ "$IN_GIT" -eq 1 ]; then
   (cd "$DEST" && .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
 fi
 
-if [ -n "$MIGRATED" ] && [ "$MODE" = team ]; then
+if { [ -n "$MIGRATED" ] || [ "$SET_ASIDE" -gt 0 ]; } && [ "$MODE" = team ]; then
   say "moved the harness to the library layout (see CHANGELOG.md). Commit what git status shows:$MIGRATED"
 fi
 
