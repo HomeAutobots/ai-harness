@@ -80,6 +80,12 @@ for s in '"$SRC/.agents/skills/."' '"$HARNESS/workflows/."' '"$HARNESS/stacks/."
     || finding "install.sh:1" ownership "install.sh doesn't copy $s into .agents/builtin/, so installs won't ship it"
 done
 
+# 5b. Packs run in place from any library, so they find their own files from their own path.
+# The one fixed path is a stack's shim, .agents/stacks/<name>/lib.sh, which tier scripts source.
+grep -rnIE --exclude-dir=__pycache__ '\.agents/(workflows|stacks)/' workflows stacks 2>/dev/null \
+  | grep -vE '\.agents/stacks/[A-Za-z0-9._-]+/lib\.sh' \
+  | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" pack-path "packs run from any library; find the pack's files from the script's own path, not .agents/workflows/ or .agents/stacks/"; done
+
 # 6. Budgets
 n="$(wc -l < template/.agents/core/AGENTS.core.md | tr -d ' ')"
 [ "$n" -le 25 ] || finding "template/.agents/core/AGENTS.core.md:$n" budget "core rules are $n lines; keep them near 20 (max 25): every line loads in every session"

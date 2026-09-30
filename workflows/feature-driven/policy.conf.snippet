@@ -1,3 +1,3 @@
 # feature-driven workflow
-deny-cmd .agents/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision
+deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision
 deny-regex ^(?![ \t]*(?:[\w./-]*/)?(?:tasks[ \t]+ask|echo|printf)\b(?:[ \t]+(?:[^\s'"$`\;&|<>()]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*\Z)[\s\S]*(^|[\s/;&|("'`])fdd(_tools\.py)?['"]?\s+['"]?approve\b   # approving FDD gates is a human decision (fdd approve, by any path, quoted, or through python3). A plain one-line tasks ask, echo, or printf that only names it is fine.

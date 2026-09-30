@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# ai-harness stack pack: cpp-cmake. Harness-owned: lives in .agents/stacks/cpp-cmake/ and is
-# replaced on upgrade. Sourced by the project's .agents/checks/*.sh, which stay project-owned.
+# ai-harness stack pack: cpp-cmake. Harness-owned: ships in .agents/builtin/stacks/cpp-cmake/ and
+# is replaced on upgrade. The project's .agents/checks/*.sh (project-owned) source it through the
+# shim at .agents/stacks/cpp-cmake/lib.sh.
 #
 # Deterministic C/C++ feedback built from the compiler, CMake, CTest, and static analyzers.
 # Every function follows the feedback contract: silent on success, path:line findings on
@@ -8,7 +9,7 @@
 # check scripts (before calling) or in .agents/harness.conf.
 
 . "$AGENTS_ROOT/.agents/lib/feedback.sh"
-CPP_PACK="$AGENTS_ROOT/.agents/stacks/cpp-cmake"
+CPP_PACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # wherever this pack's library is
 
 : "${CPP_BUILD_DIR:=build-agent}"          # agent-owned build tree (never your own build dir)
 : "${CPP_SAN_DIR:=build-agent-asan}"       # sanitizer build tree

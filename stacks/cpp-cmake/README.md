@@ -1,7 +1,7 @@
 # Stack pack: cpp-cmake
 
 Deterministic C and C++ feedback for CMake projects, wired into the harness tiers. Installed
-with `install.sh --stack cpp-cmake <project>`; the library lives in `.agents/stacks/cpp-cmake/`
+with `install.sh --stack cpp-cmake <project>`; the pack runs from `.agents/builtin/stacks/cpp-cmake/`
 (harness-owned) and the tier scripts in `.agents/checks/` (project-owned, tune them freely).
 
 | Tier | When | What runs |

@@ -31,7 +31,15 @@ DEFAULT_NAME = r"^\S+ .+ (by|for|of|to|from|in|on|with|into) .+$"
 DEFAULT_TICKET = r"[A-Z][A-Z0-9]+-[0-9]+"
 # FDD's milestone weights, cumulative: walkthrough + design, design inspection, code, code inspection + promote.
 MILESTONES = ((41, "designed"), (44, "design approved"), (89, "built"), (100, "inspected"))
-APPROVE = ".agents/workflows/feature-driven/bin/fdd approve"
+PACK = os.path.dirname(os.path.abspath(__file__))
+
+
+def approve_cmd(root):
+    """How a person runs fdd approve: the pack's own bin/fdd, relative to the project when the
+    pack sits inside it (the built-in library), else its full path (a personal library)."""
+    fdd = os.path.join(PACK, "bin", "fdd")
+    rel = os.path.relpath(fdd, root)
+    return (fdd if rel.startswith("..") else rel) + " approve"
 
 
 # ------------------------------------------------------------------ config
@@ -383,7 +391,7 @@ def cmd_check(tier, root, files):
             if state != "current":
                 out.append(finding(shown(root, fpath), 1, "fdd-list-unapproved", "the feature list is %s"
                                    % ("not approved" if state == "missing" else "changed since it was approved"),
-                                   "validate the model and list, then ask the human to run %s list" % APPROVE))
+                                   "validate the model and list, then ask the human to run %s list" % approve_cmd(root)))
         first = min(added[scoped[0]] or [1])  # point at the first changed line, not the top of the file
         active = sorted({r[4] for r in doing if r[4] in feats})
         if not active:
@@ -405,7 +413,7 @@ def cmd_check(tier, root, files):
             if why:
                 out.append(finding(scoped[0], first, "fdd-no-design", "building %s, but %s" % (fid, why),
                                    "write the design, validate it, and ask the human to run %s design %s; "
-                                   "no code in %s until then" % (APPROVE, fid, conf["FDD_SCOPE"])))
+                                   "no code in %s until then" % (approve_cmd(root), fid, conf["FDD_SCOPE"])))
     if tier == "full":
         write_report(root, d, conf, feats, approvals, rows)
     return emit(out)

@@ -743,9 +743,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$HARNESS/install.sh" --team --workflow feature-driven "$F" >/dev/null 2>&1
   for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$F/.agents/checks/$tier.sh"; done
   commit "$F" harness
-  FD="$F/.agents/fdd"; FDDX="$F/.agents/workflows/feature-driven/bin/fdd"
+  FD="$F/.agents/fdd"; FDDX="$F/.agents/builtin/workflows/feature-driven/bin/fdd"
   t  "fdd settings appended"           grep -q '^FDD_DIR=".agents/fdd"' "$F/.agents/harness.conf"
-  t  "approve denied in policy"        grep -q '^deny-cmd .agents/workflows/feature-driven/bin/fdd approve' "$F/.agents/policy.conf"
+  t  "approve denied in policy"        grep -q '^deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve' "$F/.agents/policy.conf"
   t  "fdd skill installed"             test -f "$F/.agents/skills/feature-driven/SKILL.md"
   t  "fdd command executable"          test -x "$FDDX"
   t  "artifacts stay local"            bash -c "mkdir -p '$FD' && echo x > '$FD/model.md' && git -C '$F' check-ignore -q .agents/fdd/model.md"
@@ -844,6 +844,8 @@ if [ "$HAVE_PY" -eq 1 ]; then
   echo more > "$F/notes.txt"; git -C "$F" add notes.txt; (cd "$F" && git commit -qm 'Add notes')
   t  "inspection survives later commits" bash -c "'$FDDX' status F-12 | grep -q '100% inspected'"
   for c in ".agents/workflows/feature-driven/bin/fdd approve list" \
+           ".agents/builtin/workflows/feature-driven/bin/fdd approve list" \
+           "python3 .agents/builtin/workflows/feature-driven/fdd_tools.py approve . list" \
            "bash -c 'fdd approve list'" \
            "ls; nohup fdd approve list" \
            "if true; then fdd approve list; fi" \
@@ -867,7 +869,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   trc  "agent may mention fdd approve" 0 hook "$F" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":"echo \"ask the human to run fdd approve list\""}}'
   out="$(hook "$F" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":"x=$(fdd approve list)"}}' 2>&1 || true)"
   t  "block says why, not the regex"  bash -c "printf '%s' \"\$1\" | grep -q 'blocked by policy: approving FDD gates is a human decision' && ! printf '%s' \"\$1\" | grep -q 'fdd(?:_tools'" _ "$out"
-  t  "approve denied natively"         grep -q 'Bash(.agents/workflows/feature-driven/bin/fdd approve:\*)' "$F/.claude/settings.json"
+  t  "approve denied natively"         grep -q 'Bash(.agents/builtin/workflows/feature-driven/bin/fdd approve:\*)' "$F/.claude/settings.json"
   EXT="$WORK/fdd-outside"; cp -R "$FD" "$EXT"
   edit "$F/.agents/harness.conf" "s|^FDD_DIR=.*|FDD_DIR=\"$EXT\"|"
   mv "$FD" "$FD.hidden"
@@ -1443,6 +1445,18 @@ mkskill "$BI/.agents/library" keepme
 "$HARNESS/install.sh" --team "$BI" >/dev/null 2>&1
 t    "built-ins replaced wholesale"    test ! -e "$BI/.agents/builtin/skills/review-diff/stray"
 t    "upgrades never touch the project library" test -f "$BI/.agents/library/skills/keepme/SKILL.md"
+
+echo "packs run in place"
+AW="$WORK/away"; mkdir -p "$AW"   # packs in a library outside any project
+cp -R "$HARNESS/workflows/req-driven" "$HARNESS/workflows/feature-driven" "$HARNESS/stacks/cpp-cmake" "$AW/"
+IP=$(repo inplace)
+"$HARNESS/install.sh" --team "$IP" >/dev/null 2>&1   # no packs copied into this project
+if [ "$HAVE_PY" -eq 1 ]; then
+  trc "req-driven finds its tools from its own path" 3 env AGENTS_ROOT="$IP" bash "$AW/req-driven/checks/turn.sh"
+  trc "feature-driven finds its tools from its own path" 0 env AGENTS_ROOT="$IP" bash "$AW/feature-driven/checks/turn.sh"
+  t   "fdd finds the project from the working directory" bash -c "cd '$IP' && bash '$AW/feature-driven/bin/fdd' status | grep -q '^list: none yet'"
+fi
+t    "a stack lib finds its own files" env AGENTS_ROOT="$IP" bash -c '. "$1/cpp-cmake/lib.sh" && test "$CPP_PACK" = "$1/cpp-cmake"' _ "$AW"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

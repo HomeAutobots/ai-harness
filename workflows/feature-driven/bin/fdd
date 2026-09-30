@@ -2,11 +2,24 @@
 # feature-driven workflow CLI. Harness-owned: replaced on upgrade.
 #   fdd approve list | design <ID> | inspect <ID>   record your approval (people only; policy blocks agents)
 #   fdd status [ID]                                 list approval and each feature's milestone
-ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
+# Runs from whichever library has the pack. The project is the one the pack sits in
+# (.agents/builtin/ or .agents/library/), else $AGENTS_ROOT, else the nearest directory at or
+# above the working directory with an .agents/harness.conf.
+PACK="$(cd "$(dirname "$0")/.." && pwd)"
+case "$PACK" in
+  */.agents/builtin/workflows/*|*/.agents/library/workflows/*) ROOT="${PACK%/.agents/*}" ;;
+  *)
+    ROOT="${AGENTS_ROOT:-}"
+    if [ -z "$ROOT" ]; then
+      ROOT="$PWD"
+      while [ ! -f "$ROOT/.agents/harness.conf" ] && [ "$ROOT" != / ]; do ROOT="$(dirname "$ROOT")"; done
+      [ -f "$ROOT/.agents/harness.conf" ] || { echo "fdd: run it inside a project with the harness installed" >&2; exit 2; }
+    fi ;;
+esac
 command -v python3 >/dev/null 2>&1 || { echo "fdd: python3 not found" >&2; exit 3; }
 cmd="${1:-}"
 case "$cmd" in
   approve|status) shift ;;
   *) printf 'usage: fdd approve list | design <ID> | inspect <ID>\n       fdd status [ID]\n' >&2; exit 2 ;;
 esac
-exec python3 "$ROOT/.agents/workflows/feature-driven/fdd_tools.py" "$cmd" "$ROOT" "$@"
+exec python3 "$PACK/fdd_tools.py" "$cmd" "$ROOT" "$@"

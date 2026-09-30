@@ -9,4 +9,4 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "infra: python3 not found (feature-driven workflow)"
   exit 3
 fi
-exec python3 "$AGENTS_ROOT/.agents/workflows/feature-driven/fdd_tools.py" msg "$AGENTS_ROOT" "$1"
+exec python3 "$(dirname "$0")/../fdd_tools.py" msg "$AGENTS_ROOT" "$1"
