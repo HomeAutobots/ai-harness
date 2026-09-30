@@ -58,6 +58,8 @@ It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing
 
 Add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
 
+Team mode commits what `sync` renders into `.agents/skills/` and `.claude/skills/`, except skills from your personal library: those render for your clone only, listed in the same marked block in `.git/info/exclude` that local mode uses (team mode writes it only when you have some, and removes it when you have none left). See [Libraries](#libraries).
+
 ### Local mode
 
 Local (the default) puts the harness's files in the project as usual, but `sync` also writes a marked block to `.git/info/exclude` (works with worktrees and submodules) listing every harness path git doesn't track, so none of it shows up in `git status` or gets committed. That's everything the harness created, plus an untracked `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, or `.claude/settings.local.json` that was already there, since the harness writes into those (sync warns once about an `AGENTS.md` like that). Claude Code hooks and deny rules go in `.claude/settings.local.json` instead of the shared `.claude/settings.json`. If the project already tracks `AGENTS.md` or `CLAUDE.md`, those files are never touched: the harness's managed blocks go to `.agents/AGENTS.local.md` when `AGENTS.md` is tracked, and a personal `CLAUDE.local.md` takes over when `CLAUDE.md` is tracked, both excluded the same way. Copilot, Cursor, and Codex read only `AGENTS.md`, so with a tracked one they miss the harness's rules in this clone. Copilot and Cursor hooks still enforce checks and policy; Codex has no hooks yet, so only its native rule file (command blocking, not checks) applies. `verify`'s turn and full tiers add a `harness-tracked` finding, with the exact fix, if any of this gets committed by accident.
@@ -67,7 +69,7 @@ Those files are ignored by git in this clone. Most git commands leave them alone
 - `git stash -a` (`--all`) stashes the harness too, so it's gone until you pop. Run `git stash pop` to get it back; don't re-run `install.sh` first, or the pop fails on the files it just recreated. `git clean -fdX` (or `-fdx`) deletes it (re-run `install.sh` afterwards): all of `.agents/`, including the project-owned parts (`policy.conf`, `checks/`, `context/`, `plans/`), and your tailoring in `AGENTS.md` or `.agents/AGENTS.local.md` (recoverable from the backup below). The default policy blocks agents from both.
 - A checkout or pull that brings a tracked file at one of these paths (say a teammate commits an `AGENTS.md`) overwrites your local copy without asking.
 
-To recover from a `git clean` or a checkout, `sync` keeps a backup inside the git dir, which git clean, stashes, and checkouts never touch. It lives in each worktree's own git dir, at `$(git rev-parse --git-path ai-harness)/backup` (`.git/ai-harness/backup/` in a plain clone); a subdirectory install uses `backup-<prefix>` instead, with `/` in the prefix turned into `_`. It's refreshed on every `sync` and whenever `verify` runs on the turn or full tier; edits since then aren't in it. If `.agents/` goes missing, re-run `install.sh`: it restores your files from the backup instead of seeding blank ones. If a tracked `AGENTS.md` replaces your local one, the next `sync` saves your last local copy as `AGENTS.md.before-tracked` in the backup and tells you once. Switching to team mode deletes the backup, except a saved `AGENTS.md.before-tracked`, which `sync` keeps and points you to.
+To recover from a `git clean` or a checkout, `sync` keeps a backup inside the git dir, which git clean, stashes, and checkouts never touch. It lives in each worktree's own git dir, at `$(git rev-parse --git-path ai-harness)/backup` (`.git/ai-harness/backup/` in a plain clone); a subdirectory install uses `backup-<prefix>` instead, with `/` in the prefix turned into `_`. It leaves out `.agents/builtin/`, which `install.sh` rebuilds. It's refreshed on every `sync` and whenever `verify` runs on the turn or full tier; edits since then aren't in it. If `.agents/` goes missing, re-run `install.sh`: it restores your files from the backup instead of seeding blank ones. If a tracked `AGENTS.md` replaces your local one, the next `sync` saves your last local copy as `AGENTS.md.before-tracked` in the backup and tells you once. Switching to team mode deletes the backup, except a saved `AGENTS.md.before-tracked`, which `sync` keeps and points you to.
 
 A new clone or worktree starts with none of this, so each one needs its own `install.sh` run. All worktrees of a clone share one `.git/info/exclude`, and so one harness block: install each worktree in the same mode. Switch a project with `install.sh --local` or `install.sh --team`; each tells you what changed and what to commit. Once a switch to local is committed, other clones lose `.agents/` on their next pull, so each developer re-runs `install.sh` (local by default) to get it back.
 
@@ -140,9 +142,52 @@ The `git-workflow` skill covers the judgment: commit granularity, PR description
 
 Each task starts the agent at the commit before a real fix; success means that fix's own tests pass. Arm A has no harness, B has the harness with hooks off, C is the full harness. Token and turn numbers come from Claude Code's JSON output. The decision rule: adopt a change only if success doesn't drop, tokens per success stay within 1.1x, and wall time within 1.25x. Run evals in a disposable environment; the agent runs unattended.
 
+## Libraries
+
+Your own skills, workflows, and stacks live in libraries: plain directories shaped like the harness's own content. The harness looks them up by name on every run, so you write something once, every project picks it up, and upgrades never touch it.
+
+```
+<library>/
+  skills/<name>/SKILL.md     a skill (Agent Skills format)
+  workflows/<name>/          a workflow pack (see Workflow packs)
+  stacks/<name>/             a stack pack (see Stack packs)
+```
+
+Search order; the first library with a name wins:
+
+| # | Library | Where | Owner |
+|---|---|---|---|
+| 1 | Project | `.agents/library/` | the project; upgrades never touch it |
+| 2 | Project-listed | `LIBRARIES` in `.agents/harness.conf`: paths relative to the project root (a submodule, say), `~/...`, or absolute | the team |
+| 3 | Personal | `~/.config/ai-harness/` (`$XDG_CONFIG_HOME/ai-harness/`; `AGENTS_PERSONAL_DIR` overrides it for the library and its `harness.conf`, not for `git.conf`), if it exists | you |
+| 4 | Personal-listed | `LIBRARIES` in `~/.config/ai-harness/harness.conf`: absolute, `~/...`, or relative to that dir | you, or a team repo you clone |
+| 5 | Built-ins | `.agents/builtin/` | the harness; replaced on upgrade |
+
+- **Skills are always on.** `sync` renders every resolved skill into `.agents/skills/` (Copilot, Cursor, Codex, and Gemini read it natively) and mirrors it into `.claude/skills/`, and lists them in AGENTS.md's skills index. `.agents/skills/` is output now: a skill folder or link you put there by hand gets moved into `.agents/library/skills/`, with a notice. The one exception: in local mode, a skill the project itself tracks in `.agents/skills/` stays where it is.
+- **Workflows and stacks are opt-in per project**, by name in `WORKFLOWS` / `STACKS` (or `install.sh --workflow <name>` / `--stack <name>`). They run in place from their library, so an edit there applies on the next `verify`. An active workflow's `skill/` renders as a skill named after the workflow, unless a library has a skill of that name. `sync` warns about a listed name no library has: `verify` and `gitflow` skip a missing workflow, and tier scripts that source a missing stack's `.agents/stacks/<name>/lib.sh` stop with a tooling problem (exit 3).
+- **Same name in two libraries:** the higher one wins and `sync` warns, naming both (for skills always, for workflows and stacks while they're active). That's how you replace a built-in; edits inside `.agents/builtin/` don't survive an upgrade.
+- **Links or copies.** Each rendered skill links to its library (a relative link inside the repo, an absolute one outside it), so edits are live. With `LINK_MODE="copy"` it's a copy instead, refreshed by `sync`. Team mode commits the links for skills inside the repo and always copies a shared skill from a library outside it, since a link out of the repo can't be committed.
+- **Personal stays personal in team mode.** Your personal skills render for your clone only (listed in the harness block in `.git/info/exclude`) and stay out of AGENTS.md's committed skills index. If one has the same name as a shared skill (project, project-listed, or built-in), team mode renders the shared one so the repo is the same for everyone, and `sync` says yours isn't used. `sync --lock-skill` pins the shared copy and refuses a personal-only skill. A personal workflow can be listed in a team repo's `WORKFLOWS`; teammates and CI without it skip its checks, and `sync` notes that.
+- **Nothing configured, nothing changes.** No `LIBRARIES` means none; no personal dir means none. A listed directory that doesn't exist is skipped.
+
+Example: a personal skill and workflow for every project:
+
+```
+~/.config/ai-harness/
+  skills/sql-style/SKILL.md
+  workflows/my-review/checks/turn.sh
+  workflows/my-review/skill/SKILL.md
+```
+
+`.agents/bin/sync` in any project picks up `sql-style`. `install.sh --workflow my-review <project>` (or adding `my-review` to `WORKFLOWS`) turns the workflow on there.
+
+`bash .agents/lib/libraries.sh resolve skills` shows what each name resolves to and from which library (`libraries` lists the search path, `shadows <kind>` the losers; `python3 .agents/lib/harness.py resolve <kind> [name]` does the same). Names are letters, digits, `.`, `_`, and `-`, not starting with `.` or `_`. `LIBRARIES` is space-separated, so library paths can't contain spaces. The resolver parses config without running it (git hooks use it), and your personal `harness.conf` is never run.
+
+Pack scripts run from wherever the pack lives. Find the pack's own files from the script's path (`"$(dirname "$0")/../tool.py"`), never `.agents/workflows/<name>/`, and the project from `$AGENTS_ROOT`. `verify` and `gitflow` run pack checks with `bash`, so they don't need the exec bit. `verify`'s cache covers every file of each active pack wherever it lives, so an edit in your personal library counts. `sync` scans the skills that render and the active packs for invisible Unicode wherever they live (`.md`, `.conf`, `.json`, `.sh`, `.py`, and `.snippet` files), not only files in the repo.
+
 ## Stack packs
 
-`install.sh --stack <name>` copies `stacks/<name>` into `.agents/stacks/<name>` (harness-owned, refreshed on upgrade) and seeds the tier scripts if they're still stubs. Tailored tier scripts are never replaced.
+`install.sh --stack <name>` adds the stack to `STACKS` and seeds the tier scripts if they're still stubs. Tailored tier scripts are never replaced. The pack runs from its library (shipped ones from `.agents/builtin/stacks/<name>`); `.agents/stacks/<name>/lib.sh` is a small harness-owned shim that tier scripts source, which loads the pack from wherever it resolves.
 
 - **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only, affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. See `stacks/cpp-cmake/README.md`.
 
@@ -150,25 +195,25 @@ Each task starts the agent at the commit before a real fix; success means that f
 
 Stack packs answer "how do we build and test this language." Workflow packs answer "in what order, and with what evidence, do we change things." They're independent, so a project can combine `cpp-cmake` with `req-driven`.
 
-`install.sh --workflow <name>` copies `workflows/<name>` into `.agents/workflows/<name>` (harness-owned), installs its skill, and appends its settings to `.agents/harness.conf` once. `verify` then runs the pack's checks for each tier after the project's own tier scripts, so nothing in `.agents/checks/` has to change.
+`install.sh --workflow <name>` adds the pack to `WORKFLOWS` and appends its settings to `.agents/harness.conf` once. Nothing is copied: the pack runs in place from its library (see [Libraries](#libraries)). `verify` runs its `checks/<tier>.sh` for each tier after the project's own tier scripts, so nothing in `.agents/checks/` has to change; `gitflow` runs its commit-message check; `sync` renders its `skill/` as a skill named after the pack.
 
 A pack can also ship:
 - `policy.conf.snippet`: rules appended to `.agents/policy.conf` once. Its first line is a marker comment; while the marker is there, reinstalls add nothing, so a rule you delete stays deleted.
 - `seed/`: files copied into the project once and never overwritten (project-owned), e.g. `seed/.agents/<name>/.gitignore` to keep the pack's working files local. Harness-owned paths are skipped.
 - `checks/commit-msg.sh <file>`: extra commit-message rules. `gitflow` runs it everywhere it checks messages (the `commit-msg` hook, `gitflow commit`, `check`, and pre-push). Exit 1 or 2 rejects the commit with its output. Any other failure (a missing tool, a crash) also blocks, since an unchecked message could carry what the check exists to stop; a human can bypass with `git commit --no-verify`, which the policy denies to agents. A pack that prefers to let commits through handles its own missing tools and exits 0. It sees every message, including merge, fixup, and revert messages that the git.conf rules skip. Shipping one is enough for the git hooks to be installed.
-- `bin/`: commands for people, made executable on install.
+- `bin/`: commands for people. Shipped packs' commands are made executable on install; in a library of your own, set the bit yourself.
 - `checks/state.sh`: prints whatever the pack's checks read that git ignores (local working files), so `verify`'s cache notices when it changes. It runs on every `verify` call, since it feeds the cache key, so keep it fast and side-effect free. Plan ledgers are always included.
 
 - **req-driven**: every change starts from a requirement ID in any exported requirements source (CSV, JSON, Markdown, text). Deterministic checks: IDs must exist, new tests must name the requirement they verify, changes in scope must reference one (in code, tests, or the plan task in progress), and the full tier writes a requirement to code to tests trace with optional untested-requirement gating. Standard-agnostic. See `workflows/req-driven/README.md`.
   The skill's phases (pin the requirement, tests first, implement, report) each end at a `validate` gate, so they map onto planner, tester, implementer, and validator roles when roles land.
-- **feature-driven**: classic FDD for one developer. The agent drafts a domain model and feature list, then plans, designs, and builds one feature at a time; you approve the list, each design, and each finished feature with `fdd approve`, which agents can't run. Checks: design before build, a task in progress for every in-scope change, no private feature IDs in shared code or commit messages, and a parking-lot progress report. All FDD files stay local. See `workflows/feature-driven/README.md`.
+- **feature-driven**: classic FDD for one developer. The agent drafts a domain model and feature list, then plans, designs, and builds one feature at a time; you approve the list, each design, and each finished feature with `fdd approve` (`.agents/builtin/workflows/feature-driven/bin/fdd`), which agents can't run. Checks: design before build, a task in progress for every in-scope change, no private feature IDs in shared code or commit messages, and a parking-lot progress report. All FDD files stay local. See `workflows/feature-driven/README.md`.
 
 ## Integrity
 
 `sync --check` fails when:
 - a managed block or adapter config drifted from what sync would render,
 - a pinned third-party skill changed (`sync --lock-skill <name> <source> <ref>` pins by SHA-256 content hash),
-- any instruction or config file an agent reads contains invisible Unicode (zero-width, bidi controls, tag characters).
+- any instruction or config file an agent reads contains invisible Unicode (zero-width, bidi controls, tag characters), including the skills that render and the active packs in libraries outside the repo (`.md`, `.conf`, `.json`, `.sh`, `.py`, `.snippet` files there).
 
 ## What lands in a project
 
@@ -184,9 +229,10 @@ my-project/
     ├── core/                    harness: core rules, guard patterns
     ├── bin/                     harness: sync, verify, check, guard, tasks, eval
     ├── lib/, hooks/             harness: shell library, renderer, hook adapter
-    ├── stacks/<name>/           harness: installed stack packs
-    ├── workflows/<name>/        harness: installed workflow packs
-    ├── skills/                  harness built-ins + your skills
+    ├── builtin/                 harness: built-in skills, workflow and stack packs (a library)
+    ├── library/                 project: your skills, workflows, stacks (a library)
+    ├── skills/                  sync: every resolved skill, rendered (links or copies)
+    ├── stacks/<name>/lib.sh     harness: shims the tier scripts source
     ├── checks/{edit,turn,full}.sh   project: what each tier runs
     ├── harness.conf, policy.conf    project: adapters, hooks, budgets; limits
     ├── git.conf, git/               project: git workflow, PR template, commit template
@@ -222,7 +268,7 @@ Never install the harness into this repo; try changes in a scratch repo under /t
 
 ```sh
 bash tests/lint.sh       # seconds: syntax, shellcheck, portability, ownership lists, budgets, CODEOWNERS list, docs voice
-bash tests/smoke.sh      # ~40s, ~270 checks; the C++ section runs when cmake and a compiler exist
+bash tests/smoke.sh      # a few minutes, ~800 checks; the C++ section runs when cmake and a compiler exist
 bash tests/all.sh        # lint, then smoke under every awk on the machine (the release gate)
 bash scripts/package.sh  # dist/ai-harness-<version>.zip plus its SHA-256
 ```
@@ -236,7 +282,7 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Codex and Gemini CLI hooks aren't rendered yet; their formats need verifying first. Codex execpolicy rule syntax is also unverified against a live Codex.
 - Copilot and Cursor have no documented personal hook location, so a tracked `.github/hooks/harness.json` or `.cursor/hooks.json` turns that adapter off in local mode (sync warns and leaves the tracked file alone); the Copilot cloud agent, which works from the remote repo, gets nothing in local mode either.
 - Local mode's files are ignored by git in the clone, so `git clean -fdX` / `-fdx` and `git stash -a` take them away (`git stash -u` is fine), and a checkout that brings a tracked file at one of those paths overwrites the local copy. The backup in the git dir is refreshed on every `sync` and whenever `verify` runs on the turn or full tier; edits since then aren't in it. See [Local mode](#local-mode).
-- Local installs into two different subdirectories of one repo share one exclude block, and each `sync` rewrites it with only its own paths. The cpp-cmake stack's `/build-agent*/` lines are anchored at the repo top, not at a subdirectory install.
+- Two installs in one repo (two subdirectories, local or team with personal skills) share one exclude block, and each `sync` rewrites it with only its own paths. The cpp-cmake stack's `/build-agent*/` lines are anchored at the repo top, not at a subdirectory install.
 - Switching to local doesn't unshare a tracked `.gemini/settings.json`; its context entries stay, and local mode then leaves that tracked file alone.
 - Without python3, `install.sh --local` can't strip or untrack tracked JSON configs (`.claude/settings.json`, `.cursor/hooks.json`, `.github/hooks/harness.json`, `.codex/rules/harness.rules`); only `AGENTS.md` and `CLAUDE.md` are handled without it.
 - Hooks were tested with recorded payload shapes, not yet inside live Claude Code, Copilot, and Cursor sessions. Watch `.agents/cache/hook-events.log` on first use. The question-tool payloads (AskUserQuestion input and answers, Copilot ask_user) are the least certain; the capture falls back to recording the raw answer text.
@@ -244,6 +290,13 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Duplicate-question detection is word overlap with light stemming, not semantics. It catches rewordings of the same question; it can miss a paraphrase and, rarely, flag two different questions that share most words (`--force` overrides).
 - No sandbox profile ships with the harness. Pair it with a devcontainer that allowlists egress for unattended runs.
 - Policy rules block commands and reads, not writes. An agent can't run `guard allow` or `fdd approve`, but it could edit `.agents/guard.allow` or the local FDD `approvals` file directly. Command rules also match patterns, not intent: an agent that writes its own script to do the same thing is outside them.
+- Tools that read `.agents/skills/` natively are assumed to follow the symlinks `sync` renders there, as Claude Code does in `.claude/skills/`. If one doesn't, set `LINK_MODE="copy"`.
+- A library listed in `LIBRARIES` inside the repo that isn't checked out (an uninitialized submodule) resolves to nothing, so its skills and packs are skipped; in team mode CI then sees their committed renders as stale and `sync --check` fails.
+- In team mode, personal skills aren't in AGENTS.md's skills index (a committed file); tools that only read the index don't see them.
+- In team mode, an active workflow that's both built in and in your personal library renders the built-in skill, but `verify` and `gitflow` run the personal pack's checks, since runtime lookup keeps the plain search order. `sync` warns about both shadows; its "isn't used in team mode" message is about the skill only.
+- `eval`'s harness arms (B and C) still see your personal library, so personal skills and workflows can skew results between developers. Point `AGENTS_PERSONAL_DIR` at an empty directory for a clean run.
+- Library paths can't contain spaces (`LIBRARIES` is space-separated).
+- Renders are recognized as links into a library or marked copies in `.agents/skills/`; recording each render with its source in `.agents/generated.lock` is planned for when agents are rendered from libraries (phase 2).
 - feature-driven checks don't see every place a private feature ID can reach shared history: branch summaries (`gitflow start PROJ-123 <summary>`), plan titles that go into PR bodies, and code committed before a turn gate ran (`fdd-leak` only reads uncommitted changes).
 
 ## Roadmap

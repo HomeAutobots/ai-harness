@@ -11,7 +11,7 @@ You are producing a proposal, not a finished change. A human reviews it before a
 - **Facts only.** Commands, paths, prohibitions, non-obvious conventions. No overviews, no directory tours, no "write clean code". If the README or the code already makes it obvious, leave it out.
 - **Budget.** Add at most ~25 lines to AGENTS.md outside the managed blocks. Anything bigger goes in `.agents/context/<topic>.md` with a "read when" row.
 - **Prove every command.** Anything you write down, run once. If it can't run here (credentials, hardware, target device), mark it `(unverified)`.
-- **Stay inside the lines.** Never edit between `<!-- harness:*:start -->` and `<!-- harness:*:end -->`, or any harness-owned file (`.agents/bin`, `.agents/lib`, `.agents/hooks`, `.agents/core`, built-in skills).
+- **Stay inside the lines.** Never edit between `<!-- harness:*:start -->` and `<!-- harness:*:end -->`, or any harness-owned file (`.agents/bin`, `.agents/lib`, `.agents/hooks`, `.agents/core`, `.agents/builtin`, and `.agents/skills/`, which sync renders).
 - **No app code changes.** You touch AGENTS.md, CLAUDE.md, `.agents/checks/`, `.agents/context/`, `.agents/baselines/`, and legacy instruction files only.
 - **Local mode: nothing the project tracks.** Never edit a file git tracks (`git ls-files --error-unmatch <path>`) and don't create files outside `.agents/`: they would show up in `git status`. Tracked legacy files go in the report instead.
 - **Ask last.** Collect questions the repo can't answer (off-limits areas, deploy rules, who owns what) and put them in your report.
@@ -24,7 +24,7 @@ Stop once you have the picture:
 - CI config (.github/workflows, .gitlab-ci.yml, Jenkinsfile, azure-pipelines.yml). CI defines what "passing" means; the full tier should mirror it.
 - Build and package manifests (CMakeLists.txt, CMakePresets.json, Makefile, package.json, pyproject.toml, Cargo.toml, go.mod, ...), lint and format config, devcontainer.
 - `git log --oneline -30` for commit conventions.
-- If this is a C/C++ CMake repo and `.agents/stacks/cpp-cmake` isn't installed, say so in the report: the human can run `install.sh --stack cpp-cmake`.
+- If this is a C/C++ CMake repo and `cpp-cmake` isn't in `STACKS` in `.agents/harness.conf`, say so in the report: the human can run `install.sh --stack cpp-cmake`.
 
 ### 2. Legacy instructions
 Read CLAUDE.md (and nested ones), .cursorrules, .cursor/rules/*.mdc, .github/copilot-instructions.md, .github/instructions/*.instructions.md, GEMINI.md, .windsurfrules, CONVENTIONS.md. Keep only durable, specific, still-true facts. Drop anything the harness core block already covers.
@@ -64,4 +64,4 @@ Point out anything in `.agents/policy.conf` that looks wrong for this repo.
 ### 7. Finish
 - `.agents/bin/sync`, then `.agents/bin/sync --check`.
 - `grep -rn "TODO(harness-tailor)" AGENTS.md .agents/checks` returns nothing.
-- Report: lines added to AGENTS.md (target ≤25), each tier's commands and whether they ran, pre-existing failures and what was baselined, legacy files to clean up, the CODEOWNERS suggestion (team mode only), in local mode every file you touched, your batched questions, and up to 3 project-specific skills worth writing (name and one line each; don't create them).
+- Report: lines added to AGENTS.md (target ≤25), each tier's commands and whether they ran, pre-existing failures and what was baselined, legacy files to clean up, the CODEOWNERS suggestion (team mode only), in local mode every file you touched, your batched questions, and up to 3 project-specific skills worth writing (name and one line each, for `.agents/library/skills/`; don't create them).

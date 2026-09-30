@@ -17,16 +17,17 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `bin/eval` | harness | Replays real fixes to measure whether the harness helps |
 | `bin/gitflow` | harness | The repo's git workflow: branch, commit, update, push, PR, review, merge, checks |
 | `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, hook adapter |
-| `stacks/<name>/` | harness | Stack packs (e.g. cpp-cmake), refreshed on upgrade |
-| `workflows/<name>/` | harness | Workflow packs (e.g. req-driven): checks verify runs per tier, optional commit-message checks gitflow runs; their skill lands in `skills/` |
+| `builtin/` | harness | The built-in library: the harness's skills and its workflow and stack packs (e.g. req-driven, cpp-cmake), rebuilt on every install |
+| `library/` | project | Your library: `skills/`, `workflows/`, `stacks/`. Upgrades never touch it. Also searched: `LIBRARIES` in `harness.conf`, your personal `~/.config/ai-harness/` |
+| `skills/` | sync | Every resolved skill, rendered (links, or copies with `LINK_MODE=copy`). Don't edit here; a skill added by hand moves to `library/skills/` |
+| `stacks/<name>/lib.sh` | harness | Shim the tier scripts source; loads the stack pack from its library |
 | files a workflow pack seeds | project | Created once from the pack's `seed/` (e.g. a `.gitignore` for its local working files); a deleted one comes back on the next install |
-| `skills/harness-tailor`, `plan-task`, `review-diff` | harness | Built-in skills |
 | `checks/{edit,turn,full}.sh` | project | What each tier actually runs. Tailor these. |
-| `harness.conf` | project | Adapters, hooks, budgets, stacks |
+| `harness.conf` | project | Adapters, hooks, budgets, libraries, active stacks and workflows |
 | `git.conf`, `git/pr.md` | project | Git workflow settings (over your personal `~/.config/ai-harness/git.conf`) and PR template |
 | `policy.conf` | project | Commands and paths agents may not touch |
 | `guard.allow`, `baselines/` | project | Approved exceptions; pre-existing findings |
-| `skills/<other>` | project | Your skills; pin third-party ones in `skills.lock` |
+| `skills.lock` | project | Third-party skills pinned by content hash (`sync --lock-skill`) |
 | `context/`, `plans/`, `evals/` | project | On-demand docs, plan ledgers (gitignored), eval tasks |
 | `generated.lock` | sync | Tracks what sync added to shared config files |
 | `cache/` | local | Logs, verify cache, hook state (gitignored) |
@@ -42,8 +43,10 @@ Harness-owned files are replaced on upgrade (re-run `install.sh`), so don't cust
 Exit codes everywhere: 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 out of budget.
 
 ## Common tasks
-- New skill: `.agents/skills/<name>/SKILL.md`, then `.agents/bin/sync`.
-- Third-party skill: copy it in, review it, `.agents/bin/sync --lock-skill <name> <source> <ref>`.
+- New skill: `.agents/library/skills/<name>/SKILL.md` (or `~/.config/ai-harness/skills/<name>/` for every project), then `.agents/bin/sync`.
+- Third-party skill: copy it into `.agents/library/skills/`, review it, `.agents/bin/sync --lock-skill <name> <source> <ref>`.
+- Change a built-in skill or pack: copy it to `.agents/library/skills/<name>/`, `workflows/<name>/`, or `stacks/<name>/` under the same name and edit it there (edits in `builtin/` are lost on upgrade).
+- Where a skill, workflow, or stack comes from: `bash .agents/lib/libraries.sh resolve <skills|workflows|stacks>`.
 - Pre-existing lint findings: `.agents/bin/verify --tier=full --update-baseline`.
 - Approve a suppression (humans only): `.agents/bin/guard allow <file-glob> <text> <reason>`.
 - Turn hooks off for a session: `AGENTS_HOOKS=off`.

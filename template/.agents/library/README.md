@@ -19,4 +19,8 @@ shadows another: this directory, `LIBRARIES` in `.agents/harness.conf`, your per
 built-ins in `.agents/builtin/`. To change a built-in, put your version here under the same name.
 
 Pack scripts run from wherever the pack lives, so find the pack's own files from the script's
-path (`"$(dirname "$0")/../tool.py"`) and the project from `$AGENTS_ROOT`.
+path (`"$(dirname "$0")/../tool.py"`) and the project from `$AGENTS_ROOT`. verify and gitflow run
+checks with bash; a command in a pack's `bin/` needs `chmod +x` from you.
+
+Names are letters, digits, `.`, `_`, and `-`, and don't start with `.` or `_`. See where each name
+resolves from with `bash .agents/lib/libraries.sh resolve <skills|workflows|stacks>`.
