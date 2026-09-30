@@ -1121,6 +1121,39 @@ t    "--local finishes a half-done switch" test -z "$(git -C "$HS" ls-files .age
 NG="$WORK/nogit"; mkdir -p "$NG"
 "$HARNESS/install.sh" --team "$NG" >/dev/null 2>&1
 t    "switch outside git succeeds"    "$HARNESS/install.sh" --local "$NG"
+NI=$(repo noimport)
+printf '@README.md\n\nTeam notes.\n' > "$NI/CLAUDE.md"; commit "$NI" claude
+"$HARNESS/install.sh" "$NI" >/dev/null 2>&1
+t    "tracked CLAUDE.md without @AGENTS.md: CLAUDE.local.md imports it" grep -qx '@AGENTS.md' "$NI/CLAUDE.local.md"
+t    "...status clean"                test -z "$(git -C "$NI" status --porcelain)"
+WI=$(repo withimport)
+printf '@AGENTS.md\n\nTeam notes.\n' > "$WI/CLAUDE.md"; commit "$WI" claude
+"$HARNESS/install.sh" "$WI" >/dev/null 2>&1
+tnot "tracked CLAUDE.md with @AGENTS.md: no CLAUDE.local.md" test -e "$WI/CLAUDE.local.md"
+TL=$(repo trackedlocalmd)
+printf '@README.md\n' > "$TL/CLAUDE.md"; printf '@README.md\n' > "$TL/CLAUDE.local.md"; commit "$TL" claude
+out="$("$HARNESS/install.sh" "$TL" 2>&1)"; "$TL/.agents/bin/sync" >/dev/null 2>&1
+t    "tracked CLAUDE.local.md untouched, status clean" test -z "$(git -C "$TL" status --porcelain)"
+t    "...and said so"                 hasl "$out" "CLAUDE.local.md is tracked by the project"
+IO=$(repo importonly)
+printf '@README.md\n' > "$IO/CLAUDE.md"; commit "$IO" claude
+"$HARNESS/install.sh" --team "$IO" >/dev/null 2>&1; commit "$IO" harness
+printf '@README.md\n' > "$IO/CLAUDE.md"; commit "$IO" "own CLAUDE.md"
+"$HARNESS/install.sh" --local "$IO" >/dev/null 2>&1
+t    "--local keeps an import-only project CLAUDE.md tracked" git -C "$IO" ls-files --error-unmatch CLAUDE.md
+t    "...and unchanged"               test "$(cat "$IO/CLAUDE.md")" = "@README.md"
+t    "...with CLAUDE.local.md importing AGENTS.md" grep -qx '@AGENTS.md' "$IO/CLAUDE.local.md"
+IU=$(repo importunion)
+printf '@README.md\n' > "$IU/CLAUDE.md"; commit "$IU" claude
+"$HARNESS/install.sh" --team "$IU" >/dev/null 2>&1
+t    "team stub keeps the project's import" bash -c "grep -qx '@README.md' '$IU/CLAUDE.md' && grep -qx '@AGENTS.md' '$IU/CLAUDE.md'"
+commit "$IU" harness
+"$HARNESS/install.sh" --local "$IU" >/dev/null 2>&1
+t    "--local strips only the harness's lines from it" bash -c "git -C '$IU' ls-files --error-unmatch CLAUDE.md && test \"\$(cat '$IU/CLAUDE.md')\" = '@README.md'"
+{ echo '@docs/style.md'; cat "$LM/CLAUDE.md"; } > "$WORK/stub.md"; cat "$WORK/stub.md" > "$LM/CLAUDE.md"
+"$LM/.agents/bin/sync" >/dev/null 2>&1
+t    "a stub keeps an import someone added" bash -c "grep -qx '@docs/style.md' '$LM/CLAUDE.md' && grep -qx '@AGENTS.md' '$LM/CLAUDE.md'"
+t    "...and is stable"               "$LM/.agents/bin/sync" --check
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

@@ -57,8 +57,9 @@ drift() { say "out of date: $*"; DRIFT=1; }
 tracked() { git ls-files --error-unmatch -- "$1" >/dev/null 2>&1; }
 # claude_stub <file>: true if the file holds only what the harness writes (imports, blank lines,
 # the marker comment), so regenerating it loses nothing.
+CLAUDE_MARK='<!-- Shared instructions live in AGENTS.md'
 claude_stub() {
-  [ -z "$(grep -vE '^@[^[:space:]]+[[:space:]]*$|^[[:space:]]*$|^<!-- Shared instructions live in AGENTS.md' "$1")" ]
+  [ -z "$(grep -vE "^@[^[:space:]]+[[:space:]]*\$|^[[:space:]]*\$|^$CLAUDE_MARK" "$1")" ]
 }
 LOCAL=0; [ "$HARNESS_MODE" = local ] && LOCAL=1
 
@@ -80,7 +81,20 @@ if [ "$UNSHARE" -eq 1 ]; then
       cmp -s AGENTS.md "$WORK/agents.md" || { cat "$WORK/agents.md" > AGENTS.md; echo "stripped AGENTS.md"; }
     fi
   fi
-  if tracked CLAUDE.md && [ -f CLAUDE.md ] && claude_stub CLAUDE.md; then echo "untrack CLAUDE.md"; fi
+  # CLAUDE.md: only the harness's lines go (its imports and the marker line it writes), and only
+  # when the marker says the harness wrote the file. A project's own CLAUDE.md stays as it is.
+  if tracked CLAUDE.md && [ -f CLAUDE.md ] && grep -q "^$CLAUDE_MARK" CLAUDE.md; then
+    awk -v m="$CLAUDE_MARK" '/^@(AGENTS\.md|\.agents\/AGENTS\.local\.md)[ \t\r]*$/ { next }
+         index($0, m) == 1 { held = ""; next }
+         /^[ \t\r]*$/ { held = held $0 "\n"; next }
+         { printf "%s", held; held = ""; print }
+         END { printf "%s", held }' CLAUDE.md > "$WORK/claude.md"
+    if ! grep -q '[^[:space:]]' "$WORK/claude.md"; then
+      echo "untrack CLAUDE.md"
+    elif ! cmp -s CLAUDE.md "$WORK/claude.md"; then
+      cat "$WORK/claude.md" > CLAUDE.md; echo "stripped CLAUDE.md"
+    fi
+  fi
   if [ -n "$PY" ]; then "$PY" .agents/lib/harness.py unshare; fi
   exit 0
 fi
@@ -288,12 +302,24 @@ adapter_claude() {
     fi
     [ "$AGENTS_FILE" = AGENTS.md ] || imports="${imports:+$imports }@$AGENTS_FILE"
   fi
+  if [ "$LOCAL" -eq 1 ] && [ "$cf" != CLAUDE.md ] && tracked "$cf"; then
+    warn "$cf is tracked by the project; local mode leaves it alone"
+    imports=""
+  fi
   # Nothing to import (the tracked CLAUDE.md already imports AGENTS.md, which holds the blocks):
   # no personal file needed.
   if [ -n "$imports" ]; then
-    # shellcheck disable=SC2086
-    printf '%s\n' $imports > "$WORK/claude.md"
-    printf '%s\n' '' '<!-- Shared instructions live in AGENTS.md. Claude Code-only notes go below this line. -->' >> "$WORK/claude.md"
+    # A stub keeps imports someone added (existing order first); the harness's own two imports
+    # stay only while they're wanted.
+    : > "$WORK/claude.md"
+    if [ -f "$cf" ] && claude_stub "$cf"; then
+      sed -n 's/^\(@[^[:space:]]*\)[[:space:]]*$/\1/p' "$cf" | while IFS= read -r i; do
+        case "$i" in @AGENTS.md|@.agents/AGENTS.local.md) case " $imports " in *" $i "*) ;; *) continue ;; esac ;; esac
+        grep -qxF -- "$i" "$WORK/claude.md" || printf '%s\n' "$i" >> "$WORK/claude.md"
+      done
+    fi
+    for i in $imports; do grep -qxF -- "$i" "$WORK/claude.md" || printf '%s\n' "$i" >> "$WORK/claude.md"; done
+    printf '%s\n' '' "$CLAUDE_MARK. Claude Code-only notes go below this line. -->" >> "$WORK/claude.md"
     if [ ! -f "$cf" ] || claude_stub "$cf"; then
       put "$cf" "$WORK/claude.md"
     else
@@ -305,7 +331,7 @@ adapter_claude() {
   fi
   # Team mode: a CLAUDE.local.md the harness made (marker line included) would load AGENTS.md twice.
   if [ "$LOCAL" -eq 0 ] && [ -f CLAUDE.local.md ] && claude_stub CLAUDE.local.md \
-     && grep -q '^<!-- Shared instructions live in AGENTS.md' CLAUDE.local.md; then
+     && grep -q "^$CLAUDE_MARK" CLAUDE.local.md; then
     if [ "$CHECK" -eq 1 ]; then drift "CLAUDE.local.md (remove)"; else rm -f CLAUDE.local.md; CHANGED=1; say "removed CLAUDE.local.md (team mode uses CLAUDE.md)"; fi
   fi
   mirror_skills .claude/skills
