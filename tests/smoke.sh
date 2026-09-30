@@ -627,7 +627,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "settings appended once"          test "$(grep -c '^REQ_SOURCE=' "$W/.agents/harness.conf")" -eq 1
   t  "skill installed and mirrored"    test -f "$W/.claude/skills/req-driven/SKILL.md"
   t  "skill in index"                  grep -q '`req-driven`' "$W/AGENTS.md"
-  trc "unconfigured source is infra (3)" 3 env AGENTS_ROOT="$W" "$W/.agents/workflows/req-driven/checks/turn.sh"
+  trc "unconfigured source is infra (3)" 3 env AGENTS_ROOT="$W" "$W/.agents/builtin/workflows/req-driven/checks/turn.sh"
   edit "$W/.agents/harness.conf" 's|^REQ_SOURCE=""|REQ_SOURCE="docs/requirements.csv"|'
   printf '#!/usr/bin/env bash\nexit 0\n' > "$W/.agents/checks/turn.sh"; cp "$W/.agents/checks/turn.sh" "$W/.agents/checks/full.sh"
   commit "$W" harness
@@ -702,9 +702,9 @@ EOF
   t  "stack checks seeded"             grep -q 'cpp_test_affected' "$X/.agents/checks/turn.sh"
   t  "turn passes on clean tree"       "$X/.agents/bin/verify"
   t  "build dirs excluded from git"    bash -c "test -z \"\$(git -C '$X' status --porcelain)\""
-  t  "affected: lib change -> dependents" bash -c "cd '$X' && python3 .agents/stacks/cpp-cmake/cpp_tools.py affected \"\$PWD\" \"\$PWD/build-agent\" src/pki/cert.cpp | grep -qxF '^(CertTest|FrameTest)$'"
-  t  "affected: leaf change -> one test" bash -c "cd '$X' && python3 .agents/stacks/cpp-cmake/cpp_tools.py affected \"\$PWD\" \"\$PWD/build-agent\" src/net/frame.cpp | grep -qxF '^(FrameTest)$'"
-  t  "affected: header -> all"         bash -c "cd '$X' && python3 .agents/stacks/cpp-cmake/cpp_tools.py affected \"\$PWD\" \"\$PWD/build-agent\" src/net/frame.h | grep -qx ALL"
+  t  "affected: lib change -> dependents" bash -c "cd '$X' && python3 .agents/builtin/stacks/cpp-cmake/cpp_tools.py affected \"\$PWD\" \"\$PWD/build-agent\" src/pki/cert.cpp | grep -qxF '^(CertTest|FrameTest)$'"
+  t  "affected: leaf change -> one test" bash -c "cd '$X' && python3 .agents/builtin/stacks/cpp-cmake/cpp_tools.py affected \"\$PWD\" \"\$PWD/build-agent\" src/net/frame.cpp | grep -qxF '^(FrameTest)$'"
+  t  "affected: header -> all"         bash -c "cd '$X' && python3 .agents/builtin/stacks/cpp-cmake/cpp_tools.py affected \"\$PWD\" \"\$PWD/build-agent\" src/net/frame.h | grep -qx ALL"
   printf '#include "net/frame.h"\nint frame_sum(int n) {\n  int unused = 0;\n  int buf[4] = {1, 2, 3, 4};\n  int s = 0;\n  for (int i = 0; i < n; ++i) s += buf[i];\n  return s;\n}\n' > "$X/src/net/frame.cpp"
   out="$("$X/.agents/bin/verify" || true)"
   t  "new warning in changed file fails" bash -c "printf '%s' \"\$1\" | grep -q 'unused variable'" _ "$out"
@@ -764,7 +764,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "ticket key checked"              has "$out" ".agents/fdd/features.md:9: error: [fdd-format] [bad] isn't a ticket key"
   t  "non-ID list item flagged"        has "$out" ".agents/fdd/features.md:10: error: [fdd-format] 'Z-1' isn't a feature ID"
   trc "edit tier checks an edited list" 1 "$F/.agents/bin/check" .agents/fdd/features.md
-  trc "turn tier never runs fdd-format" 0 env AGENTS_ROOT="$F" bash "$F/.agents/workflows/feature-driven/checks/turn.sh" .agents/fdd/features.md
+  trc "turn tier never runs fdd-format" 0 env AGENTS_ROOT="$F" bash "$F/.agents/builtin/workflows/feature-driven/checks/turn.sh" .agents/fdd/features.md
   printf '# Features\n\n## Sales\n### FS-1 Making a sale\n- F-12 Calculate the total of a sale [PROJ-123]\n- F-13 Apply a discount to a sale line\n' > "$FD/features.md"
   tnot "clean list, no format findings" bash -c "'$F/.agents/bin/verify' --tier=full | grep -q fdd-format"
   t  "status: list not approved"       bash -c "'$FDDX' status | grep -q '^list: not approved'"
@@ -792,6 +792,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "no design blocks build"          has "$("$F/.agents/bin/verify" || true)" "[fdd-no-design] building F-12, but it has no design (.agents/fdd/designs/F-12.md)"
   mkdir -p "$FD/designs"; printf '# F-12\nApproach: add the lines.\n' > "$FD/designs/F-12.md"
   t  "unapproved design blocks build"  has "$("$F/.agents/bin/verify" || true)" "building F-12, but its design isn't approved"
+  t  "the fix names where fdd runs from" has "$("$F/.agents/bin/verify" || true)" "ask the human to run .agents/builtin/workflows/feature-driven/bin/fdd approve design F-12"
   "$FDDX" approve design F-12 >/dev/null
   t  "approved design passes"          "$F/.agents/bin/verify"
   printf 'Also rounding.\n' >> "$FD/designs/F-12.md"
@@ -876,7 +877,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "FDD_DIR outside the repo works"  bash -c "'$FDDX' status | grep -q '^list: approved'"
   mv "$FD.hidden" "$FD"
   edit "$F/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
-  FC="$F/.agents/workflows/feature-driven/checks"
+  FC="$F/.agents/builtin/workflows/feature-driven/checks"
   pk(){ local tier="$1"; shift; env AGENTS_ROOT="$F" bash "$FC/$tier.sh" "$@" 2>&1 || true; }
   cp -R "$FD" "$F/.agents/other"; rm -f "$F/.agents/other/.gitignore"
   edit "$F/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/other"|'
@@ -944,16 +945,16 @@ printf 'notes\n' > "$D3/checks/README"
 trc  "pack with an empty bin/ installs" 0 "$HX/install.sh" --team --workflow demo3 "$(repo demo3)"
 D=$(repo demo)
 "$HX/install.sh" --team --workflow demo "$D" >/dev/null 2>&1
-t    "no __pycache__ copied from a pack" test ! -e "$D/.agents/workflows/demo/__pycache__"
+t    "no __pycache__ copied from a pack" test ! -e "$D/.agents/builtin/workflows/demo/__pycache__"
 t    "pack rule appended to policy"    grep -qx 'deny-cmd demo-approve   # approving is a human decision' "$D/.agents/policy.conf"
 if [ "$HAVE_PY" -eq 1 ]; then
   t  "pack rule rendered natively"     grep -q 'Bash(demo-approve' "$D/.claude/settings.json"
 fi
 t    "pack seed file created"          test -f "$D/.agents/demo/.gitignore"
-t    "snippet and seed not left in pack" bash -c "test ! -e '$D/.agents/workflows/demo/policy.conf.snippet' && test ! -e '$D/.agents/workflows/demo/seed'"
+t    "pack not copied into the project" test ! -e "$D/.agents/workflows/demo"
 echo notes > "$D/.agents/demo/notes.md"
 t    "seeded ignore keeps files local" git -C "$D" check-ignore -q .agents/demo/notes.md
-t    "pack bin made executable"        test -x "$D/.agents/workflows/demo/bin/demo-tool"
+t    "pack bin made executable"        test -x "$D/.agents/builtin/workflows/demo/bin/demo-tool"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$D/.agents/checks/turn.sh"
 echo good > "$D/.agents/demo/state"
 t    "pack state: clean"               "$D/.agents/bin/verify"
@@ -1325,6 +1326,7 @@ t    "local sync exits 0"              "$BK/.agents/bin/sync"
 t    "backup kept in the git dir"      test -f "$BKD/.agents/context/parser.md"
 t    "backup skips the cache"          test ! -e "$BKD/.agents/cache"
 t    "backup skips eval results"       test ! -e "$BKD/.agents/evals/results"
+t    "backup skips the built-in library" test ! -e "$BKD/.agents/builtin"
 t    "stale backup work dirs removed"  test ! -e "$BKD.new.123"
 t    "backup has the local AGENTS.md"  grep -q 'safety critical' "$BKD/AGENTS.md"
 for tier in turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$BK/.agents/checks/$tier.sh"; done
@@ -1347,6 +1349,7 @@ t    "git clean -fdX wipes the local install" test ! -e "$BK/.agents"
 out="$("$HARNESS/install.sh" "$BK" 2>&1)"
 t    "install restores from the backup" bash -c "printf '%s' \"\$1\" | grep -q 'restored your local harness files'" _ "$out"
 t    "context restored"                grep -q 'Never touch the parser' "$BK/.agents/context/parser.md"
+t    "built-in library rebuilt"        test -f "$BK/.agents/builtin/skills/review-diff/SKILL.md"
 t    "policy tailoring restored"       grep -q '^deny-cmd make deploy' "$BK/.agents/policy.conf"
 t    "AGENTS.md facts restored"        grep -q 'safety critical' "$BK/AGENTS.md"
 t    "still local after the restore"   grep -qx 'HARNESS_MODE="local"' "$BK/.agents/harness.conf"
@@ -1457,6 +1460,136 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t   "fdd finds the project from the working directory" bash -c "cd '$IP' && bash '$AW/feature-driven/bin/fdd' status | grep -q '^list: none yet'"
 fi
 t    "a stack lib finds its own files" env AGENTS_ROOT="$IP" bash -c '. "$1/cpp-cmake/lib.sh" && test "$CPP_PACK" = "$1/cpp-cmake"' _ "$AW"
+
+echo "workflows and stacks from libraries"
+PK=$(repo packs)
+"$HARNESS/install.sh" --team "$PK" >/dev/null 2>&1
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$PK/.agents/checks/$tier.sh"; done
+HW="$PK/.agents/library/workflows/house"; mkdir -p "$HW/checks"
+printf '#!/usr/bin/env bash\ngrep -q HOUSE-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [house] house rule"; exit 1; }\nexit 0\n' > "$HW/checks/turn.sh"
+printf '#!/usr/bin/env bash\ngrep -q HOUSE-ID "$1" && { echo "house says no"; exit 1; }\nexit 0\n' > "$HW/checks/commit-msg.sh"
+"$HARNESS/install.sh" --team --workflow house "$PK" >/dev/null 2>&1
+t    "install takes a workflow from the project library" grep -q '^WORKFLOWS="house"' "$PK/.agents/harness.conf"
+t    "no pack copies in the project"   test ! -e "$PK/.agents/workflows"
+commit "$PK" harness
+echo HOUSE-BAD > "$PK/notes.txt"
+t    "verify runs a library workflow in place" bash -c "'$PK/.agents/bin/verify' | grep -qF '[house] house rule'"
+rm -f "$PK/notes.txt"
+t    "...and passes when clean"        "$PK/.agents/bin/verify"
+trc  "gitflow runs its message check" 1 bash -c "cd '$PK' && printf 'x HOUSE-ID\n' | .agents/bin/gitflow check-msg"
+t    "...and git hooks install for it" grep -q 'ai-harness gitflow' "$PK/.git/hooks/commit-msg"
+PW="$WORK/pers-packs"; mkdir -p "$PW/workflows/mine/checks"
+printf '#!/usr/bin/env bash\ngrep -q MINE-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [mine] personal rule"; exit 1; }\nexit 0\n' > "$PW/workflows/mine/checks/turn.sh"
+PK2=$(repo packs2)
+AGENTS_PERSONAL_DIR="$PW" "$HARNESS/install.sh" --team --workflow mine "$PK2" >/dev/null 2>&1
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$PK2/.agents/checks/$tier.sh"; done
+AGENTS_PERSONAL_DIR="$PW" "$HARNESS/install.sh" --team --workflow mine "$PK" >/dev/null 2>&1
+echo MINE-BAD > "$PK/notes.txt"; echo MINE-BAD > "$PK2/notes.txt"
+t    "a personal workflow runs in every project that enables it" bash -c "AGENTS_PERSONAL_DIR='$PW' '$PK/.agents/bin/verify' | grep -qF '[mine]' && AGENTS_PERSONAL_DIR='$PW' '$PK2/.agents/bin/verify' | grep -qF '[mine]'"
+t    "...and is skipped where that library isn't" "$PK2/.agents/bin/verify"
+rm -f "$PK/notes.txt" "$PK2/notes.txt"
+AGENTS_PERSONAL_DIR="$PW" "$PK2/.agents/bin/verify" >/dev/null 2>&1   # cache a clean result
+printf '#!/usr/bin/env bash\necho "x:1: error: [mine] always"; exit 1\n' > "$PW/workflows/mine/checks/turn.sh"
+t    "editing a pack outside the repo refreshes verify's cache" bash -c "AGENTS_PERSONAL_DIR='$PW' '$PK2/.agents/bin/verify' | grep -qF '[mine] always'"
+mkdir -p "$PK/.agents/library/workflows/req-driven/checks"
+printf '#!/usr/bin/env bash\necho "x:1: error: [ours] our req-driven"; exit 1\n' > "$PK/.agents/library/workflows/req-driven/checks/turn.sh"
+edit "$PK/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="house req-driven"/'
+t    "a library pack shadows the built-in one" bash -c "'$PK/.agents/bin/verify' | grep -qF '[ours]'"
+rm -rf "$PK/.agents/library/workflows/req-driven"
+edit "$PK/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="house ghost"/'
+out="$("$HARNESS/install.sh" --team "$PK" 2>&1)"
+t    "a name no library has: install warns" hasl "$out" "WORKFLOWS lists 'ghost' but no library has it"
+t    "...and verify skips it"          "$PK/.agents/bin/verify"
+edit "$PK/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="house"/'
+"$HARNESS/install.sh" --team --stack cpp-cmake "$PK" >/dev/null 2>&1
+t    "a stack gets a shim, not a copy" bash -c "grep -q 'ai-harness: stack shim' '$PK/.agents/stacks/cpp-cmake/lib.sh' && test \"\$(ls '$PK/.agents/stacks/cpp-cmake')\" = lib.sh"
+t    "...which loads the pack from its library" env AGENTS_ROOT="$PK" bash -c '. "$1/.agents/stacks/cpp-cmake/lib.sh" && test "$CPP_PACK" = "$1/.agents/builtin/stacks/cpp-cmake"' _ "$PK"
+mkdir -p "$PK/.agents/library/stacks/tiny"; printf 'tiny_ok() { echo tiny; }\n' > "$PK/.agents/library/stacks/tiny/lib.sh"
+"$HARNESS/install.sh" --team --stack tiny "$PK" >/dev/null 2>&1
+t    "a library stack works through its shim" env AGENTS_ROOT="$PK" bash -c '. "$1/.agents/stacks/tiny/lib.sh" && tiny_ok' _ "$PK"
+rm -rf "$PK/.agents/library/stacks/tiny"
+trc  "a shim whose stack is gone is a tooling problem" 3 env AGENTS_ROOT="$PK" bash -c '. "$1/.agents/stacks/tiny/lib.sh"; exit 0' _ "$PK"
+edit "$PK/.agents/harness.conf" 's/^STACKS=.*/STACKS="cpp-cmake"/'
+
+oldlayout() {  # oldlayout <project>: make an install look like one from before libraries
+  local p="$1"
+  rm -rf "$p/.agents/builtin" "$p/.agents/skills" "$p/.agents/workflows"
+  mkdir -p "$p/.agents/skills" "$p/.agents/workflows" "$p/.agents/stacks"
+  cp -R "$HARNESS/template/.agents/skills/." "$p/.agents/skills/"
+  cp -R "$HARNESS/workflows/req-driven" "$p/.agents/workflows/"
+  mv "$p/.agents/workflows/req-driven/skill" "$p/.agents/skills/req-driven"
+  rm -rf "$p/.agents/stacks/cpp-cmake"; cp -R "$HARNESS/stacks/cpp-cmake" "$p/.agents/stacks/"
+  printf 'deny-cmd .agents/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision\n' >> "$p/.agents/policy.conf"
+  echo 0.2.0 > "$p/.agents/HARNESS_VERSION"
+}
+handmade() {  # handmade <project>: a pack and its skill someone made by hand in the old layout
+  local p="$1"
+  mkdir -p "$p/.agents/workflows/handmade/checks" "$p/.agents/skills/handmade"
+  printf '#!/usr/bin/env bash\nbash "$AGENTS_ROOT/.agents/workflows/handmade/rule.sh"\n' > "$p/.agents/workflows/handmade/checks/turn.sh"
+  printf '#!/usr/bin/env bash\ngrep -q HANDMADE-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [handmade] bad notes"; exit 1; }\nexit 0\n' > "$p/.agents/workflows/handmade/rule.sh"
+  printf -- '---\nname: handmade\ndescription: Our process.\n---\nRun .agents/workflows/handmade/rule.sh first.\n' > "$p/.agents/skills/handmade/SKILL.md"
+  edit "$p/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="handmade"/'
+}
+echo "migration to libraries: packs"
+MG=$(repo migrate)
+"$HARNESS/install.sh" --team "$MG" >/dev/null 2>&1
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$MG/.agents/checks/$tier.sh"; done
+oldlayout "$MG"; handmade "$MG"; commit "$MG" "old layout"
+out="$("$HARNESS/install.sh" "$MG" 2>&1)"
+t    "copies of shipped packs go"      test ! -e "$MG/.agents/workflows"
+t    "a hand-made pack moves to the project library" test -f "$MG/.agents/library/workflows/handmade/rule.sh"
+t    "...with its paths updated"       grep -q '.agents/library/workflows/handmade/rule.sh' "$MG/.agents/library/workflows/handmade/checks/turn.sh"
+t    "...and its skill folded in as skill/" grep -q 'Run .agents/library/workflows/handmade/rule.sh first.' "$MG/.agents/library/workflows/handmade/skill/SKILL.md"
+echo HANDMADE-BAD > "$MG/notes.txt"
+t    "...and it still runs"            bash -c "'$MG/.agents/bin/verify' | grep -qF '[handmade] bad notes'"
+rm -f "$MG/notes.txt"
+t    "stack copies become shims"       bash -c "grep -q 'ai-harness: stack shim' '$MG/.agents/stacks/cpp-cmake/lib.sh' && test ! -e '$MG/.agents/stacks/cpp-cmake/cpp_tools.py'"
+t    "...and old tier scripts still load the stack" env AGENTS_ROOT="$MG" bash -c '. "$1/.agents/stacks/cpp-cmake/lib.sh" && test "$CPP_PACK" = "$1/.agents/builtin/stacks/cpp-cmake"' _ "$MG"
+t    "the fdd approve rule follows the command" bash -c "grep -q '^deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve' '$MG/.agents/policy.conf' && ! grep -q '^deny-cmd .agents/workflows/' '$MG/.agents/policy.conf'"
+t    "team mode lists the moves to commit" bash -c "printf '%s' \"\$1\" | grep -q 'Commit what git status shows' && printf '%s' \"\$1\" | grep -q 'moved .agents/workflows/handmade to .agents/library/workflows/handmade'" _ "$out"
+commit "$MG" "library layout"
+out="$("$HARNESS/install.sh" "$MG" 2>&1)"
+tnot "a second run moves nothing"      hasl "$out" "moved"
+t    "...and changes nothing"          test -z "$(git -C "$MG" status --porcelain)"
+ML=$(repo migratelocal)
+"$HARNESS/install.sh" "$ML" >/dev/null 2>&1
+oldlayout "$ML"; handmade "$ML"
+out="$("$HARNESS/install.sh" "$ML" 2>&1)"
+t    "local mode migrates too"         test -f "$ML/.agents/library/workflows/handmade/skill/SKILL.md"
+tnot "...quietly"                      hasl "$out" "moved"
+t    "...status clean"                 test -z "$(git -C "$ML" status --porcelain)"
+MI=$(repo migratehalf)
+"$HARNESS/install.sh" "$MI" >/dev/null 2>&1
+oldlayout "$MI"; handmade "$MI"
+mkdir -p "$MI/.agents/library/workflows"; mv "$MI/.agents/workflows/handmade" "$MI/.agents/library/workflows/handmade"   # a run that stopped after the move
+"$HARNESS/install.sh" "$MI" >/dev/null 2>&1
+t    "an interrupted migration finishes" test -f "$MI/.agents/library/workflows/handmade/skill/SKILL.md"
+cp -R "$MI/.agents" "$WORK/migratehalf-before"
+out="$("$HARNESS/install.sh" "$MI" 2>&1)"
+t    "a local re-run changes nothing"  bash -c "diff -r -x cache '$WORK/migratehalf-before' '$MI/.agents' && test -z \"\$(git -C '$MI' status --porcelain)\""
+rm -rf "$MI/.agents/library/workflows/handmade/skill"
+"$HARNESS/install.sh" "$MI" >/dev/null 2>&1
+tnot "a pack skill deleted from the library stays deleted" bash -c "test -e '$MI/.agents/library/workflows/handmade/skill' || test -e '$MI/.agents/skills/handmade'"
+mkdir -p "$MI/.agents/library/workflows/idle"; mkskill "$MI/.agents" idle "A project skill."
+"$HARNESS/install.sh" "$MI" >/dev/null 2>&1
+t    "an inactive library pack never takes a project skill's name" bash -c "test -f '$MI/.agents/skills/idle/SKILL.md' && test ! -e '$MI/.agents/library/workflows/idle/skill'"
+MJ=$(repo migratepaths)
+"$HARNESS/install.sh" "$MJ" >/dev/null 2>&1
+oldlayout "$MJ"; handmade "$MJ"
+edit "$MJ/.agents/workflows/handmade/checks/turn.sh" 's|\.agents/workflows/handmade|.agents/library/workflows/handmade|'   # a run that stopped after rewriting paths
+"$HARNESS/install.sh" "$MJ" >/dev/null 2>&1
+echo HANDMADE-BAD > "$MJ/notes.txt"
+t    "a migration stopped before the move finishes, and the pack runs" bash -c "'$MJ/.agents/bin/verify' | grep -qF '[handmade] bad notes'"
+rm -f "$MJ/notes.txt"
+mkdir -p "$MJ/.agents/stacks/both" "$MJ/.agents/library/stacks/both"
+echo 'mine=1' > "$MJ/.agents/stacks/both/lib.sh"; echo 'lib=1' > "$MJ/.agents/library/stacks/both/lib.sh"
+out="$("$HARNESS/install.sh" --stack both "$MJ" 2>&1)"
+t    "a stack in both places: install warns" hasl "$out" ".agents/stacks/both and .agents/library/stacks/both both exist"
+t    "...and keeps both"               bash -c "grep -qx mine=1 '$MJ/.agents/stacks/both/lib.sh' && grep -qx lib=1 '$MJ/.agents/library/stacks/both/lib.sh'"
+mkdir -p "$MJ/.agents/library/workflows/clash"; mkskill "$MJ/.agents/library/workflows/clash" x; mv "$MJ/.agents/library/workflows/clash/skills/x" "$MJ/.agents/library/workflows/clash/skill"; rmdir "$MJ/.agents/library/workflows/clash/skills"
+mkskill "$MJ/.agents" clash "Ours."
+out="$("$HARNESS/install.sh" --workflow clash "$MJ" 2>&1)"
+t    "a pack's skill never replaces a project skill of the same name" bash -c "grep -q 'description: Ours.' '$MJ/.agents/skills/clash/SKILL.md' && printf '%s' \"\$1\" | grep -q 'is a skill of yours'" _ "$out"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

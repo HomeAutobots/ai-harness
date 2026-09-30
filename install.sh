@@ -4,10 +4,11 @@
 #   ./install.sh [--local | --team] [--stack <name>]... [--workflow <name>]... <project-dir>
 #
 # Harness-owned files are replaced on every run. Project-owned files are only created when
-# missing, so re-running is the upgrade and never touches tailoring. Stack packs (stacks/<name>)
-# add language tooling; workflow packs (workflows/<name>) add a process skill and its checks.
-# Once installed, packs are listed in STACKS / WORKFLOWS in .agents/harness.conf and refreshed
-# on every upgrade.
+# missing, so re-running is the upgrade and never touches tailoring. What the harness ships
+# (built-in skills, stack packs in stacks/, workflow packs in workflows/) lands in
+# .agents/builtin/, one library among several (.agents/library/, LIBRARIES, ~/.config/ai-harness/).
+# Packs are turned on by name in STACKS / WORKFLOWS in .agents/harness.conf and run in place from
+# whichever library has them.
 set -euo pipefail
 
 HARNESS="$(cd "$(dirname "$0")" && pwd)"
@@ -40,13 +41,11 @@ done
 [ -d "$DEST" ] || { echo "install: not a directory: $DEST" >&2; exit 2; }
 DEST="$(cd "$DEST" && pwd)"
 [ "$DEST" != "$HARNESS" ] || { echo "install: that's the harness repo itself" >&2; exit 2; }
-for s in $NEW_STACKS; do
-  [ -d "$HARNESS/stacks/$s" ] || { echo "install: unknown stack '$s'" >&2; usage; }
-done
-for w in $NEW_WORKFLOWS; do
-  [ -d "$HARNESS/workflows/$w" ] || { echo "install: unknown workflow '$w'" >&2; usage; }
-done
-
+# The resolver, from this harness (so it works on a first install too), pointed at the project.
+export AGENTS_ROOT="$DEST"
+unset AGENTS_LIBS_PINNED AGENTS_LIBS_PIN_ROOT   # a scan pinned by a caller (verify) predates what this run builds
+# shellcheck source=template/.agents/lib/libraries.sh
+. "$SRC/.agents/lib/libraries.sh"
 say() { printf 'install: %s\n' "$*"; }
 
 if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
@@ -75,6 +74,18 @@ if [ ! -d "$DEST/.agents" ] && git -C "$DEST" rev-parse --git-dir >/dev/null 2>&
     say "restored your local harness files from $bk (.agents/ was missing)"
   fi
 fi
+
+# Pack names on the command line: after the restore, so a pack in a restored .agents/library/ counts.
+known_pack() {  # known_pack <workflows|stacks> <name>: shipped here, or in a library the project sees
+  agents_valid_name "$2" || return 1
+  [ -d "$HARNESS/$1/$2" ] || agents_resolve "$1" "$2" >/dev/null
+}
+for s in $NEW_STACKS; do
+  known_pack stacks "$s" || { echo "install: unknown stack '$s' (not shipped with the harness or in a library)" >&2; usage; }
+done
+for w in $NEW_WORKFLOWS; do
+  known_pack workflows "$w" || { echo "install: unknown workflow '$w' (not shipped with the harness or in a library)" >&2; usage; }
+done
 
 PREV="$(cat "$DEST/.agents/HARNESS_VERSION" 2>/dev/null || true)"
 
@@ -180,22 +191,130 @@ if [ "$NEW_MODE" = local ] && [ -n "$PREV" ] && [ -z "$SWITCH" ] \
 conf_list_set HARNESS_MODE "$MODE"
 say "mode: $MODE$([ "$MODE" = local ] && echo ' (hidden from git in this clone; install.sh --team to commit it instead)')"
 
+# --- migrate to libraries --------------------------------------------------------------------
+# One time and idempotent: every step checks what's on disk, so an interrupted run finishes on
+# the next. Copies of what this harness ships go (they run from .agents/builtin/ now); anything
+# the project made moves into its own library, .agents/library/. Team mode lists the moves to
+# commit; local mode keeps quiet.
+MIGRATED=""
+migrated() { MIGRATED="$MIGRATED
+  $*"; }
+repath() {  # repath <dir> <old> <new>: point whole-name mentions of path <old> in text files at <new>
+  local o f
+  o="$(printf '%s' "$2" | sed 's/[].[\*^$|]/\\&/g')"
+  { LC_ALL=C grep -rlIF -- "$2" "$1" 2>/dev/null || true; } | while IFS= read -r f; do
+    LC_ALL=C sed -e "s|$o\([^A-Za-z0-9._-]\)|$3\1|g" -e "s|$o\$|$3|" "$f" > "$f.harness-tmp" && cat "$f.harness-tmp" > "$f"
+    rm -f "$f.harness-tmp"
+  done
+  return 0
+}
+STACK_SHIM_MARK="ai-harness: stack shim"
+write_stack_shim() {  # write_stack_shim <name>: .agents/stacks/<name>/lib.sh forwards to the resolved pack
+  local d="$DEST/.agents/stacks/$1"
+  rm -rf "${d:?}"   # callers make sure it's missing, a shim, or a copy of a shipped pack
+  mkdir -p "$d"
+  cat > "$d/lib.sh" <<EOF
+# shellcheck shell=bash
+# $STACK_SHIM_MARK. Harness-owned: install.sh rewrites it. Tier scripts source this path; it
+# loads the $1 stack pack from whichever library has it (.agents/builtin/stacks/$1 unless a
+# library of yours shadows it).
+. "\$AGENTS_ROOT/.agents/lib/libraries.sh"
+if ! _agents_stack="\$(agents_resolve stacks '$1')"; then
+  echo "infra: stack '$1' isn't in any library (STACKS in .agents/harness.conf)"
+  exit 3
+fi
+. "\$_agents_stack/lib.sh"
+EOF
+}
+
+if [ -d "$DEST/.agents/workflows" ]; then
+  for d in "$DEST"/.agents/workflows/*/; do
+    [ -d "$d" ] || continue
+    w="$(basename "$d")"
+    if ! agents_valid_name "$w" || [ -L "${d%/}" ]; then
+      say "warning: .agents/workflows/$w isn't a plain pack directory with a valid name; left in place, move it into .agents/library/workflows/ yourself"
+    elif [ -d "$HARNESS/workflows/$w" ]; then
+      rm -rf "${DEST:?}/.agents/workflows/$w"
+      migrated "removed .agents/workflows/$w (the pack runs from .agents/builtin/workflows/$w)"
+    elif [ -e "$DEST/.agents/library/workflows/$w" ] || [ -L "$DEST/.agents/library/workflows/$w" ]; then
+      say "warning: .agents/workflows/$w and .agents/library/workflows/$w both exist; keep the one you want in .agents/library/workflows/ and delete .agents/workflows/$w"
+    else
+      # Paths first, then the move: a run stopped in between still finishes (repath is idempotent).
+      repath "$DEST/.agents/workflows/$w" ".agents/workflows/$w" ".agents/library/workflows/$w"
+      mkdir -p "$DEST/.agents/library/workflows"
+      mv "$DEST/.agents/workflows/$w" "$DEST/.agents/library/workflows/$w"
+      migrated "moved .agents/workflows/$w to .agents/library/workflows/$w"
+      if awk -v s=".agents/workflows/$w/" 'index($0, s) { f = 1 } END { exit !f }' "$DEST/.agents/policy.conf" "$DEST/.agents/git.conf" "$DEST"/.agents/checks/*.sh 2>/dev/null; then
+        say "warning: .agents/policy.conf, git.conf, or checks/ mention .agents/workflows/$w/; it's in .agents/library/workflows/$w/ now, so update them"
+      fi
+    fi
+  done
+  rmdir "$DEST/.agents/workflows" 2>/dev/null || true
+fi
+# A hand-made pack's skill joins it as skill/ (this also finishes a move that stopped halfway).
+# Only for active packs, the ones whose skill the old layout copied in: a project skill that
+# merely shares a name with an inactive library pack stays where it is.
+for d in "$DEST"/.agents/library/workflows/*/; do
+  [ -d "$d" ] || continue
+  w="$(basename "$d")"; s="$DEST/.agents/skills/$w"
+  case " $(conf_list WORKFLOWS) $NEW_WORKFLOWS " in *" $w "*) ;; *) continue ;; esac
+  if [ -f "$s/SKILL.md" ] && [ ! -L "$s" ] && [ ! -f "$s/.harness-copy" ] && [ ! -e "${d}skill" ]; then
+    repath "$s" ".agents/workflows/$w" ".agents/library/workflows/$w"
+    mv "$s" "${d}skill"
+    migrated "moved .agents/skills/$w to .agents/library/workflows/$w/skill"
+  fi
+done
+if [ -d "$DEST/.agents/stacks" ]; then
+  for d in "$DEST"/.agents/stacks/*/; do
+    [ -d "$d" ] || continue
+    s="$(basename "$d")"
+    if grep -qF "$STACK_SHIM_MARK" "${d}lib.sh" 2>/dev/null; then continue; fi
+    if ! agents_valid_name "$s" || [ -L "${d%/}" ]; then
+      say "warning: .agents/stacks/$s isn't a plain pack directory with a valid name; left in place, move it into .agents/library/stacks/ yourself"
+    elif [ -d "$HARNESS/stacks/$s" ]; then
+      write_stack_shim "$s"
+      migrated "replaced .agents/stacks/$s with a shim (the pack runs from .agents/builtin/stacks/$s)"
+    elif [ -e "$DEST/.agents/library/stacks/$s" ] || [ -L "$DEST/.agents/library/stacks/$s" ]; then
+      say "warning: .agents/stacks/$s and .agents/library/stacks/$s both exist; keep the one you want in .agents/library/stacks/ and delete .agents/stacks/$s"
+    else
+      repath "$DEST/.agents/stacks/$s" ".agents/stacks/$s" ".agents/library/stacks/$s"
+      repath "$DEST/.agents/stacks/$s" ".agents/library/stacks/$s/lib.sh" ".agents/stacks/$s/lib.sh"   # tier scripts keep the shim path
+      mkdir -p "$DEST/.agents/library/stacks"
+      mv "$DEST/.agents/stacks/$s" "$DEST/.agents/library/stacks/$s"
+      write_stack_shim "$s"
+      migrated "moved .agents/stacks/$s to .agents/library/stacks/$s (.agents/stacks/$s/lib.sh forwards to it)"
+      if awk -v s=".agents/stacks/$s/" -v l=".agents/stacks/$s/lib.sh" 'index($0, s) && !index($0, l) { f = 1 } END { exit !f }' "$DEST"/.agents/checks/*.sh 2>/dev/null; then
+        say "warning: .agents/checks/ uses files in .agents/stacks/$s/ besides lib.sh; they're in .agents/library/stacks/$s/ now"
+      fi
+    fi
+  done
+fi
+# The feature-driven approve rule names the fdd command, which lives in .agents/builtin/ now.
+if [ -f "$DEST/.agents/policy.conf" ] && grep -q '^deny-cmd \.agents/workflows/feature-driven/bin/fdd approve' "$DEST/.agents/policy.conf"; then
+  tmp="$(mktemp)"
+  sed 's|^deny-cmd \.agents/workflows/feature-driven/bin/fdd approve|deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve|' "$DEST/.agents/policy.conf" > "$tmp"
+  cat "$tmp" > "$DEST/.agents/policy.conf"; rm -f "$tmp"
+  migrated "pointed the fdd approve rule in .agents/policy.conf at .agents/builtin/workflows/feature-driven/bin/fdd"
+fi
+
+# --- packs: turned on by name, run in place from whichever library has them ------------------
 STACKS="$(merge_list "$(conf_list STACKS)" $NEW_STACKS)"
 conf_list_set STACKS "$STACKS"
 for s in $STACKS; do
-  if [ ! -d "$HARNESS/stacks/$s" ]; then
-    say "warning: STACKS lists '$s' but this harness has no such pack; skipped"
+  if ! sp="$(agents_resolve stacks "$s")"; then
+    say "warning: STACKS lists '$s' but no library has it; skipped"
     continue
   fi
-  rm -rf "${DEST:?}/.agents/stacks/$s"
-  mkdir -p "$DEST/.agents/stacks"
-  cp -R "$HARNESS/stacks/$s" "$DEST/.agents/stacks/$s"
-  find "$DEST/.agents/stacks/$s" -name __pycache__ -type d -prune -exec rm -rf {} +   # from a dev checkout
+  if [ -e "$DEST/.agents/stacks/$s" ] && ! grep -qF "$STACK_SHIM_MARK" "$DEST/.agents/stacks/$s/lib.sh" 2>/dev/null; then
+    continue   # the migration above warned: both .agents/stacks/$s and the library copy exist
+  fi
+  write_stack_shim "$s"
   # A stack's tier scripts replace the generic stubs, never tailored scripts.
   for tier in edit turn full; do
     t="$DEST/.agents/checks/$tier.sh"
+    [ -f "$sp/checks/$tier.sh" ] || continue
     if [ ! -e "$t" ] || grep -q 'ai-harness:stub' "$t"; then
-      cp "$HARNESS/stacks/$s/checks/$tier.sh" "$t"
+      cp "$sp/checks/$tier.sh" "$t"
       say "seeded .agents/checks/$tier.sh from stack $s"
     fi
   done
@@ -204,27 +323,38 @@ done
 WORKFLOWS="$(merge_list "$(conf_list WORKFLOWS)" $NEW_WORKFLOWS)"
 conf_list_set WORKFLOWS "$WORKFLOWS"
 for w in $WORKFLOWS; do
-  if [ ! -d "$HARNESS/workflows/$w" ]; then
-    say "warning: WORKFLOWS lists '$w' but this harness has no such pack; skipped"
+  if ! wp="$(agents_resolve workflows "$w")"; then
+    say "warning: WORKFLOWS lists '$w' but no library has it; skipped"
     continue
   fi
-  rm -rf "${DEST:?}/.agents/workflows/$w" "${DEST:?}/.agents/skills/$w"
-  mkdir -p "$DEST/.agents/workflows" "$DEST/.agents/skills"
-  cp -R "$HARNESS/workflows/$w" "$DEST/.agents/workflows/$w"
-  find "$DEST/.agents/workflows/$w" -name __pycache__ -type d -prune -exec rm -rf {} +   # from a dev checkout
-  mv "$DEST/.agents/workflows/$w/skill" "$DEST/.agents/skills/$w"
+  # Until sync renders skills from the libraries (next change), the pack's skill is copied in,
+  # marked as a copy so the migration above never takes it for a hand-made skill.
+  # Never over a skill the project made, and in team mode never a personal library's (it'd be committed).
+  sk="$DEST/.agents/skills/$w"
+  wsrc="$(agents_lookup workflows "$w" | cut -f3)"
+  if [ -e "$sk" ] && [ ! -L "$sk" ] && [ ! -f "$sk/.harness-copy" ] && [ ! -d "$HARNESS/workflows/$w" ]; then
+    say "warning: .agents/skills/$w is a skill of yours, so workflow $w's skill isn't copied over it; rename one of them"
+  elif [ "$MODE" = team ] && case "$wsrc" in personal*) true ;; *) false ;; esac; then
+    if [ -f "$sk/.harness-copy" ]; then rm -rf "${sk:?}"; fi
+  elif [ -f "$wp/skill/SKILL.md" ]; then
+    rm -rf "${DEST:?}/.agents/skills/$w"
+    mkdir -p "$DEST/.agents/skills"
+    cp -R "$wp/skill" "$DEST/.agents/skills/$w"
+    : > "$DEST/.agents/skills/$w/.harness-copy"
+  elif [ -f "$DEST/.agents/skills/$w/.harness-copy" ]; then
+    rm -rf "${DEST:?}/.agents/skills/$w"   # the pack dropped its skill
+  fi
   # Settings are project-owned: appended once, never overwritten.
-  snip="$HARNESS/workflows/$w/harness.conf.snippet"
+  snip="$wp/harness.conf.snippet"
   first_var=""
   [ -f "$snip" ] && first_var="$(grep -m1 -o '^[A-Z_]*=' "$snip" | tr -d '=' || true)"
   if [ -n "$first_var" ] && ! grep -q "^$first_var=" "$CONF"; then
     cat "$snip" >> "$CONF"
     say "added $w settings to .agents/harness.conf (harness-tailor fills them in)"
   fi
-  rm -f "$DEST/.agents/workflows/$w/harness.conf.snippet"
   # Policy rules are project-owned too: appended once, keyed on the snippet's first line (a marker
   # comment), so a rule the project deletes on purpose stays deleted while the marker stays.
-  snip="$HARNESS/workflows/$w/policy.conf.snippet"
+  snip="$wp/policy.conf.snippet"
   if [ -f "$snip" ]; then
     marker="$(sed -n '1p' "$snip")"
     if [ -n "$marker" ] && ! grep -qxF -- "$marker" "$DEST/.agents/policy.conf"; then
@@ -232,33 +362,23 @@ for w in $WORKFLOWS; do
       say "added $w rules to .agents/policy.conf"
     fi
   fi
-  rm -f "$DEST/.agents/workflows/$w/policy.conf.snippet"
   # Seed files (e.g. a .gitignore for the pack's local working files): project-owned, created once.
-  if [ -d "$HARNESS/workflows/$w/seed" ]; then
-    (cd "$HARNESS/workflows/$w/seed" && find . -type f) | while IFS= read -r f; do
+  if [ -d "$wp/seed" ]; then
+    (cd "$wp/seed" && find . -type f) | while IFS= read -r f; do
       f="${f#./}"
-      case "$f" in .agents/bin/*|.agents/lib/*|.agents/hooks/*|.agents/core/*|.agents/skills/*|.agents/workflows/*|.agents/stacks/*)
+      case "$f" in .agents/bin/*|.agents/lib/*|.agents/hooks/*|.agents/core/*|.agents/builtin/*|.agents/skills/*|.agents/workflows/*|.agents/stacks/*)
         say "warning: $w seeds $f, which is harness-owned; skipped"; continue ;;
       esac
       [ -e "$DEST/$f" ] && continue
       mkdir -p "$(dirname "$DEST/$f")"
-      cp "$HARNESS/workflows/$w/seed/$f" "$DEST/$f"
+      cp "$wp/seed/$f" "$DEST/$f"
       say "created $f"
     done
   fi
-  rm -rf "${DEST:?}/.agents/workflows/$w/seed"
 done
 
 printf '%s\n' "$VERSION" > "$DEST/.agents/HARNESS_VERSION"
 chmod +x "$DEST"/.agents/bin/* "$DEST"/.agents/hooks/run "$DEST"/.agents/checks/*.sh
-for w in $WORKFLOWS; do
-  if [ -d "$DEST/.agents/workflows/$w/checks" ]; then
-    find "$DEST/.agents/workflows/$w/checks" -type f -name '*.sh' -exec chmod +x {} +
-  fi
-  if [ -d "$DEST/.agents/workflows/$w/bin" ]; then
-    find "$DEST/.agents/workflows/$w/bin" -type f -exec chmod +x {} +
-  fi
-done
 
 # --- switching modes -------------------------------------------------------------------------
 # --local on a team install: the harness's own files leave the index (they stay on disk), and
@@ -290,6 +410,10 @@ fi
 # Local git hooks (commit-msg, pre-push) so the git workflow holds for humans and every tool.
 if [ "$IN_GIT" -eq 1 ]; then
   (cd "$DEST" && .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
+fi
+
+if [ -n "$MIGRATED" ] && [ "$MODE" = team ]; then
+  say "moved the harness to the library layout (see CHANGELOG.md). Commit what git status shows:$MIGRATED"
 fi
 
 if [ "$SWITCH" = local ] && [ "$IN_GIT" -eq 1 ]; then

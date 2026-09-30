@@ -14,6 +14,11 @@ if [ -z "${AGENTS_ROOT:-}" ]; then
 fi
 export AGENTS_ROOT
 AGENTS_CACHE="$AGENTS_ROOT/.agents/cache"
+# The resolver: verify finds workflow packs with it, and the stack shims source it.
+if [ -f "$AGENTS_ROOT/.agents/lib/libraries.sh" ]; then
+  # shellcheck source=libraries.sh
+  . "$AGENTS_ROOT/.agents/lib/libraries.sh"
+fi
 
 # shellcheck disable=SC2034  # read by the scripts that source this
 agents_load_conf() {
@@ -42,8 +47,9 @@ agents_backup_dir() {
   printf '%s/backup%s\n' "$gd" "${pfx:+-$(printf '%s' "$pfx" | tr '/' '_')}"
 }
 
-# agents_backup [quiet]: local mode only. Copies .agents/ (minus the cache and eval results) and
-# the untracked root instruction files into agents_backup_dir, replacing the previous copy.
+# agents_backup [quiet]: local mode only. Copies .agents/ (minus the cache, eval results, and
+# builtin/, which install.sh rebuilds on every run, restores included) and the untracked root
+# instruction files into agents_backup_dir, replacing the previous copy.
 # A local AGENTS.md the project has since started tracking is kept aside once, as
 # AGENTS.md.before-tracked, with a warning. Only sync does that: with quiet (verify), the old
 # backup's AGENTS.md is carried forward unchanged and nothing is printed, so the one-time
@@ -62,7 +68,7 @@ agents_backup() {
   rm -rf "$dest".new.* "$dest".old.* 2>/dev/null || true
   tmp="$dest.new.$$"
   mkdir -p "$tmp" 2>/dev/null || return 0
-  if ! (cd "$AGENTS_ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results .agents) 2>/dev/null \
+  if ! (cd "$AGENTS_ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/builtin .agents) 2>/dev/null \
        | tar -C "$tmp" -xf - 2>/dev/null || [ ! -d "$tmp/.agents" ]; then
     rm -rf "$tmp"; return 0
   fi
@@ -108,7 +114,8 @@ agents_changed_files() {
 }
 
 # agents_state_key [files...]: hash of everything a check result can depend on: the file list
-# asked about, HEAD, the whole working-tree diff, untracked files, and harness config and packs.
+# asked about, HEAD, the whole working-tree diff, untracked files, harness config, the library
+# search path, and every active pack as resolved (in the repo or not).
 # Whole-tree on purpose: a result for one file can depend on others (headers, a requirements export).
 # Gitignored inputs count too: plan ledgers, and whatever a workflow pack's checks/state.sh prints.
 agents_state_key() {
@@ -118,13 +125,34 @@ agents_state_key() {
     git rev-parse -q --verify HEAD 2>/dev/null || echo "no-head"
     git diff --binary HEAD 2>/dev/null
     git ls-files -o --exclude-standard -z | xargs -0 git hash-object -- 2>/dev/null
-    cat .agents/harness.conf .agents/checks/* .agents/baselines/* .agents/guard.allow \
-      .agents/workflows/*/* .agents/workflows/*/checks/* .agents/stacks/*/* 2>/dev/null
+    cat .agents/harness.conf .agents/checks/* .agents/baselines/* .agents/guard.allow .agents/stacks/*/* 2>/dev/null
+    agents_libraries 2>/dev/null
+    agents_pack_state 2>/dev/null
     cat .agents/plans/*/tasks.json 2>/dev/null
-    for s in .agents/workflows/*/checks/state.sh; do
-      [ -f "$s" ] && bash "$s" 2>/dev/null
+    for w in $(agents_conf_get .agents/harness.conf WORKFLOWS 2>/dev/null); do
+      d="$(agents_resolve workflows "$w" 2>/dev/null)" || continue
+      if [ -f "$d/checks/state.sh" ]; then bash "$d/checks/state.sh" 2>/dev/null; fi
     done
+    true
   ) | agents_hash
+}
+
+# agents_pack_state: each active workflow and stack as resolved (name, path, every file, read
+# through symlinks), so an edit to a pack in any library counts for the cache key
+agents_pack_state() {
+  local k kind n p f
+  for k in WORKFLOWS STACKS; do
+    kind=workflows; [ "$k" = STACKS ] && kind=stacks
+    for n in $(agents_conf_get "$AGENTS_ROOT/.agents/harness.conf" "$k"); do
+      p="$(agents_resolve "$kind" "$n")" || { printf '%s %s unresolved\n' "$k" "$n"; continue; }
+      printf '%s %s %s\n' "$k" "$n" "$p"
+      find -H "$p" \( -type f -o -type l \) ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+        printf '%s\n' "$f"
+        cat "$f" 2>/dev/null
+      done
+    done
+  done
+  return 0
 }
 
 # agents_budget_run <seconds> <outfile> <cmd...>: run cmd with stdout+stderr to outfile.

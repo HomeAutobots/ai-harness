@@ -18,7 +18,7 @@
 #   gitflow review                                   review comments on this branch's PR/MR
 #   gitflow merge                                    merge the PR/MR (GIT_MERGE_METHOD)
 #   gitflow install-hooks [--quiet]                  commit-msg and pre-push git hooks (when needed)
-# Workflow packs can add commit-message rules: .agents/workflows/<name>/checks/commit-msg.sh <file>
+# Workflow packs can add commit-message rules: <library>/workflows/<name>/checks/commit-msg.sh <file>
 # (exit 1 or 2 rejects with its output; any other failure, like a missing tool, also blocks).
 # Packs see every message, including merge, fixup, and revert messages that git.conf rules skip.
 # Internal: check-branch <name>, check-msg <file>, check-cmd <command>, hook-commit-msg <file>,
@@ -31,6 +31,13 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT" || exit 3
 TAB="$(printf '\t')"
 die() { echo "gitflow: $*" >&2; exit 1; }
+# The resolver finds workflow packs in the libraries (config parsed, never run: git hooks run this).
+if [ -f "$ROOT/.agents/lib/libraries.sh" ]; then
+  # shellcheck disable=SC2034  # read by libraries.sh
+  AGENTS_ROOT="$ROOT"
+  # shellcheck source=../lib/libraries.sh
+  . "$ROOT/.agents/lib/libraries.sh"
+fi
 
 # ---------------------------------------------------------------- config
 
@@ -305,12 +312,13 @@ check_msg() {  # check_msg <message file> <branch>: prints what's wrong with a c
   return $bad
 }
 
-workflow_msg_scripts() {  # commit-message checks shipped by installed workflow packs
-  local w
+workflow_msg_scripts() {  # commit-message checks of active workflow packs, from whichever library has each
+  local w d
   [ -f "$ROOT/.agents/harness.conf" ] || return 0
-  # parsed, never executed (git hooks run this on every commit)
-  for w in $(sed -n 's/^WORKFLOWS="\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$ROOT/.agents/harness.conf" | head -1); do
-    [ -f "$ROOT/.agents/workflows/$w/checks/commit-msg.sh" ] && echo "$ROOT/.agents/workflows/$w/checks/commit-msg.sh"
+  command -v agents_resolve >/dev/null 2>&1 || return 0
+  for w in $(agents_conf_get "$ROOT/.agents/harness.conf" WORKFLOWS); do
+    d="$(agents_resolve workflows "$w")" || continue
+    if [ -f "$d/checks/commit-msg.sh" ]; then echo "$d/checks/commit-msg.sh"; fi
   done
   return 0
 }

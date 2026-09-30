@@ -4,7 +4,7 @@
 #   .agents/bin/verify [--tier=edit|turn|full] [--json] [--no-cache] [--update-baseline] [files...]
 #
 # Runs the guard, the project's checks for a tier (.agents/checks/<tier>.sh, project-owned), and
-# any workflow pack checks (.agents/workflows/<name>/checks/<tier>.sh), then shapes the result: one line when green, capped findings when not, full log on disk.
+# each active workflow pack's checks (<library>/workflows/<name>/checks/<tier>.sh, run in place), then shapes the result: one line when green, capped findings when not, full log on disk.
 #   edit  per-file checks on the given files (the post-edit hook, or `check <files>`)
 #   turn  the default; what the stop hook runs: build, affected tests, lint on changed code
 #   full  commit gate and CI: everything, including slow checks
@@ -18,6 +18,7 @@ export AGENTS_ROOT="$ROOT"
 . "$ROOT/.agents/lib/feedback.sh"
 agents_load_conf
 cd "$ROOT" || exit 3
+agents_libraries_pin   # one scan of the library search path for this run and the checks it starts
 
 TIER=turn JSON=0 CACHE=1
 FILES=()
@@ -172,10 +173,12 @@ elif [ "$TIER" != edit ]; then
   CHECK_RC=3
 fi
 
-# 3. Workflow packs listed in WORKFLOWS (harness.conf) add their own checks for the tier.
+# 3. Workflow packs listed in WORKFLOWS (harness.conf) add their own checks for the tier. Each
+# runs in place from whichever library has it; sync warns about names no library has.
 WF_RC=0
 for wf in ${WORKFLOWS:-}; do
-  WS=".agents/workflows/$wf/checks/$TIER.sh"
+  WD="$(agents_resolve workflows "$wf")" || continue
+  WS="$WD/checks/$TIER.sh"
   [ -f "$WS" ] || continue
   rc=0
   agents_budget_run "$BUDGET" "$RAW.part" bash "$WS" ${FILES[@]+"${FILES[@]}"} || rc=$?
