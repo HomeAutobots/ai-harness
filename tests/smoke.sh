@@ -1247,6 +1247,27 @@ if [ "$HAVE_PY" -eq 1 ] && command -v cmake >/dev/null 2>&1 && command -v c++ >/
   (cd "$CL" && AGENTS_ROOT="$CL" bash -c '. .agents/stacks/cpp-cmake/lib.sh && _cpp_exclude')
   t  "...no duplicate lines"           test "$(grep -cx '/build-agent\*/' "$CL/.git/info/exclude")" = 1
 fi
+if [ "$HAVE_PY" -eq 1 ]; then
+  EL=$(repo evallocal)
+  printf '@README.md\n' > "$EL/CLAUDE.md"
+  printf 'add() { echo $(( $1 - $2 )); }\n' > "$EL/calc.sh"; commit "$EL" calc
+  printf 'add() { echo $(( $1 + $2 )); }\n' > "$EL/calc.sh"; mkdir -p "$EL/tests"
+  printf '. ./calc.sh\n[ "$(add 2 3)" = 5 ]\n' > "$EL/tests/test_calc.sh"; commit "$EL" "Fix add"
+  FIXL=$(git -C "$EL" rev-parse HEAD)
+  "$HARNESS/install.sh" "$EL" >/dev/null 2>&1
+  cat > "$WORK/agent-local.sh" <<'EOF'
+#!/usr/bin/env bash
+[ -f CLAUDE.local.md ] && printf 'add() { echo $(( $1 + $2 )); }\n' > calc.sh
+printf '{"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+EOF
+  chmod +x "$WORK/agent-local.sh"
+  (cd "$EL" && .agents/bin/eval new add-fix "$FIXL" >/dev/null)
+  edit "$EL/.agents/evals/tasks/add-fix.task" "s|^CHECK=.*|CHECK='bash tests/test_calc.sh'|"
+  (cd "$EL" && EVAL_AGENT_CMD="$WORK/agent-local.sh" .agents/bin/eval run --arms=C --runs=1 >/dev/null 2>&1) || true
+  R=$(ls -d "$EL"/.agents/evals/results/*/ | tail -1)
+  t  "eval copies CLAUDE.local.md into its worktrees" grep -q '^add-fix,C,1,1,' "$R/results.csv"
+  t  "...git status still clean"      test -z "$(git -C "$EL" status --porcelain)"
+fi
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

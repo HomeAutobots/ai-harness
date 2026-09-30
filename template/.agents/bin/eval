@@ -22,7 +22,7 @@ EVAL_AGENT_CMD="${EVAL_AGENT_CMD:-claude -p --output-format json --permission-mo
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-1800}"
 TASKS_DIR="$ROOT/.agents/evals/tasks"
 RESULTS_DIR="$ROOT/.agents/evals/results"
-HARNESS_PATHS="AGENTS.md CLAUDE.md .agents .claude .cursor .github/hooks .codex .gemini"
+HARNESS_PATHS="AGENTS.md CLAUDE.md CLAUDE.local.md .agents .claude .cursor .github/hooks .codex .gemini"
 
 die() { echo "eval: $*" >&2; exit 1; }
 shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
