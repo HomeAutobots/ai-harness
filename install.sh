@@ -295,6 +295,8 @@ Next:
   3. CI: run '.agents/bin/sync --check && .agents/bin/verify --tier=full'.
   4. Consider CODEOWNERS for AGENTS.md, CLAUDE.md, .agents/, .claude/, .cursor/, .github/hooks/.
 EOF
+elif [ "$PREV" != "$VERSION" ] && [ "$MODE" = local ]; then
+  say "upgraded $PREV -> $VERSION. Check CHANGELOG.md in the harness repo. Local mode: nothing goes into git."
 elif [ "$PREV" != "$VERSION" ]; then
   say "upgraded $PREV -> $VERSION. Check CHANGELOG.md in the harness repo, review the diff, commit."
 else

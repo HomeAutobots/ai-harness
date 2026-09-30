@@ -219,6 +219,12 @@ SKILLS_BODY="$WORK/skills.md"
   [ "$found" -eq 1 ] || echo "_No skills yet._"
 } > "$SKILLS_BODY"
 
+# Local mode hides an untracked AGENTS.md from git. One that was already here before the harness
+# (no harness blocks yet) is someone's own file, so say so once, as the blocks go in.
+if [ "$LOCAL" -eq 1 ] && [ "$CHECK" -eq 0 ] && [ "$AGENTS_FILE" = AGENTS.md ] \
+   && ! grep -qF '<!-- harness:core:start -->' AGENTS.md; then
+  warn "AGENTS.md was here before the harness and git doesn't track it, so local mode now hides it from git status too. To share it, take the harness blocks out, commit it, and re-run sync."
+fi
 render_block core   "$CORE_BODY"   "$AGENTS_FILE" "$WORK/step1.md"
 render_block skills "$SKILLS_BODY" "$WORK/step1.md" "$WORK/step2.md"
 put "$AGENTS_FILE" "$WORK/step2.md"

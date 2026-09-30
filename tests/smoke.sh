@@ -1189,6 +1189,64 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "local mode keeps an untracked {} settings.json" test -f "$LM/.claude/settings.json"
   rm -f "$LM/.claude/settings.json"
 fi
+PE=$(repo preexisting)
+printf '# My notes\n' > "$PE/AGENTS.md"
+out="$("$HARNESS/install.sh" "$PE" 2>&1)"
+t    "warns when it starts hiding a pre-existing AGENTS.md" hasl "$out" "AGENTS.md was here before the harness"
+out="$("$PE/.agents/bin/sync" 2>&1)"
+tnot "...only once"                   hasl "$out" "before the harness"
+mkdir -p "$LM/.agents/skills/mine"; printf -- '---\nname: mine\ndescription: Mine.\n---\n' > "$LM/.agents/skills/mine/SKILL.md"
+"$LM/.agents/bin/sync" >/dev/null 2>&1
+t    "block lists a new skill's mirror" grep -qx '/.claude/skills/mine' "$LM/.git/info/exclude"
+rm -rf "$LM/.agents/skills/mine"
+out="$("$HARNESS/install.sh" "$LM" 2>&1)"
+tnot "upgrade drops the stale entry" grep -qx '/.claude/skills/mine' "$LM/.git/info/exclude"
+t    "...and keeps the rest"          grep -qx '/.claude/skills/review-diff' "$LM/.git/info/exclude"
+t    "git status clean after upgrade" test -z "$(git -C "$LM" status --porcelain)"
+edit "$LM/.git/info/exclude" '/^\/CLAUDE.md$/d'
+trc  "sync --check flags block drift" 1 "$LM/.agents/bin/sync" --check
+"$LM/.agents/bin/sync" >/dev/null 2>&1
+t    "sync restores the block"        grep -qx '/CLAUDE.md' "$LM/.git/info/exclude"
+echo 0.0.1 > "$LM/.agents/HARNESS_VERSION"
+up="$("$HARNESS/install.sh" "$LM" 2>&1 | grep 'upgraded' || true)"
+t    "local upgrade message"          hasl "$up" "upgraded 0.0.1 ->"
+tnot "...asks for no commit"          hasl "$up" "commit"
+if [ "$HAVE_PY" -eq 1 ]; then
+  cat > "$LM/.agents/checks/edit.sh" <<'EOF'
+#!/usr/bin/env bash
+rc=0
+for f in "$@"; do grep -n BAD "$f" | sed "s|^\([0-9]*\):.*|$f:\1:1: error: bad token [demo]|"; grep -q BAD "$f" && rc=1; done
+exit $rc
+EOF
+  cat > "$LM/.agents/checks/turn.sh" <<'EOF'
+#!/usr/bin/env bash
+grep -rq BAD --include='*.c' . && { echo "src/bad.c:1:1: error: bad token [demo]"; exit 1; }
+exit 0
+EOF
+  mkdir -p "$LM/src"; echo 'int y = BAD;' > "$LM/src/bad.c"
+  trc "post-edit hook works in local mode" 2 hook "$LM" post-edit claude "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$LM/src/bad.c\"}}"
+  rm -f "$LM/src/bad.c"
+  S='{"session_id":"l1","stop_hook_active":false}'
+  hook "$LM" turn-start claude "$S" >/dev/null 2>&1
+  trc "stop gate: no-change turn not gated in local mode" 0 hook "$LM" stop-gate claude "$S"
+  hook "$LM" turn-start claude "$S" >/dev/null 2>&1
+  echo 'int y = BAD;' > "$LM/src/bad.c"
+  trc "stop gate blocks a failing turn in local mode" 2 hook "$LM" stop-gate claude "$S"
+  rm -rf "$LM/src"
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$LM/.agents/checks/$tier.sh"; done
+fi
+if [ "$HAVE_PY" -eq 1 ] && command -v cmake >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
+  CL=$(repo cpplocal)
+  "$HARNESS/install.sh" --stack cpp-cmake "$CL" >/dev/null 2>&1
+  (cd "$CL" && AGENTS_ROOT="$CL" bash -c '. .agents/stacks/cpp-cmake/lib.sh && _cpp_exclude')
+  mkdir -p "$CL/build-agent"; touch "$CL/build-agent/x.o"
+  "$CL/.agents/bin/sync" >/dev/null 2>&1
+  t  "cpp-cmake lines coexist with the block" bash -c "grep -qx '/build-agent\*/' '$CL/.git/info/exclude' && grep -qx '/.agents/' '$CL/.git/info/exclude'"
+  t  "...sync --check up to date"      "$CL/.agents/bin/sync" --check
+  t  "...status clean"                 test -z "$(git -C "$CL" status --porcelain)"
+  (cd "$CL" && AGENTS_ROOT="$CL" bash -c '. .agents/stacks/cpp-cmake/lib.sh && _cpp_exclude')
+  t  "...no duplicate lines"           test "$(grep -cx '/build-agent\*/' "$CL/.git/info/exclude")" = 1
+fi
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
