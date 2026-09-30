@@ -1429,6 +1429,21 @@ printf 'LIBRARIES="$(touch %s/pwned)"\n' "$WORK" >> "$LP/harness.conf"
 res libraries >/dev/null 2>&1
 t    "the personal harness.conf is parsed, never run" test ! -e "$WORK/pwned"
 
+echo "built-in library"
+BI=$(repo builtin)
+"$HARNESS/install.sh" --team "$BI" >/dev/null 2>&1
+t    "built-in skills in .agents/builtin" test -f "$BI/.agents/builtin/skills/review-diff/SKILL.md"
+t    "every shipped pack, active or not" bash -c 'for d in "$1"/workflows/* "$1"/stacks/*; do test -d "$2/.agents/builtin/${d#"$1"/}" || exit 1; done' _ "$HARNESS" "$BI"
+t    "pack scripts executable"         bash -c "test -x '$BI/.agents/builtin/workflows/feature-driven/bin/fdd' && test -x '$BI/.agents/builtin/stacks/cpp-cmake/checks/turn.sh'"
+t    "the resolver sees it"            test "$(cd "$BI" && AGENTS_ROOT="$BI" bash .agents/lib/libraries.sh resolve skills review-diff)" = "$(row review-diff "$BI/.agents/builtin/skills/review-diff" builtin)"
+t    "project library seeded with a README" test -f "$BI/.agents/library/README.md"
+t    "LIBRARIES setting, empty"        grep -qx 'LIBRARIES=""' "$BI/.agents/harness.conf"
+touch "$BI/.agents/builtin/skills/review-diff/stray"
+mkskill "$BI/.agents/library" keepme
+"$HARNESS/install.sh" --team "$BI" >/dev/null 2>&1
+t    "built-ins replaced wholesale"    test ! -e "$BI/.agents/builtin/skills/review-diff/stray"
+t    "upgrades never touch the project library" test -f "$BI/.agents/library/skills/keepme/SKILL.md"
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"

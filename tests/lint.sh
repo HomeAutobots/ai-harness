@@ -57,7 +57,8 @@ grep -v '^tests/lint.sh$' "$OUT.sh" | xargs grep -nE 'declare -A|(^|[^a-zA-Z_])(
 xargs grep -nE '\.removeprefix\(|\.removesuffix\(|^[[:space:]]*match [^=]*:$|: (list|dict|tuple|set)\[' < "$OUT.py" \
   | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" py38 "Python 3.9+ feature; keep to 3.8"; done
 
-# 5. Ownership lists: every bin tool installed, every template entry placed, every built-in skill known
+# 5. Ownership lists: every bin tool installed, every template entry placed, every built-in source
+# copied into .agents/builtin/, every built-in skill known
 for f in template/.agents/bin/*; do
   n="$(basename "$f")"
   grep -Eq "for tool in ([^;]*[[:space:]])?$n([[:space:]]|;)" install.sh \
@@ -73,6 +74,10 @@ for d in template/.agents/skills/*/; do
   n="$(basename "$d")"
   grep -q "BUILTIN_SKILLS = .*\"$n\"" template/.agents/lib/harness.py \
     || finding "template/.agents/lib/harness.py:1" ownership "built-in skill '$n' is missing from BUILTIN_SKILLS"
+done
+for s in '"$SRC/.agents/skills/."' '"$HARNESS/workflows/."' '"$HARNESS/stacks/."'; do
+  grep -qF "cp -R $s" install.sh \
+    || finding "install.sh:1" ownership "install.sh doesn't copy $s into .agents/builtin/, so installs won't ship it"
 done
 
 # 6. Budgets

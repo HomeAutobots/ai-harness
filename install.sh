@@ -118,6 +118,20 @@ for skill in "$SRC"/.agents/skills/*/; do
   replace ".agents/skills/$(basename "$skill")"
 done
 
+# Built-in library: every skill, workflow pack, and stack pack this harness ships, active or not.
+# Replaced wholesale on every run; other libraries shadow it by name.
+build_builtin() {
+  local b="$DEST/.agents/builtin" kind
+  rm -rf "${b:?}"
+  for kind in skills workflows stacks; do mkdir -p "$b/$kind"; done
+  cp -R "$SRC/.agents/skills/." "$b/skills/"
+  cp -R "$HARNESS/workflows/." "$b/workflows/"
+  cp -R "$HARNESS/stacks/." "$b/stacks/"
+  find "$b" -name __pycache__ -type d -prune -exec rm -rf {} +   # from a dev checkout
+  find "$b" -type f \( -name '*.sh' -o -path '*/bin/*' \) -exec chmod +x {} +
+}
+build_builtin
+
 seed AGENTS.md
 seed .agents/harness.conf
 seed .agents/policy.conf
@@ -126,6 +140,7 @@ seed .agents/git
 seed .agents/context
 seed .agents/plans
 seed .agents/evals
+seed .agents/library
 for tier in edit turn full; do
   seed ".agents/checks/$tier.sh"
 done
