@@ -373,6 +373,8 @@ exclude_block() {
   [ -n "$ex" ] || return 0
   # Patterns there are relative to the repo top, so an install in a subdirectory prefixes them.
   pre="$(git rev-parse --show-prefix 2>/dev/null || true)"
+  # Team mode with no block: nothing of ours to remove, so the file isn't even rewritten.
+  if [ "$LOCAL" -eq 0 ] && ! { [ -f "$ex" ] && grep -qxF "$EXCL_BEGIN" "$ex"; }; then return 0; fi
   : > "$WORK/exclude.list"
   if [ "$LOCAL" -eq 1 ]; then
     echo "/${pre}.agents/" >> "$WORK/exclude.list"

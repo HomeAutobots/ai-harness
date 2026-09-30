@@ -358,7 +358,9 @@ def render(check):
         o_old, o_err = read_json(os.path.join(ROOT, other))
         if o_old is not None and not o_err:
             o_new, _ = claude_render(o_old, conf, rules, False, prev_deny)
-            settle_json(other, o_new or None, o_old)
+            # Only a file that held harness entries changes; one left empty by stripping goes.
+            if o_new != o_old:
+                settle_json(other, o_new or None, o_old)
         elif o_err:
             errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (other, o_err))
 

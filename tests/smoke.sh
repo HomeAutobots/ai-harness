@@ -1178,6 +1178,17 @@ git -C "$SB" add -f app/.agents/harness.conf
 out="$("$SB/app/.agents/bin/verify" 2>&1 || true)"
 t    "...tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
 git -C "$SB" rm -q --cached app/.agents/harness.conf
+TX=$(repo teamexclude)
+printf '# mine\nbuild-local/' > "$TX/.git/info/exclude"; cp "$TX/.git/info/exclude" "$WORK/exclude.before"
+"$HARNESS/install.sh" --team "$TX" >/dev/null 2>&1; "$TX/.agents/bin/sync" >/dev/null 2>&1
+t    "team mode leaves .git/info/exclude byte-identical" cmp -s "$TX/.git/info/exclude" "$WORK/exclude.before"
+if [ "$HAVE_PY" -eq 1 ]; then
+  printf '{}\n' > "$TX/.claude/settings.local.json"; "$TX/.agents/bin/sync" >/dev/null 2>&1
+  t    "team mode keeps a personal {} settings.local.json" test -f "$TX/.claude/settings.local.json"
+  printf '{}\n' > "$LM/.claude/settings.json"; "$LM/.agents/bin/sync" >/dev/null 2>&1
+  t    "local mode keeps an untracked {} settings.json" test -f "$LM/.claude/settings.json"
+  rm -f "$LM/.claude/settings.json"
+fi
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
