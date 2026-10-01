@@ -207,14 +207,28 @@ agents_shared_workflow() {
   return 1
 }
 
-# agents_items <kind> [team]: agents_lib_items, plus for skills each active workflow's skill/, after
-# all the libraries' own skills. The skill comes from the pack that wins for that workflow (the
-# one whose checks run), never from a pack it shadows. With "team", a personal pack that wins
-# also brings the skill of the shared pack it shadows (team mode renders that one: it's committed).
+# agents_items <kind> [team]: agents_lib_items, plus for skills each active workflow's skill/ and
+# for agents each active workflow's agents/*.md, after all the libraries' own items. They come
+# from the pack that wins for that workflow (the one whose checks run), never from a pack it
+# shadows. With "team", a personal pack that wins also brings the items of the shared pack it
+# shadows (team mode renders those: they're committed).
+_agents_pack_items() {  # _agents_pack_items <kind> <workflow> <pack path> <source>
+  local f n
+  case "$1" in
+    skills) if [ -f "$3/skill/SKILL.md" ]; then printf '%s\t%s\t%s\n' "$2" "$3/skill" "$4"; fi ;;
+    agents)
+      [ -d "$3/agents" ] || return 0
+      find -H "$3/agents" -mindepth 1 -maxdepth 1 -name '*.md' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+        n="${f##*/}"; n="${n%.md}"
+        agents_valid_name "$n" && agents_item_ok agents "$f" || continue
+        printf '%s\t%s\t%s\n' "$n" "$f" "$4"
+      done ;;
+  esac
+}
 agents_items() {
   local w line wpath wsrc shared restoreglob=0
   agents_lib_items "$1" || return $?
-  [ "$1" = skills ] || return 0
+  case "$1" in skills|agents) ;; *) return 0 ;; esac
   # WORKFLOWS is split unquoted below; noglob until it's done, restored only if we turned it on
   # (this runs in the caller's shell, unlike _agents_lib_candidates, so it must not stay changed).
   case $- in *f*) ;; *) set -f; restoreglob=1 ;; esac
@@ -222,13 +236,11 @@ agents_items() {
     agents_valid_name "$w" || continue
     line="$(agents_lookup workflows "$w")" || continue
     wsrc="${line##*"$AGENTS_TAB"}"; wpath="${line#*"$AGENTS_TAB"}"; wpath="${wpath%"$AGENTS_TAB"*}"
-    if [ -f "$wpath/skill/SKILL.md" ]; then printf '%s\t%s\t%s\n' "$w" "$wpath/skill" "$wsrc"; fi
+    _agents_pack_items "$1" "$w" "$wpath" "$wsrc"
     [ "${2:-}" = team ] || continue
     case "$wsrc" in personal|personal-listed) ;; *) continue ;; esac
     shared="$(agents_shared_workflow "$w")" || continue
-    if [ -f "${shared#*"$AGENTS_TAB"}/skill/SKILL.md" ]; then
-      printf '%s\t%s\t%s\n' "$w" "${shared#*"$AGENTS_TAB"}/skill" "${shared%%"$AGENTS_TAB"*}"
-    fi
+    _agents_pack_items "$1" "$w" "${shared#*"$AGENTS_TAB"}" "${shared%%"$AGENTS_TAB"*}"
   done
   [ "$restoreglob" = 1 ] && set +f
   return 0

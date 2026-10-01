@@ -2049,6 +2049,27 @@ t    "a snippet-only pack installs"    test "$rc" = 0
 t    "...and its rule lands"           grep -q '^deny-cmd make release' "$PO/.agents/policy.conf"
 tnot "...without an unusable warning"  hasl "$out" "isn't a usable workflow"
 
+echo "agents from libraries"
+mkagent(){ mkdir -p "$1/agents"; printf -- '---\ndescription: %s\n%s---\nYou review diffs.\n' "${3:-An agent.}" "${4:-}" > "$1/agents/$2.md"; }
+AG=$(repo agents)
+"$HARNESS/install.sh" --team "$AG" >/dev/null 2>&1
+mkagent "$AG/.agents/library" reviewer "Reviews diffs."
+mkdir -p "$WORK/agpack/workflows/agflow/agents" "$WORK/agpack/workflows/agflow/checks"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/agpack/workflows/agflow/checks/turn.sh"; chmod +x "$WORK/agpack/workflows/agflow/checks/turn.sh"
+mkagent "$WORK/agpack/workflows/agflow" flowbot "Runs the flow."
+mkagent "$WORK/agpack/workflows/agflow" reviewer "Pack reviewer."
+edit "$AG/.agents/harness.conf" "s|^LIBRARIES=.*|LIBRARIES=\"$WORK/agpack\"|"
+edit "$AG/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="agflow"|'
+out="$(cd "$AG" && bash .agents/lib/libraries.sh resolve agents)"
+t    "a library agent resolves"        hasl "$out" "$(row reviewer "$AG/.agents/library/agents/reviewer.md" project)"
+t    "an active workflow's agent resolves" hasl "$out" "$(row flowbot "$WORK/agpack/workflows/agflow/agents/flowbot.md" project-listed)"
+out="$(cd "$AG" && bash .agents/lib/libraries.sh shadows agents)"
+t    "a library agent shadows the pack's agent of the same name" hasl "$out" "reviewer"
+edit "$AG/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS=""|'
+out="$(cd "$AG" && bash .agents/lib/libraries.sh resolve agents)"
+tnot "an inactive workflow's agents don't resolve" hasl "$out" "flowbot"
+edit "$AG/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="agflow"|'
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
