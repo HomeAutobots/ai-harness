@@ -559,9 +559,9 @@ while IFS="$TAB" read -r lsrc lp; do
         say "infra: LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills and packs can't be checked"
         INFRA=1
       elif [ "$TEAM" -eq 1 ]; then
-        warn "LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills keep their committed renders until it's back"
+        warn "LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills and agents keep their committed renders until it's back"
       else
-        warn "LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills keep their renders until it's back"
+        warn "LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills and agents keep their renders until it's back"
       fi ;;
     personal-listed) [ -d "$lp" ] || warn "LIBRARIES ($lsrc) names $(shown "$lp"), which isn't there; its skills and packs are skipped" ;;
   esac

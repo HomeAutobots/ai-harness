@@ -1994,7 +1994,7 @@ t    "library gone: sync keeps its committed renders" bash -c "test -L '$TL/.age
 t    "...not taken over by the built-in" test "$(readlink "$TL/.agents/skills/review-diff")" = ../../vendor/team/skills/review-diff
 t    "...nor by a library listed after it" test "$(readlink "$TL/.agents/skills/teamskill")" = ../../vendor/team/skills/teamskill
 t    "...and leaves git status clean"  test -z "$(git -C "$TL" status --porcelain -- .agents .claude AGENTS.md CLAUDE.md)"
-t    "...and says why"                 hasl "$out" "sync: warning: LIBRARIES lists vendor/team, which isn't here (an uninitialized submodule?); its skills keep their committed renders until it's back"
+t    "...and says why"                 hasl "$out" "sync: warning: LIBRARIES lists vendor/team, which isn't here (an uninitialized submodule?); its skills and agents keep their committed renders until it's back"
 tnot "...not that they're stale"       hasl "$out" "stale"
 out="$("$TL/.agents/bin/sync" --check 2>&1)" || true
 trc  "sync --check fails"              1 "$TL/.agents/bin/sync" --check
@@ -2408,6 +2408,37 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "no agents: no agent dirs"      bash -c "test ! -e '$AB/.claude/agents' && test ! -e '$AB/.github/agents' && test ! -e '$AB/.cursor/agents'"
   tnot "...and no agents key in the lock" grep -q '"agents"' "$AB/.agents/generated.lock"
   t    "...and --check is clean"       "$AB/.agents/bin/sync" --check
+fi
+
+echo "agents in team and local mode"
+if [ "$HAVE_PY" -eq 1 ]; then
+  PL="$WORK/agpersonal"; mkagent "$PL" helper "My helper."; mkagent "$PL" shared-name "Personal copy."
+  AT=$(repo agentsteam)
+  AGENTS_PERSONAL_DIR="$PL" "$HARNESS/install.sh" --team "$AT" >/dev/null 2>&1
+  mkagent "$AT/.agents/library" shared-name "Project copy."
+  out="$(AGENTS_PERSONAL_DIR="$PL" "$AT/.agents/bin/sync" 2>&1)"
+  t    "team: a personal agent renders for this clone" test -f "$AT/.claude/agents/helper.md"
+  t    "...hidden from git"            bash -c "cd '$AT' && git check-ignore -q .claude/agents/helper.md"
+  tnot "...and not in the lock"        grep -q 'helper.md' "$AT/.agents/generated.lock"
+  t    "...its marker names the library, not a home path" bash -c "grep -q 'personal library: agents/helper.md' '$AT/.claude/agents/helper.md' && ! grep -q '$PL' '$AT/.claude/agents/helper.md'"
+  t    "team: the shared agent wins a name clash" grep -q 'Project copy.' "$AT/.claude/agents/shared-name.md"
+  t    "...and says the personal one isn't used" hasl "$out" "your personal agent 'shared-name' isn't used in team mode"
+  t    "team: shared renders aren't hidden" bash -c "cd '$AT' && ! git check-ignore -q .claude/agents/shared-name.md"
+  t    "team: --check clean"           env AGENTS_PERSONAL_DIR="$PL" "$AT/.agents/bin/sync" --check
+  commit "$AT" "agents"
+  t    "the commit has the shared agent, not the personal one" bash -c "cd '$AT' && git ls-files --error-unmatch .claude/agents/shared-name.md >/dev/null 2>&1 && ! git ls-files --error-unmatch .claude/agents/helper.md >/dev/null 2>&1"
+  AGENTS_PERSONAL_DIR="$PL" "$HARNESS/install.sh" --local "$AT" >/dev/null 2>&1
+  t    "team to local untracks the agent renders" bash -c "cd '$AT' && ! git ls-files --error-unmatch .claude/agents/shared-name.md >/dev/null 2>&1"
+  t    "...and keeps them, hidden"     bash -c "test -f '$AT/.claude/agents/shared-name.md' && cd '$AT' && git check-ignore -q .claude/agents/shared-name.md"
+  AL=$(repo agentslocal)
+  mkdir -p "$AL/.claude/agents"; printf -- '---\nname: theirs\ndescription: x\n---\ntheirs\n' > "$AL/.claude/agents/theirs.md"; commit "$AL" "their agent"
+  AGENTS_PERSONAL_DIR="$PL" "$HARNESS/install.sh" "$AL" >/dev/null 2>&1
+  mkagent "$AL/.agents/library" theirs "Library theirs."
+  out="$(AGENTS_PERSONAL_DIR="$PL" "$AL/.agents/bin/sync" 2>&1)"
+  t    "local: renders are hidden from git" bash -c "cd '$AL' && git check-ignore -q .claude/agents/helper.md"
+  t    "local: a tracked agent file is never touched" grep -qx 'theirs' "$AL/.claude/agents/theirs.md"
+  t    "...with a note"                hasl "$out" ".claude/agents/theirs.md"
+  t    "local: status clean"           test -z "$(git -C "$AL" status --porcelain)"
 fi
 
 echo "guards"
