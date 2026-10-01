@@ -66,22 +66,38 @@ def _skip(raw):
 
 
 def _native(lines, i, end, native, native_at):
-    """Reads native:'s block from line index i; returns the index after it."""
+    """Reads native:'s block from line index i; returns the index after it. Blank and # lines
+    between '<tool>:' lines are skipped; inside a tool's block they're its content (trailing
+    blank lines dropped)."""
     base = inner = tool = None
+
+    def trim():
+        if tool is not None:
+            ls = native[tool]
+            while ls and ls[-1][0] == "":
+                ls.pop()
+
     while i < end:
         raw = lines[i]
-        if _skip(raw):
+        s = raw.strip()
+        if not s:
+            if inner is not None:
+                native[tool].append(("", i + 1))
             i += 1
             continue
         if raw[0] not in " \t":
             break
         ind = len(raw) - len(raw.lstrip())
+        if s.startswith("#") and (base is None or ind <= base or (inner is not None and ind < inner)):
+            i += 1
+            continue
         if base is None:
             base = ind
         if ind == base:
             m = re.match(r"^\s*([a-z]+)\s*:\s*(#.*)?$", raw)
             if not m:
                 raise AgentError(i + 1, "native: expects '<tool>:' lines, each with that tool's lines indented under it")
+            trim()
             tool, inner = m.group(1), None
             native.setdefault(tool, [])
             native_at.setdefault(tool, i + 1)
@@ -94,6 +110,7 @@ def _native(lines, i, end, native, native_at):
                 raise AgentError(i + 1, "native.%s: lines don't line up" % tool)
             native[tool].append((raw[inner:].rstrip(), i + 1))
         i += 1
+    trim()
     return i
 
 
@@ -299,13 +316,17 @@ class Agent(object):
         return self.targets is None or tool in self.targets
 
 
+# Characters JSON leaves raw that YAML double-quoted strings don't allow (DEL, C1 controls,
+# U+FFFE/U+FFFF); TOML takes the same \u escapes.
+RAW_UNSAFE = re.compile("[\x7f-\x9f\ufffe\uffff]")
+
+
 def q(v):
-    return json.dumps(v, ensure_ascii=False)
+    """A double-quoted string, valid in both YAML and TOML."""
+    return RAW_UNSAFE.sub(lambda m: "\\u%04x" % ord(m.group()), json.dumps(v, ensure_ascii=False))
 
 
-def tq(v):
-    """A TOML basic string (JSON's escapes are valid TOML; DEL isn't allowed raw)."""
-    return q(v).replace("\x7f", "\\u007f")
+tq = q   # TOML basic strings take the same escapes
 
 
 TOML_UNSAFE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)")
@@ -390,7 +411,10 @@ def render(agent, tool, conf, source):
     if tool == "cursor" and effort and model:
         model = "%s[effort=%s]" % (model, effort)
     elif tool == "cursor" and effort and "model" not in nk:
-        missing.append("effort (it goes in the model id, and no MODEL_%s_CURSOR is set)" % (agent.model or "<tier>").upper())
+        if agent.model:
+            missing.append("effort (it goes in the model id, and no MODEL_%s_CURSOR is set)" % agent.model.upper())
+        else:
+            missing.append("effort (it goes in the model id: set model: to a tier and MODEL_<TIER>_CURSOR)")
     if tool == "codex" and effort == "max" and "model_reasoning_effort" not in nk:
         notes.append("effort: max becomes high for codex (its highest documented level)")
         effort = "high"
@@ -467,13 +491,20 @@ def marked_renders(root):
     return out
 
 
+def in_repo(root, path):
+    """path relative to the repo, or None if it's outside. Real paths on both sides, so a symlinked
+    spelling of the repo (/tmp vs /private/tmp) still counts."""
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    return os.path.relpath(rp, rr) if rp.startswith(rr + os.sep) else None
+
+
 def source_label(root, path, lib):
     """Where an agent came from, as the marker shows it: a repo path, or library:agents/<file> for
     one outside the repo (no home directories in committed files)."""
-    ap = os.path.abspath(path)
-    if ap.startswith(root + os.sep):
-        return os.path.relpath(ap, root)
-    parts = ap.split(os.sep)
+    rel = in_repo(root, path)
+    if rel is not None:
+        return rel
+    parts = os.path.abspath(path).split(os.sep)
     tail = os.sep.join(parts[-4:]) if len(parts) > 4 and parts[-4] == "workflows" else os.sep.join(parts[-2:])
     return "%s library: %s" % (lib, tail)
 
@@ -489,7 +520,7 @@ def sync_agents(root, conf, rows, check, tracked, old_lock, team):
     res = {"wrote": [], "drift": [], "warnings": [], "errors": [], "lock": {}, "renders": []}
     want = {}
     for name, path, lib in rows:
-        shown = os.path.relpath(path, root) if os.path.abspath(path).startswith(root + os.sep) else path
+        shown = in_repo(root, path) or path
         agent = Agent(name, path, shown)
         for ln, msg in agent.warnings:
             res["warnings"].append("%s:%d: %s" % (shown, ln, msg))
