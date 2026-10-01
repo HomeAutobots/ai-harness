@@ -1597,9 +1597,9 @@ oldlayout "$MI"; handmade "$MI"
 mkdir -p "$MI/.agents/library/workflows"; mv "$MI/.agents/workflows/handmade" "$MI/.agents/library/workflows/handmade"   # a run that stopped after the move
 "$HARNESS/install.sh" "$MI" >/dev/null 2>&1
 t    "an interrupted migration finishes" test -f "$MI/.agents/library/workflows/handmade/skill/SKILL.md"
-cp -R "$MI/.agents" "$WORK/migratehalf-before"
+mkdir -p "$WORK/migratehalf-before"; cp -R "$MI/.agents" "$WORK/migratehalf-before/.agents"   # same dir name, so relative skill links resolve (GNU diff follows them)
 out="$("$HARNESS/install.sh" "$MI" 2>&1)"
-t    "a local re-run changes nothing"  bash -c "diff -r -x cache '$WORK/migratehalf-before' '$MI/.agents' && test -z \"\$(git -C '$MI' status --porcelain)\""
+t    "a local re-run changes nothing"  bash -c "diff -r -x cache '$WORK/migratehalf-before/.agents' '$MI/.agents' && test -z \"\$(git -C '$MI' status --porcelain)\""
 rm -rf "$MI/.agents/library/workflows/handmade/skill"
 "$HARNESS/install.sh" "$MI" >/dev/null 2>&1
 tnot "a pack skill deleted from the library stays deleted" bash -c "test -e '$MI/.agents/library/workflows/handmade/skill' || test -e '$MI/.agents/skills/handmade'"
