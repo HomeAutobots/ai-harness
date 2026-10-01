@@ -123,8 +123,9 @@ agents_item_ok() {
     skills) [ -f "$2/SKILL.md" ] ;;
     workflows)
       [ -d "$2" ] || return 1
-      if [ -f "$2/skill/SKILL.md" ] || [ -d "$2/agents" ] || [ -d "$2/mcp" ] || [ -d "$2/bin" ]; then return 0; fi
-      _agents_has_file "$2/checks" ;;
+      if [ -f "$2/skill/SKILL.md" ] || [ -d "$2/agents" ] || [ -d "$2/mcp" ] || [ -d "$2/bin" ] \
+         || [ -s "$2/harness.conf.snippet" ] || [ -s "$2/policy.conf.snippet" ]; then return 0; fi
+      _agents_has_file "$2/checks" || _agents_has_file "$2/seed" ;;
     stacks) [ -d "$2" ] && { [ -f "$2/lib.sh" ] || _agents_has_file "$2/checks"; } ;;
     agents|mcp) [ -f "$2" ] && [ -s "$2" ] ;;
     *) return 1 ;;

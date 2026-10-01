@@ -526,7 +526,7 @@ report_unusable() {  # report_unusable <kind> <ALL | active names> <what it lack
   done
 }
 report_unusable skills ALL "no SKILL.md"
-report_unusable workflows "${WORKFLOWS:-}" "no checks/ with a file, skill/SKILL.md, agents/, mcp/, or bin/"
+report_unusable workflows "${WORKFLOWS:-}" "no checks/ with a file, skill/SKILL.md, agents/, mcp/, bin/, a snippet, or seed/ with a file"
 report_unusable stacks "${STACKS:-}" "no lib.sh or checks/ with a file"
 report_unusable agents ALL "empty"
 report_unusable mcp ALL "empty"

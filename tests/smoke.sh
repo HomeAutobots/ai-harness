@@ -1950,7 +1950,7 @@ mkdir -p "$EP/workflows/feature-driven"
 t    "an empty personal workflow dir doesn't shadow the built-in" bash -c "AGENTS_PERSONAL_DIR='$EP' '$EU/.agents/bin/verify' | grep -qF '[fdd-ran]'"
 t    "...the resolver skips it"        test "$(cd "$EU" && AGENTS_ROOT="$EU" AGENTS_PERSONAL_DIR="$EP" bash .agents/lib/libraries.sh resolve workflows feature-driven | cut -f3)" = builtin
 out="$(esync 2>&1)"
-t    "...and sync says it's ignored"   hasl "$out" "$EP/workflows/feature-driven isn't a usable workflow (no checks/ with a file, skill/SKILL.md, agents/, mcp/, or bin/); ignored"
+t    "...and sync says it's ignored"   hasl "$out" "$EP/workflows/feature-driven isn't a usable workflow (no checks/ with a file, skill/SKILL.md, agents/, mcp/, bin/, a snippet, or seed/ with a file); ignored"
 t    "...once"                         test "$(printf '%s\n' "$out" | grep -c "isn't a usable workflow")" = 1
 tnot "...not as a shadow"              hasl "$out" "shadows"
 mkdir -p "$EP/workflows/feature-driven/checks"
@@ -2040,6 +2040,14 @@ t    "a missing personal-listed library only warns" hasl "$out" "LIBRARIES (pers
 t    "...verify still skips a name no library has" env AGENTS_PERSONAL_DIR="$TP" "$TL/.agents/bin/verify"
 t    "...and so does gitflow"          bash -c "cd '$TL' && printf 'fix: x\n' | AGENTS_PERSONAL_DIR='$TP' .agents/bin/gitflow check-msg"
 edit "$TL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="teamflow"/'
+
+echo "a policy-only workflow pack"
+PO=$(repo policyonly); POL="$WORK/polib"; mkdir -p "$POL/workflows/house-rules"
+printf '# house-rules workflow\ndeny-cmd make release   # releases are a human decision\n' > "$POL/workflows/house-rules/policy.conf.snippet"
+out="$(AGENTS_PERSONAL_DIR="$POL" "$HARNESS/install.sh" --team --workflow house-rules "$PO" 2>&1)" && rc=0 || rc=$?
+t    "a snippet-only pack installs"    test "$rc" = 0
+t    "...and its rule lands"           grep -q '^deny-cmd make release' "$PO/.agents/policy.conf"
+tnot "...without an unusable warning"  hasl "$out" "isn't a usable workflow"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
