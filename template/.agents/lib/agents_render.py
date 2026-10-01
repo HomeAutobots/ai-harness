@@ -462,9 +462,13 @@ def render(agent, tool, conf, source):
     return "\n".join(out) + "\n", missing, notes
 
 
-def marked(text):
-    """True if sync wrote it: the marker in its first lines."""
-    return any(l.startswith(MARK) for l in text.split("\n")[:3])
+def marked(text, toml):
+    """True if sync wrote it: the marker on the first line of a TOML render, or on the line right
+    after the opening --- of a Markdown one."""
+    ls = text.split("\n", 2)
+    if toml:
+        return ls[0].startswith(MARK)
+    return len(ls) > 1 and ls[0].rstrip("\r") == "---" and ls[1].startswith(MARK)
 
 
 def _read(path):
@@ -486,7 +490,8 @@ def marked_renders(root):
             continue
         for f in sorted(os.listdir(full)):
             rel = os.path.join(d, f)
-            if f.endswith(suffix) and os.path.isfile(os.path.join(root, rel)) and marked(_read(os.path.join(root, rel)) or ""):
+            p = os.path.join(root, rel)
+            if f.endswith(suffix) and os.path.isfile(p) and marked(_read(p) or "", suffix == ".toml"):
                 out.append(rel)
     return out
 
@@ -509,26 +514,41 @@ def source_label(root, path, lib):
     return "%s library: %s" % (lib, tail)
 
 
-def sync_agents(root, conf, rows, check, tracked, old_lock, team):
+def sync_agents(root, conf, rows, check, tracked, old_lock, team, library_missing=False):
     """Renders every agent for every enabled adapter.
     rows: (name, path, library) from sync, winners only, in sync's order.
-    tracked(rel) -> bool. old_lock: {rel: sha256}. team: bool.
+    tracked(rel) -> bool. old_lock: {rel: sha256}. team: bool. library_missing: a library
+    LIBRARIES lists isn't here (its agents' committed renders stay).
     Returns dict: wrote, drift, warnings, errors (lists of str), lock ({rel: sha}), renders
     ([(rel, personal)])."""
     adapters = [a for a in TOOLS if a in (conf.get("ADAPTERS") or "").split()]
     local = not team
     res = {"wrote": [], "drift": [], "warnings": [], "errors": [], "lock": {}, "renders": []}
     want = {}
+    keep = set()   # renders of agents with errors: the last good one stays
+
+    def hold(rel, personal):
+        """A marked render sync keeps as is: still hidden or recorded as before."""
+        res["renders"].append((rel, personal))
+        if team and not personal and rel in old_lock:
+            res["lock"][rel] = old_lock[rel]
+
     for name, path, lib in rows:
         shown = in_repo(root, path) or path
         agent = Agent(name, path, shown)
+        personal = lib in ("personal", "personal-listed")
         for ln, msg in agent.warnings:
             res["warnings"].append("%s:%d: %s" % (shown, ln, msg))
         if agent.errors:
             for ln, msg in agent.errors:
                 res["errors"].append("%s:%d: %s; agent not rendered" % (shown, ln, msg))
+            for tool in adapters:
+                rel = PATHS[tool] % name
+                full = os.path.join(root, rel)
+                keep.add(rel)
+                if os.path.isfile(full) and not os.path.islink(full) and marked(_read(full) or "", tool == "codex"):
+                    hold(rel, personal)
             continue
-        personal = lib in ("personal", "personal-listed")
         missing = {}
         for tool in adapters:
             if not agent.wants(tool):
@@ -549,11 +569,14 @@ def sync_agents(root, conf, rows, check, tracked, old_lock, team):
     for rel in sorted(want):
         text, personal, shown, tool = want[rel]
         full = os.path.join(root, rel)
+        if os.path.islink(full):
+            res["warnings"].append("%s is a link; sync leaves it alone" % rel)
+            continue
         have = _read(full) if os.path.exists(full) else None
         if local and tracked(rel):
             res["warnings"].append("%s is tracked by the project; local mode leaves it alone" % rel)
             continue
-        if os.path.exists(full) and (have is None or not marked(have)):
+        if os.path.exists(full) and (have is None or not marked(have, tool == "codex")):
             res["warnings"].append("%s wasn't made by sync, leaving it alone (the agent from %s isn't rendered for "
                                    "%s)" % (rel, shown, tool))
             continue
@@ -576,15 +599,31 @@ def sync_agents(root, conf, rows, check, tracked, old_lock, team):
         with open(full, "w", encoding="utf-8") as fh:
             fh.write(text)
         res["wrote"].append("wrote " + rel)
+    # On a case-insensitive filesystem a listed name can be a wanted render spelled differently.
+    ours = [os.path.join(root, r) for r in sorted(set(want) | keep)]
+    ours = [p for p in ours if os.path.exists(p)]
     for rel in marked_renders(root):
-        if rel in want:
+        if rel in want or rel in keep:
             continue
-        if local and tracked(rel):
+        full = os.path.join(root, rel)
+        if os.path.islink(full):
+            res["warnings"].append("%s is a link; sync leaves it alone" % rel)
             continue
+        if any(os.path.samefile(p, full) for p in ours):
+            continue
+        if tracked(rel):
+            if local:
+                continue
+            if rel not in old_lock or library_missing:
+                res["warnings"].append("%s is committed but sync didn't record it (or a library LIBRARIES lists "
+                                       "isn't here); left as is" % rel)
+                if rel in old_lock:
+                    res["lock"][rel] = old_lock[rel]
+                continue
         if check:
             res["drift"].append(rel + " (stale)")
             continue
-        os.remove(os.path.join(root, rel))
+        os.remove(full)
         res["wrote"].append("removed stale " + rel)
     return res
 

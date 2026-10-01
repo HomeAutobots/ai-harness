@@ -478,7 +478,7 @@ def unshare():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import agents_render
     for rel in agents_render.marked_renders(ROOT):
-        if tracked(rel):
+        if tracked(rel) and not os.path.islink(os.path.join(ROOT, rel)):
             print("untrack " + rel)
     return 0
 
@@ -498,7 +498,8 @@ def agents(check, set_path, out_path):
     lock, _ = read_json(LOCK)
     lock = lock or {}
     team = conf.get("HARNESS_MODE", "team") != "local"
-    res = agents_render.sync_agents(ROOT, conf, rows, check, tracked, lock.get("agents", {}), team)
+    res = agents_render.sync_agents(ROOT, conf, rows, check, tracked, lock.get("agents", {}), team,
+                                    os.environ.get("AGENTS_LIBRARY_MISSING", "0") == "1")
     with open(out_path, "w", encoding="utf-8") as fh:
         for rel, personal in res["renders"]:
             fh.write("%s\t%s\n" % ("personal" if personal else "shared", rel))
@@ -522,7 +523,7 @@ def agents(check, set_path, out_path):
         print("sync: warning: " + w, file=sys.stderr)
     for e in res["errors"]:
         print("sync: error: " + e, file=sys.stderr)
-    return 1 if (res["drift"] or (check and res["errors"])) else (2 if res["errors"] else 0)
+    return 1 if (res["drift"] or res["errors"]) else 0
 
 
 # ------------------------------------------------------------------ skills lock
