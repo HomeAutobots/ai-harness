@@ -2679,6 +2679,30 @@ mkskill "$HB/.agents" twice "In the render dir."; mkskill "$HB/.agents/library" 
 out="$("$HB/.agents/bin/sync" 2>&1)"
 t    "two different skills of one name still warn" hasl "$out" ".agents/skills/twice and .agents/library/skills/twice both exist"
 t    "...and both stay"                bash -c "grep -q 'In the render dir' '$HB/.agents/skills/twice/SKILL.md' && grep -q 'In the library' '$HB/.agents/library/skills/twice/SKILL.md'"
+HS=$(repo hardstack)
+"$HARNESS/install.sh" --team "$HS" >/dev/null 2>&1; commit "$HS" harness
+oldlayout "$HS"
+mkdir -p "$HS/.agents/stacks/mine" "$HS/.github/workflows" "$HS/ci"
+printf 'mine_ok() { :; }\n' > "$HS/.agents/stacks/mine/lib.sh"; printf 'print(1)\n' > "$HS/.agents/stacks/mine/tool.py"
+printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/stacks/mine/lib.sh"\npython3 .agents/stacks/mine/tool.py\n' > "$HS/.agents/checks/turn.sh"
+printf 'steps:\n  - run: . .agents/stacks/mine/lib.sh\n  - run: python3 .agents/stacks/cpp-cmake/cpp_tools.py\n' > "$HS/.github/workflows/ci.yml"
+commit "$HS" "old layout"
+printf 'see .agents/stacks/mine/tool.py\n' > "$HS/ci/notes.txt"   # untracked, not ignored
+out="$("$HARNESS/install.sh" --stack mine "$HS" 2>&1)"
+t    "a moved stack: install names each other file pointing into its old dir" hasl "$out" "install: warning: .agents/checks/turn.sh:3: points into .agents/stacks/mine/, which only keeps lib.sh now; the stack's files are in .agents/library/stacks/mine/"
+t    "...CI configs too"               hasl "$out" "install: warning: .github/workflows/ci.yml:3: points into .agents/stacks/cpp-cmake/, which only keeps lib.sh now; the stack's files are in .agents/builtin/stacks/cpp-cmake/"
+t    "...and untracked files"          hasl "$out" "install: warning: ci/notes.txt:1: points into .agents/stacks/mine/"
+tnot "...but not a line that only sources lib.sh" bash -c "printf '%s' \"\$1\" | grep -qE 'turn.sh:2:|ci.yml:2:'" _ "$out"
+commit "$HS" "library layout"
+out="$("$HARNESS/install.sh" "$HS" 2>&1)"
+tnot "...once: a re-run doesn't repeat it" hasl "$out" "points into"
+HSL=$(repo hardstacklocal)
+"$HARNESS/install.sh" "$HSL" >/dev/null 2>&1
+oldlayout "$HSL"
+mkdir -p "$HSL/.agents/stacks/mine"; printf 'mine_ok() { :; }\n' > "$HSL/.agents/stacks/mine/lib.sh"; printf 'print(1)\n' > "$HSL/.agents/stacks/mine/tool.py"
+printf '#!/usr/bin/env bash\npython3 .agents/stacks/mine/tool.py\n' > "$HSL/.agents/checks/turn.sh"
+out="$("$HARNESS/install.sh" "$HSL" 2>&1)"
+t    "local mode: tier scripts hidden from git are read too" hasl "$out" "install: warning: .agents/checks/turn.sh:2: points into .agents/stacks/mine/"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

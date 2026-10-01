@@ -264,6 +264,31 @@ fi
 EOF
 }
 
+# stack_refs <name> <now-in>: once .agents/stacks/<name>/ keeps only the shim, each line elsewhere in
+# the project that points at another file in it (a tier script, a CI config) gets a path:line warning.
+stack_refs() {
+  local s=".agents/stacks/$1/"
+  {
+    if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
+      git -C "$DEST" grep -nIF --untracked -e "$s" -- . 2>/dev/null || true
+    else
+      (cd "$DEST" && grep -rnIF --exclude-dir=.git -e "$s" . 2>/dev/null | sed 's|^\./||') || true
+    fi
+    # local mode hides .agents/ from git, so its project-owned files are read directly
+    (cd "$DEST" && grep -nIF -e "$s" .agents/checks/*.sh .agents/*.conf /dev/null 2>/dev/null) || true
+  } | awk -v s="$s" '{
+      p = index($0, ":"); path = substr($0, 1, p - 1); rest = substr($0, p + 1)
+      q = index(rest, ":"); num = substr(rest, 1, q - 1); c = substr(rest, q + 1)
+      if (path ~ /^\.agents\/(builtin|stacks|cache)\// || path ~ /^\.agents\/library\/\.migrated\//) next
+      while ((i = index(c, s)) > 0) {
+        c = substr(c, i + length(s))
+        if (!(substr(c, 1, 6) == "lib.sh" && substr(c, 7, 1) !~ /[A-Za-z0-9._-]/)) { print path ":" num; next }
+      }
+    }' | sort -t: -k1,1 -k2,2n -u | while IFS= read -r ref; do
+    say "warning: $ref: points into .agents/stacks/$1/, which only keeps lib.sh now; the stack's files are in $2/"
+  done
+}
+
 if [ -d "$DEST/.agents/workflows" ]; then
   for d in "$DEST"/.agents/workflows/*/; do
     [ -d "$d" ] || continue
@@ -317,6 +342,7 @@ if [ -d "$DEST/.agents/stacks" ]; then
       shipped_copy "$HARNESS/stacks/$s" "${d%/}" || set_aside stacks "$DEST/.agents/stacks/$s"
       write_stack_shim "$s"
       migrated "replaced .agents/stacks/$s with a shim (the pack runs from .agents/builtin/stacks/$s)"
+      stack_refs "$s" ".agents/builtin/stacks/$s"
     elif [ -e "$DEST/.agents/library/stacks/$s" ] || [ -L "$DEST/.agents/library/stacks/$s" ]; then
       say "warning: .agents/stacks/$s and .agents/library/stacks/$s both exist; keep the one you want in .agents/library/stacks/ and delete .agents/stacks/$s"
     else
@@ -326,9 +352,7 @@ if [ -d "$DEST/.agents/stacks" ]; then
       mv "$DEST/.agents/stacks/$s" "$DEST/.agents/library/stacks/$s"
       write_stack_shim "$s"
       migrated "moved .agents/stacks/$s to .agents/library/stacks/$s (.agents/stacks/$s/lib.sh forwards to it)"
-      if awk -v s=".agents/stacks/$s/" -v l=".agents/stacks/$s/lib.sh" 'index($0, s) && !index($0, l) { f = 1 } END { exit !f }' "$DEST"/.agents/checks/*.sh 2>/dev/null; then
-        say "warning: .agents/checks/ uses files in .agents/stacks/$s/ besides lib.sh; they're in .agents/library/stacks/$s/ now"
-      fi
+      stack_refs "$s" ".agents/library/stacks/$s"
     fi
   done
 fi
