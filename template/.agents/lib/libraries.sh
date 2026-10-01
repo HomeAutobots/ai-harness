@@ -12,8 +12,8 @@
 # Directories that don't exist are skipped, and each directory counts once. An entry counts only
 # when it's a real item of its kind (agents_item_ok): an empty directory never shadows anything. Workflows and stacks
 # are used only when named in WORKFLOWS / STACKS in .agents/harness.conf; an active workflow's
-# skill/ joins the skills under the workflow's name, from the winning pack only, after every
-# library's own skills.
+# skill/ joins the skills under the workflow's name, and its agents/*.md join the agents by file
+# name, both from the winning pack only, after every library's own skills and agents.
 #
 # Sourced by sync, verify and check scripts (through feedback.sh), gitflow, the stack shims, and
 # install.sh. As a command (harness.py resolve runs it):
