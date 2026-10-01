@@ -338,6 +338,7 @@ git -C "$R" checkout -q -b develop && git -C "$R" push -q origin develop && git 
 t    "no git hooks without rules"      test ! -e "$R/.git/hooks/commit-msg"
 t    "personal layer applies"          bash -c "cd '$R' && .agents/bin/gitflow config | grep -q '^GIT_MERGE_METHOD *rebase'"
 mkdir -p "$WORK/pers-git"; printf 'GIT_MERGE_METHOD="merge"\n' > "$WORK/pers-git/git.conf"
+t    "gitflow config works with HOME unset" bash -c "cd '$R' && env -u HOME -u XDG_CONFIG_HOME -u AGENTS_PERSONAL_DIR .agents/bin/gitflow config | grep -q '^GIT_MERGE_METHOD'"
 t    "AGENTS_PERSONAL_DIR holds the personal git.conf" bash -c "cd '$R' && AGENTS_PERSONAL_DIR='$WORK/pers-git' .agents/bin/gitflow config > '$WORK/pers-git.out' && grep -q '^GIT_MERGE_METHOD *merge' '$WORK/pers-git.out' && grep -qF 'sources: defaults, $WORK/pers-git/git.conf' '$WORK/pers-git.out'"
 tnot "personal layer not rendered"     grep -q 'Bash(git push:\*)' "$R/.claude/settings.json"
 cat >> "$R/.agents/git.conf" <<'EOF'
@@ -1561,6 +1562,28 @@ commit "$MG" "library layout"
 out="$("$HARNESS/install.sh" "$MG" 2>&1)"
 tnot "a second run moves nothing"      hasl "$out" "moved"
 t    "...and changes nothing"          test -z "$(git -C "$MG" status --porcelain)"
+MW=$(repo migrateflag)
+"$HARNESS/install.sh" --team "$MW" >/dev/null 2>&1
+oldlayout "$MW"; handmade "$MW"; commit "$MW" "old layout"
+trc  "re-running install with an old-layout hand-made pack's flag works" 0 "$HARNESS/install.sh" --team --workflow handmade "$MW"
+t    "...and migrates it"              test -d "$MW/.agents/library/workflows/handmade"
+MF=$(repo migratefdd)
+"$HARNESS/install.sh" --team "$MF" >/dev/null 2>&1
+oldlayout "$MF"
+cp -R "$HARNESS/workflows/feature-driven" "$MF/.agents/workflows/"   # as the old install left it
+rm -rf "$MF/.agents/workflows/feature-driven/seed" "$MF/.agents/workflows/feature-driven/__pycache__" "$MF/.agents/workflows/feature-driven/"*.snippet
+mv "$MF/.agents/workflows/feature-driven/skill" "$MF/.agents/skills/feature-driven"
+commit "$MF" "old layout"
+out="$("$HARNESS/install.sh" --team "$MF" 2>&1)"
+tnot "an unedited old pack copy (no seed/, as installed) isn't kept as differing" hasl "$out" "differ"
+t    "...it's just removed"            test ! -e "$MF/.agents/workflows/feature-driven"
+MS=$(repo migrateswitch)
+"$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1
+oldlayout "$MS"; commit "$MS" "old layout"
+out="$("$HARNESS/install.sh" --local "$MS" 2>&1)"
+tnot "team to local on the old layout: built-in copies don't land in the project library" bash -c "test -e '$MS/.agents/library/skills/review-diff' || test -e '$MS/.agents/library/skills/req-driven'"
+t    "...the built-in renders"         test "$(readlink "$MS/.agents/skills/review-diff")" = ../../.agents/builtin/skills/review-diff
+tnot "...with no shadow warning"       hasl "$out" "shadows"
 ML=$(repo migratelocal)
 "$HARNESS/install.sh" "$ML" >/dev/null 2>&1
 oldlayout "$ML"; handmade "$ML"
@@ -1856,6 +1879,11 @@ tnot "...kept out of git too"          bash -c "git -C '$PSUB' status --porcelai
 UL=$(repo unicodelib)
 "$HARNESS/install.sh" --team "$UL" >/dev/null 2>&1
 mkskill "$UL/vendor/lib" libbed "From a library."
+out="$("$UL/.agents/bin/sync" 2>&1)"
+tnot "no LIBRARIES, no missing-library warning" hasl "$out" "LIBRARIES"
+edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/nope"|'
+out="$("$UL/.agents/bin/sync" 2>&1)"
+t    "a LIBRARIES entry that isn't there gets a warning" hasl "$out" "LIBRARIES (project-listed) names vendor/nope, which isn't there"
 edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
 "$UL/.agents/bin/sync" >/dev/null 2>&1
 t    "an in-repo listed library: sync --check clean" "$UL/.agents/bin/sync" --check

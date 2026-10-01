@@ -451,6 +451,10 @@ compute_skill_set
 report_shadows skills ALL
 report_shadows workflows "${WORKFLOWS:-}"
 report_shadows stacks "${STACKS:-}"
+# A LIBRARIES entry that isn't there (a typo, a submodule not checked out) is skipped; say so.
+while IFS="$TAB" read -r lsrc lp; do
+  case "$lsrc" in *-listed) [ -d "$lp" ] || warn "LIBRARIES ($lsrc) names $(shown "$lp"), which isn't there; its skills and packs are skipped" ;; esac
+done < <(agents_library_candidates)
 set -f   # the names are split on spaces; a glob character stays literal
 for w in ${WORKFLOWS:-}; do
   agents_resolve workflows "$w" >/dev/null || warn "WORKFLOWS lists '$w', but no library has it; its checks and skill are skipped"

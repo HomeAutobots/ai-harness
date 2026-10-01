@@ -82,6 +82,11 @@ _agents_libraries_scan() {  # the ones that exist, each directory once (compared
   return 0
 }
 
+# agents_library_candidates: source<TAB>path for every library the config names, existing or not
+agents_library_candidates() {
+  _agents_lib_candidates
+}
+
 # agents_library_paths: every directory the resolver would search, one per line, whether or not
 # it exists (sync uses it to tell its own links from ones made by hand)
 agents_library_paths() {

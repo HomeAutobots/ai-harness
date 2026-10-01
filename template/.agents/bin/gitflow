@@ -69,7 +69,7 @@ GIT_LOCAL_HOOKS="auto"          # commit-msg and pre-push git hooks: auto (only 
                                 # enforcing), on, or off
 
 # The personal dir is the resolver's (libraries.sh agents_personal_dir), spelled out so it works without it.
-USER_CONF="${AGENTS_PERSONAL_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ai-harness}/git.conf"
+USER_CONF="${AGENTS_PERSONAL_DIR:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/ai-harness}/git.conf"
 PROJECT_CONF="$ROOT/.agents/git.conf"
 SOURCES="defaults"
 

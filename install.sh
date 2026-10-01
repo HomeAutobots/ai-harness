@@ -78,7 +78,12 @@ fi
 # Pack names on the command line: after the restore, so a pack in a restored .agents/library/ counts.
 known_pack() {  # known_pack <workflows|stacks> <name>: shipped here, or in a library the project sees
   agents_valid_name "$2" || return 1
-  [ -d "$HARNESS/$1/$2" ] || agents_resolve "$1" "$2" >/dev/null
+  [ -d "$HARNESS/$1/$2" ] || agents_resolve "$1" "$2" >/dev/null && return 0
+  # A hand-made pack still in the old layout (moved to .agents/library/ below); a stack shim isn't one.
+  case "$1" in
+    workflows) [ -d "$DEST/.agents/workflows/$2" ] ;;
+    stacks) [ -f "$DEST/.agents/stacks/$2/lib.sh" ] && ! grep -q 'ai-harness: stack shim' "$DEST/.agents/stacks/$2/lib.sh" ;;
+  esac
 }
 for s in $NEW_STACKS; do
   known_pack stacks "$s" || { echo "install: unknown stack '$s' (not shipped with the harness or in a library)" >&2; usage; }
@@ -266,8 +271,8 @@ if [ -d "$DEST/.agents/workflows" ]; then
     if ! agents_valid_name "$w" || [ -L "${d%/}" ]; then
       say "warning: .agents/workflows/$w isn't a plain pack directory with a valid name; left in place, move it into .agents/library/workflows/ yourself"
     elif [ -d "$HARNESS/workflows/$w" ]; then
-      # The old layout copied the pack without its skill and config snippets.
-      if shipped_copy "$HARNESS/workflows/$w" "${d%/}" -x skill -x harness.conf.snippet -x policy.conf.snippet; then
+      # The old layout copied the pack without its skill, seed files, and config snippets.
+      if shipped_copy "$HARNESS/workflows/$w" "${d%/}" -x skill -x seed -x harness.conf.snippet -x policy.conf.snippet; then
         rm -rf "${DEST:?}/.agents/workflows/$w"
         migrated "removed .agents/workflows/$w (the pack runs from .agents/builtin/workflows/$w)"
       else
@@ -338,8 +343,9 @@ if [ -d "$DEST/.agents/skills" ]; then
     [ -f "$d/SKILL.md" ] || continue
     agents_valid_name "$n" || continue
     lib="$DEST/.agents/library/skills/$n"
-    # Local mode never touches what the project tracks (a repo may keep its own skills here).
-    if [ "$MODE" = local ] && git -C "$DEST" ls-files --error-unmatch -- ".agents/skills/$n" >/dev/null 2>&1; then continue; fi
+    # Local mode never touches what the project tracks (a repo may keep its own skills here),
+    # except on a switch from team mode, where it's the harness's own files, untracked below.
+    if [ "$MODE" = local ] && [ "$SWITCH" != local ] && git -C "$DEST" ls-files --error-unmatch -- ".agents/skills/$n" >/dev/null 2>&1; then continue; fi
     if [ -L "$d" ]; then
       [ "$OLD_LAYOUT" -eq 1 ] || continue   # a render
       tp="$(cd "$d" && pwd -P)"
