@@ -3,8 +3,10 @@
 
 Turns neutral agents (agents/<name>.md in a library or an active workflow pack) into each tool's
 own agent file. harness.py agents runs it for sync. The frontmatter is a small YAML subset, read
-with the standard library: key: value scalars (plain or quoted, > or | folded), lists as [a, b] or
-"- a" lines, and native:, a block per tool of lines in that tool's own syntax, copied verbatim.
+with the standard library: key: value scalars (plain or quoted, > or | folded, or plain lines
+indented under the key), lists as [a, b] or "- a" lines, and native:, a block per tool of lines in
+that tool's own syntax, copied verbatim. Limits of the subset: a | block loses its lines' relative
+indentation, and a [a, b] item can't contain a comma (use "- a" lines for that).
 
   agents_render.py parse <file>      print the parsed agent as JSON (a debugging aid)
   agents_render.py render <tool> <file> [KEY=VALUE ...]   print one render (a debugging aid)
@@ -22,15 +24,25 @@ class AgentError(Exception):
 
 
 def strip_comment(v):
-    """The value without a trailing # comment (a # inside quotes stays)."""
+    """The value without a # comment (a # inside quotes stays; a value that is only a comment is empty)."""
     v = v.strip()
     if v[:1] in ("'", '"'):
         q = v[0]
         j = v.find(q, 1)
-        while q == '"' and j > 0 and v[j - 1] == "\\":
-            j = v.find(q, j + 1)
+        while j > 0:
+            if q == "'" and v[j + 1:j + 2] == "'":
+                j = v.find(q, j + 2)
+                continue
+            if q == '"':
+                k = j - 1
+                while k > 0 and v[k] == "\\":
+                    k -= 1
+                if (j - 1 - k) % 2:
+                    j = v.find(q, j + 1)
+                    continue
+            break
         return v[:j + 1] if j > 0 else v
-    m = re.search(r"\s#", v)
+    m = re.search(r"(^|\s)#", v)
     return v[:m.start()].rstrip() if m else v
 
 
@@ -45,16 +57,22 @@ def scalar(v):
     return v
 
 
-def _native(lines, i, end, native):
+def _skip(raw):
+    """A blank line or a comment-only line."""
+    s = raw.strip()
+    return not s or s.startswith("#")
+
+
+def _native(lines, i, end, native, native_at):
     """Reads native:'s block from line index i; returns the index after it."""
     base = inner = tool = None
     while i < end:
         raw = lines[i]
-        if raw.strip() and raw[0] not in " \t":
-            break
-        if not raw.strip():
+        if _skip(raw):
             i += 1
             continue
+        if raw[0] not in " \t":
+            break
         ind = len(raw) - len(raw.lstrip())
         if base is None:
             base = ind
@@ -64,6 +82,7 @@ def _native(lines, i, end, native):
                 raise AgentError(i + 1, "native: expects '<tool>:' lines, each with that tool's lines indented under it")
             tool, inner = m.group(1), None
             native.setdefault(tool, [])
+            native_at.setdefault(tool, i + 1)
         elif ind < base:
             raise AgentError(i + 1, "native: lines don't line up")
         else:
@@ -77,9 +96,10 @@ def _native(lines, i, end, native):
 
 
 def parse(path):
-    """(fields, native, body). fields: key -> (value, line); native: tool -> [(text, line)]."""
+    """(fields, native, native_at, body). fields: key -> (value, line), value None when the key is
+    there but empty; native: tool -> [(text, line)]; native_at: tool -> the line of its '<tool>:'."""
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             lines = fh.read().split("\n")
     except (OSError, UnicodeDecodeError) as e:
         raise AgentError(1, "can't read it (%s)" % e)
@@ -88,12 +108,12 @@ def parse(path):
     end = next((i for i in range(1, len(lines)) if lines[i].rstrip() == "---"), None)
     if end is None:
         raise AgentError(1, "the frontmatter isn't closed with a --- line")
-    fields, native = {}, {}
+    fields, native, native_at = {}, {}, {}
     i = 1
     while i < end:
         raw, n = lines[i], i + 1
         s = raw.rstrip()
-        if not s.strip() or s.lstrip().startswith("#"):
+        if _skip(s):
             i += 1
             continue
         if raw[0] in " \t":
@@ -108,7 +128,7 @@ def parse(path):
         if key == "native":
             if val:
                 raise AgentError(n, "native: takes an indented block per tool")
-            i = _native(lines, i, end, native)
+            i = _native(lines, i, end, native, native_at)
             continue
         if val in (">", "|", ">-", "|-"):
             parts = []
@@ -121,11 +141,28 @@ def parse(path):
                 fields[key] = ("\n".join(parts).strip("\n"), n)
             continue
         if val == "":
-            items = []
-            while i < end and re.match(r"^\s+-\s", lines[i] + " "):
-                items.append(scalar(strip_comment(re.sub(r"^\s+-\s*", "", lines[i].rstrip()))))
+            items, j = [], i
+            while j < end:
+                if _skip(lines[j]):
+                    j += 1
+                    continue
+                if not re.match(r"^\s*-(\s|$)", lines[j]):
+                    break
+                items.append(scalar(strip_comment(re.sub(r"^\s*-", "", lines[j].rstrip()))))
+                j += 1
+                i = j
+            if items:
+                fields[key] = (items, n)
+                continue
+            parts = []
+            while i < end and (_skip(lines[i]) or lines[i][0] in " \t"):
+                if not _skip(lines[i]):
+                    parts.append(strip_comment(lines[i]))
                 i += 1
-            fields[key] = (items, n) if items else ("", n)
+            if len(parts) == 1:
+                fields[key] = (scalar(parts[0]), n)
+            else:
+                fields[key] = (" ".join(parts) if parts else None, n)
             continue
         if val.startswith("["):
             if not val.endswith("]"):
@@ -135,7 +172,7 @@ def parse(path):
             continue
         fields[key] = (scalar(val), n)
     body = "\n".join(lines[end + 1:]).strip("\n")
-    return fields, native, body
+    return fields, native, native_at, body
 
 
 TOOLS = ("claude", "copilot", "cursor", "codex", "gemini")
@@ -157,8 +194,9 @@ TOOL_NAMES = {
 MCP_NAME = {"claude": "mcp__%s", "copilot": "%s/*", "gemini": "mcp_%s_*"}
 ESCALATION = {
     "claude": re.compile(r"^\s*permissionMode\s*:\s*[\"']?(bypassPermissions|dontAsk)\b"),
-    "codex": re.compile(r"^\s*(sandbox_mode\s*=\s*[\"']danger-full-access|approval_policy\s*=\s*[\"']never)"),
+    "codex": re.compile(r"^\s*(sandbox_mode\s*=\s*[\"']danger-full-access|approval_policy\s*=\s*[\"']never[\"'])"),
 }
+# Gemini agent names must match this; the caller (sync) skips gemini for an agent whose name doesn't.
 GEMINI_NAME = re.compile(r"^[a-z0-9_-]+$")
 
 
@@ -174,7 +212,7 @@ class Agent(object):
         self.model_line = 1
         self.native = {}
         try:
-            fields, native, body = parse(path)
+            fields, native, native_at, body = parse(path)
         except AgentError as e:
             self.errors.append((e.line, e.msg))
             return
@@ -187,7 +225,7 @@ class Agent(object):
             self.errors.append((n, "name '%s' doesn't match the file name '%s'" % (v, name)))
         v, n = get("description")
         if not isinstance(v, str) or not v.strip():
-            self.errors.append((1, "no description (every tool needs one to know when to use the agent)"))
+            self.errors.append((n, "no description (every tool needs one to know when to use the agent)"))
         else:
             self.description = v.strip()
         if not body.strip():
@@ -245,7 +283,7 @@ class Agent(object):
                     self.warnings.append((n, "targets: unknown tool '%s' (claude, copilot, cursor, codex, gemini)" % t))
         for tool, ls in sorted(native.items()):
             if tool not in TOOLS:
-                self.warnings.append((ls[0][1] - 1 if ls else 1, "native: unknown tool '%s'" % tool))
+                self.warnings.append((native_at.get(tool, 1), "native: unknown tool '%s'" % tool))
                 continue
             self.native[tool] = ls
             pat = ESCALATION.get(tool)
@@ -261,6 +299,14 @@ class Agent(object):
 
 def q(v):
     return json.dumps(v, ensure_ascii=False)
+
+
+def tq(v):
+    """A TOML basic string (JSON's escapes are valid TOML; DEL isn't allowed raw)."""
+    return q(v).replace("\x7f", "\\u007f")
+
+
+TOML_UNSAFE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\r(?!\n)")
 
 
 def qlist(xs):
@@ -311,13 +357,22 @@ def mapped_tools(agent, tool):
 
 
 def _native_keys(lines, toml):
+    """The top-level keys a tool's native: lines set (for TOML, the ones before the first [table])."""
     pat = r"^([A-Za-z_][\w.-]*)\s*=" if toml else r"^([A-Za-z_][\w-]*)\s*:"
-    return set(m.group(1) for m in (re.match(pat, t) for t, _ in lines) if m)
+    out = set()
+    for t, _ in lines:
+        if toml and t.startswith("["):
+            break
+        m = re.match(pat, t)
+        if m:
+            out.add(m.group(1))
+    return out
 
 
 def render(agent, tool, conf, source):
     """(text, missing, notes): the file for that tool, the fields it can't express, other warnings."""
     missing, notes = [], []
+    nk = _native_keys(agent.native.get(tool, []), tool == "codex")
     model = model_for(agent, tool, conf)
     effort = effort_for(agent, tool, conf, notes.append)
     keys = [("name", q(agent.name)), ("description", q(agent.description))]
@@ -328,13 +383,13 @@ def render(agent, tool, conf, source):
         ro, exact = coarse(agent)
         if not exact:
             missing.append("tools (it can only limit an agent to read-only, so this one gets every tool)")
-        if agent.mcp and agent.tools is not None:
+        if agent.mcp and (tool == "codex" or agent.tools is not None):
             missing.append("mcp (it can't limit an agent to some MCP servers)")
     if tool == "cursor" and effort and model:
         model = "%s[effort=%s]" % (model, effort)
-    elif tool == "cursor" and effort:
+    elif tool == "cursor" and effort and "model" not in nk:
         missing.append("effort (it goes in the model id, and no MODEL_%s_CURSOR is set)" % (agent.model or "<tier>").upper())
-    if tool == "codex" and effort == "max":
+    if tool == "codex" and effort == "max" and "model_reasoning_effort" not in nk:
         notes.append("effort: max becomes high for codex (its highest documented level)")
         effort = "high"
     if model and tool != "codex":
@@ -361,23 +416,22 @@ def render(agent, tool, conf, source):
     native = [t for t, _ in agent.native.get(tool, [])]
     head = MARK + source + "; edit the source, not this file"
     if tool == "codex":
-        nk = _native_keys(agent.native.get(tool, []), True)
         out = [head]
-        tk = [("name", q(agent.name)), ("description", q(agent.description))]
+        tk = [("name", tq(agent.name)), ("description", tq(agent.description))]
         if model:
-            tk.append(("model", q(model)))
+            tk.append(("model", tq(model)))
         if effort:
-            tk.append(("model_reasoning_effort", q(effort)))
+            tk.append(("model_reasoning_effort", tq(effort)))
         if coarse(agent)[0]:
-            tk.append(("sandbox_mode", q("read-only")))
+            tk.append(("sandbox_mode", tq("read-only")))
         out += ["%s = %s" % (k, v) for k, v in tk if k not in nk]
         if "developer_instructions" not in nk:
-            if "'''" in agent.body or agent.body.endswith("'"):
-                out.append("developer_instructions = " + q(agent.body))
+            b = agent.body
+            if "'''" in b or b.endswith("'") or TOML_UNSAFE.search(b):
+                out.append("developer_instructions = " + tq(b))
             else:
                 out.append("developer_instructions = '''\n" + agent.body + "\n'''")
         return "\n".join(out + native) + "\n", missing, notes
-    nk = _native_keys(agent.native.get(tool, []), False)
     out = ["---", head] + ["%s: %s" % (k, v) for k, v in keys if k not in nk] + native + ["---", agent.body]
     return "\n".join(out) + "\n", missing, notes
 
@@ -385,7 +439,7 @@ def render(agent, tool, conf, source):
 def _main(argv):
     if len(argv) == 3 and argv[1] == "parse":
         try:
-            fields, native, body = parse(argv[2])
+            fields, native, _, body = parse(argv[2])
         except AgentError as e:
             print("%s:%d: %s" % (argv[2], e.line, e.msg))
             return 1
