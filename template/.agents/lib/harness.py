@@ -11,6 +11,7 @@ re-render replaces exactly what the harness added and never touches anything els
   harness.py lock-skill <name> <source> <ref>        pin a third-party skill by content hash
   harness.py check-skills [<skill-set>]              verify pinned skills are unchanged
   harness.py unshare                                 strip harness entries from tracked configs
+  harness.py agents [--check] <agent-set> <renders-out>     render library agents for each tool
 """
 import fnmatch
 import hashlib
@@ -323,7 +324,8 @@ def render(check):
     lock = lock or {}
     prev_deny = lock.get("claude_deny", [])
     drift, errors, wrote = [], [], []
-    new_lock = {"claude_deny": prev_deny}
+    new_lock = dict(lock)   # keys other commands own (agents) pass through
+    new_lock["claude_deny"] = prev_deny
     local = conf.get("HARNESS_MODE", "team") == "local"
     notes = []
 
@@ -473,7 +475,54 @@ def unshare():
     for rel in (os.path.join(".github", "hooks", "harness.json"), os.path.join(".codex", "rules", "harness.rules")):
         if tracked(rel):
             print("untrack " + rel)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import agents_render
+    for rel in agents_render.marked_renders(ROOT):
+        if tracked(rel):
+            print("untrack " + rel)
     return 0
+
+
+def agents(check, set_path, out_path):
+    """Library agents, rendered per tool (.agents/lib/agents_render.py). Writes "personal<TAB>path" /
+    "shared<TAB>path" lines to out_path for sync's exclude block."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import agents_render
+    conf = load_conf()
+    rows = []
+    try:
+        with open(set_path, encoding="utf-8") as fh:
+            rows = [tuple(l.rstrip("\n").split("\t")) for l in fh if l.count("\t") == 2]
+    except OSError:
+        pass
+    lock, _ = read_json(LOCK)
+    lock = lock or {}
+    team = conf.get("HARNESS_MODE", "team") != "local"
+    res = agents_render.sync_agents(ROOT, conf, rows, check, tracked, lock.get("agents", {}), team)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        for rel, personal in res["renders"]:
+            fh.write("%s\t%s\n" % ("personal" if personal else "shared", rel))
+    new_lock = dict(lock)
+    if res["lock"]:
+        new_lock["agents"] = res["lock"]
+    else:
+        new_lock.pop("agents", None)
+    if new_lock != lock:
+        if check:
+            res["drift"].append(os.path.relpath(LOCK, ROOT))
+        else:
+            with open(LOCK, "w", encoding="utf-8") as fh:
+                fh.write(dump_json(new_lock))
+            res["wrote"].append("wrote " + os.path.relpath(LOCK, ROOT))
+    for w in res["wrote"]:
+        print("sync: " + w)
+    for d in res["drift"]:
+        print("sync: out of date: " + d)
+    for w in res["warnings"]:
+        print("sync: warning: " + w, file=sys.stderr)
+    for e in res["errors"]:
+        print("sync: error: " + e, file=sys.stderr)
+    return 1 if (res["drift"] or (check and res["errors"])) else (2 if res["errors"] else 0)
 
 
 # ------------------------------------------------------------------ skills lock
@@ -581,6 +630,12 @@ def main(argv):
         return check_skills(argv[2] if len(argv) > 2 else None)
     if cmd == "unshare":
         return unshare()
+    if cmd == "agents" and len(argv) in (4, 5):
+        a = argv[2:]
+        chk = a[0] == "--check"
+        a = a[1:] if chk else a
+        if len(a) == 2:
+            return agents(chk, a[0], a[1])
     if cmd == "resolve" and len(argv) in (3, 4):
         # The resolver is bash (verify and git hooks run without python3); this just asks it.
         return subprocess.call(["bash", LIBRARIES, "resolve"] + argv[2:], env=dict(os.environ, AGENTS_ROOT=ROOT))

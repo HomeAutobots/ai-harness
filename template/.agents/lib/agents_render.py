@@ -11,7 +11,9 @@ indentation, and a [a, b] item can't contain a comma (use "- a" lines for that).
   agents_render.py parse <file>      print the parsed agent as JSON (a debugging aid)
   agents_render.py render <tool> <file> [KEY=VALUE ...]   print one render (a debugging aid)
 """
+import hashlib
 import json
+import os
 import re
 import sys
 
@@ -436,6 +438,126 @@ def render(agent, tool, conf, source):
     return "\n".join(out) + "\n", missing, notes
 
 
+def marked(text):
+    """True if sync wrote it: the marker in its first lines."""
+    return any(l.startswith(MARK) for l in text.split("\n")[:3])
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def marked_renders(root):
+    """Every file in the agent render dirs that sync wrote, as repo-relative paths."""
+    out = []
+    for tool in TOOLS:
+        d = os.path.dirname(PATHS[tool])
+        suffix = PATHS[tool].split("%s", 1)[1]
+        full = os.path.join(root, d)
+        if not os.path.isdir(full):
+            continue
+        for f in sorted(os.listdir(full)):
+            rel = os.path.join(d, f)
+            if f.endswith(suffix) and os.path.isfile(os.path.join(root, rel)) and marked(_read(os.path.join(root, rel)) or ""):
+                out.append(rel)
+    return out
+
+
+def source_label(root, path, lib):
+    """Where an agent came from, as the marker shows it: a repo path, or library:agents/<file> for
+    one outside the repo (no home directories in committed files)."""
+    ap = os.path.abspath(path)
+    if ap.startswith(root + os.sep):
+        return os.path.relpath(ap, root)
+    parts = ap.split(os.sep)
+    tail = os.sep.join(parts[-4:]) if len(parts) > 4 and parts[-4] == "workflows" else os.sep.join(parts[-2:])
+    return "%s library: %s" % (lib, tail)
+
+
+def sync_agents(root, conf, rows, check, tracked, old_lock, team):
+    """Renders every agent for every enabled adapter.
+    rows: (name, path, library) from sync, winners only, in sync's order.
+    tracked(rel) -> bool. old_lock: {rel: sha256}. team: bool.
+    Returns dict: wrote, drift, warnings, errors (lists of str), lock ({rel: sha}), renders
+    ([(rel, personal)])."""
+    adapters = [a for a in TOOLS if a in (conf.get("ADAPTERS") or "").split()]
+    local = not team
+    res = {"wrote": [], "drift": [], "warnings": [], "errors": [], "lock": {}, "renders": []}
+    want = {}
+    for name, path, lib in rows:
+        shown = os.path.relpath(path, root) if os.path.abspath(path).startswith(root + os.sep) else path
+        agent = Agent(name, path, shown)
+        for ln, msg in agent.warnings:
+            res["warnings"].append("%s:%d: %s" % (shown, ln, msg))
+        if agent.errors:
+            for ln, msg in agent.errors:
+                res["errors"].append("%s:%d: %s; agent not rendered" % (shown, ln, msg))
+            continue
+        personal = lib in ("personal", "personal-listed")
+        missing = {}
+        for tool in adapters:
+            if not agent.wants(tool):
+                continue
+            if tool == "gemini" and not GEMINI_NAME.match(name):
+                res["warnings"].append("%s: gemini needs a name of lowercase letters, digits, - and _; not rendered "
+                                       "for gemini" % shown)
+                continue
+            text, miss, notes = render(agent, tool, conf, source_label(root, path, lib))
+            for m in miss:
+                missing.setdefault(m, []).append(tool)
+            for m in notes:
+                res["warnings"].append("%s: %s" % (shown, m))
+            want[PATHS[tool] % name] = (text, personal, shown, tool)
+        for m, ts in sorted(missing.items()):
+            res["warnings"].append("%s: %s: not supported by %s; they get the agent without it"
+                                   % (shown, m, ", ".join(ts)))
+    for rel in sorted(want):
+        text, personal, shown, tool = want[rel]
+        full = os.path.join(root, rel)
+        have = _read(full) if os.path.exists(full) else None
+        if local and tracked(rel):
+            res["warnings"].append("%s is tracked by the project; local mode leaves it alone" % rel)
+            continue
+        if os.path.exists(full) and (have is None or not marked(have)):
+            res["warnings"].append("%s wasn't made by sync, leaving it alone (the agent from %s isn't rendered for "
+                                   "%s)" % (rel, shown, tool))
+            continue
+        if team and personal and tracked(rel):
+            res["warnings"].append("your personal agent in %s isn't rendered for %s: the project tracks %s"
+                                   % (shown, tool, rel))
+            continue
+        res["renders"].append((rel, personal))
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if team and not personal:
+            res["lock"][rel] = digest
+        if have == text:
+            continue
+        if check:
+            res["drift"].append(rel)
+            continue
+        if have is not None and rel in old_lock and hashlib.sha256(have.encode("utf-8")).hexdigest() != old_lock[rel]:
+            res["warnings"].append("%s was edited by hand; sync rewrote it from %s (edit the source instead)" % (rel, shown))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        res["wrote"].append("wrote " + rel)
+    for rel in marked_renders(root):
+        if rel in want:
+            continue
+        if local and tracked(rel):
+            continue
+        if check:
+            res["drift"].append(rel + " (stale)")
+            continue
+        os.remove(os.path.join(root, rel))
+        res["wrote"].append("removed stale " + rel)
+    return res
+
+
 def _main(argv):
     if len(argv) == 3 and argv[1] == "parse":
         try:
@@ -449,7 +571,6 @@ def _main(argv):
         print(json.dumps(out, ensure_ascii=False, sort_keys=True))
         return 0
     if len(argv) >= 4 and argv[1] == "render" and argv[2] in TOOLS:
-        import os
         path = argv[3]
         name = os.path.basename(path)[:-3] if path.endswith(".md") else os.path.basename(path)
         conf = dict(a.split("=", 1) for a in argv[4:] if "=" in a)
