@@ -2069,6 +2069,50 @@ edit "$AG/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS=""|'
 out="$(cd "$AG" && bash .agents/lib/libraries.sh resolve agents)"
 tnot "an inactive workflow's agents don't resolve" hasl "$out" "flowbot"
 edit "$AG/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="agflow"|'
+if [ "$HAVE_PY" -eq 1 ]; then
+  AP="$AG/.agents/lib/agents_render.py"
+  cat > "$WORK/full.md" <<'EOF'
+---
+name: full
+description: >
+  Reviews a diff.
+  Use after a change.
+tools: [read, search, shell]   # neutral names
+model: strong
+effort: high
+skills:
+  - review-diff
+mcp: ["github"]
+max_turns: 30
+targets: [claude, codex]
+native:
+  claude:
+    color: blue
+    hooks:
+      Stop: []
+  codex:
+    model_reasoning_effort = "low"
+---
+You review diffs.
+
+Second paragraph.
+EOF
+  out="$(python3 "$AP" parse "$WORK/full.md")"
+  t    "parse: folded description"     hasl "$out" '"description": "Reviews a diff. Use after a change."'
+  t    "parse: flow list, comment stripped" hasl "$out" '"tools": ["read", "search", "shell"]'
+  t    "parse: block list"             hasl "$out" '"skills": ["review-diff"]'
+  t    "parse: quoted list item"       hasl "$out" '"mcp": ["github"]'
+  t    "parse: native lines kept with their nesting" hasl "$out" '"claude": ["color: blue", "hooks:", "  Stop: []"]'
+  t    "parse: native TOML lines kept" hasl "$out" '"codex": ["model_reasoning_effort = \"low\""]'
+  t    "parse: body"                   hasl "$out" '"body": "You review diffs.\n\nSecond paragraph."'
+  printf 'no frontmatter\n' > "$WORK/bad1.md"
+  out="$(python3 "$AP" parse "$WORK/bad1.md" 2>&1)" && rc=0 || rc=$?
+  t    "parse: no frontmatter is an error" test "$rc" = 1
+  t    "...with path:line"             hasl "$out" "bad1.md:1: "
+  printf -- '---\ndescription: x\ntools: [read\n---\nbody\n' > "$WORK/bad2.md"
+  out="$(python3 "$AP" parse "$WORK/bad2.md" 2>&1)" || true
+  t    "parse: an unclosed list names its line" hasl "$out" "bad2.md:3: "
+fi
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
