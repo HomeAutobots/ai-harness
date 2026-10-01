@@ -102,10 +102,12 @@ trap 'rm -f "$RAW" "$SHAPED" "$RAW.part"' EXIT
 
 # 1. Guard: new suppressions, skipped or deleted tests. Cheap, always first.
 GUARD_RC=0
+# Through bash when it's executable: macOS assesses a new executable on its first exec (seconds).
+GUARD=("$ROOT/.agents/bin/guard"); [ -x "${GUARD[0]}" ] && GUARD=(bash "${GUARD[0]}")
 if [ "$TIER" = edit ]; then
-  "$ROOT/.agents/bin/guard" "${FILES[@]}" >"$RAW.part" 2>&1 || GUARD_RC=$?
+  "${GUARD[@]}" "${FILES[@]}" >"$RAW.part" 2>&1 || GUARD_RC=$?
 else
-  "$ROOT/.agents/bin/guard" >"$RAW.part" 2>&1 || GUARD_RC=$?
+  "${GUARD[@]}" >"$RAW.part" 2>&1 || GUARD_RC=$?
 fi
 [ "$GUARD_RC" -ne 0 ] && cat "$RAW.part" >> "$RAW"
 

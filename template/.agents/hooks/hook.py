@@ -114,6 +114,14 @@ def session_key(data):
     return hashlib.sha1(sid.encode()).hexdigest()[:12]
 
 
+def harness_cmd(name, *args):
+    """Command line for one of the harness's own bash scripts in .agents/bin. Through bash when it's
+    executable (what its shebang runs anyway): macOS assesses a newly written executable on its
+    first exec, which can take longer than a hook's budget. Not executable: exec'd as before."""
+    path = os.path.join(ROOT, ".agents", "bin", name)
+    return (["bash", path] if os.access(path, os.X_OK) else [path]) + list(args)
+
+
 def git(*args):
     try:
         return subprocess.run(["git"] + list(args), cwd=ROOT, capture_output=True, timeout=30).stdout
@@ -258,7 +266,7 @@ def shell_denied(cmd, rules, cwd=None, parent=None):
         for seg in segments(cmd):
             if re.match(r"^(git|gh|glab|\.agents/bin/gitflow|gitflow)(\s|$)", seg):
                 try:
-                    p = subprocess.run([gitflow, "check-cmd", seg], cwd=ROOT, capture_output=True, text=True, timeout=15)
+                    p = subprocess.run(harness_cmd("gitflow", "check-cmd", seg), cwd=ROOT, capture_output=True, text=True, timeout=15)
                 except (OSError, subprocess.SubprocessError):
                     continue
                 if p.returncode == 2:
@@ -381,7 +389,7 @@ def post_edit(tool, data, conf):
     if not files:
         return 0
     budget = int(conf.get("EDIT_BUDGET", "15") or 15) + 10
-    rc, out = run_tool([os.path.join(ROOT, ".agents", "bin", "check")] + files, budget)
+    rc, out = run_tool(harness_cmd("check", *files), budget)
     log_event(tool, "post-edit", str(rc), " ".join(files))
     if rc not in (1, 2):
         return 0
@@ -430,7 +438,7 @@ def stop_gate(tool, data, conf):
                                   "run .agents/bin/verify to see what is left." % blocks)
 
     budget = int(conf.get("TURN_BUDGET", "300") or 300) + 30
-    rc, out = run_tool([os.path.join(ROOT, ".agents", "bin", "verify"), "--tier=turn"], budget)
+    rc, out = run_tool(harness_cmd("verify", "--tier=turn"), budget)
     log_event(tool, "stop-gate", str(rc))
     if rc == 0:
         write_file(counter, "0")
@@ -530,7 +538,7 @@ def answer_texts(data, questions):
 
 def tasks_cli(*args):
     try:
-        p = subprocess.run([os.path.join(ROOT, ".agents", "bin", "tasks")] + list(args), cwd=ROOT,
+        p = subprocess.run(harness_cmd("tasks", *args), cwd=ROOT,
                            capture_output=True, text=True, timeout=20)
         return p.returncode, p.stdout
     except (OSError, subprocess.SubprocessError):
