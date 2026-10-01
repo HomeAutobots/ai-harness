@@ -171,6 +171,20 @@ Search order; the first library with a name wins:
 - **Only real items count.** A skill needs `SKILL.md`; a workflow needs at least one of `checks/` holding a file, `skill/SKILL.md`, `agents/`, `mcp/`, `bin/`, a non-empty `harness.conf.snippet` or `policy.conf.snippet`, or `seed/` holding a file (so a policy-only pack works); a stack needs `lib.sh` or `checks/` holding a file. Anything else with a name (an empty `~/.config/ai-harness/workflows/feature-driven/`, say) is ignored, so it can't shadow the working one further down, and `sync` warns: `<path> isn't a usable workflow (no checks/ with a file, skill/SKILL.md, agents/, mcp/, bin/, a snippet, or seed/ with a file); ignored`.
 - **A project-listed library that isn't here** (missing, or an empty directory, which is what an uninitialized submodule looks like) is a tooling problem, not "no such library". `sync` keeps the renders that may have come from it instead of removing them as stale or pointing them at a built-in or a library listed after it, so nobody commits that change, and warns: `LIBRARIES lists vendor/team, which isn't here (an uninitialized submodule?); its skills keep their committed renders until it's back`. `sync --check` fails with `infra: LIBRARIES lists vendor/team, which isn't here`, so CI notices. While it's missing, an active workflow or stack that doesn't resolve might be in it: `verify` reports `infra: workflow '<name>' isn't available: LIBRARIES lists vendor/team, which isn't here` and exits 3, and `gitflow` treats that workflow's commit-message check the same way (exit 3, once per run in `gitflow check` and pre-push), so commits are blocked (the fail-closed rule for commit-message checks) until the library is checked out.
 - **Nothing configured, nothing changes.** No `LIBRARIES` means none; no personal dir means none. A personal-listed directory that doesn't exist is skipped, and `sync` warns about it; teammates never have your personal libraries, so `verify` and `gitflow` stay quiet about them.
+- **Agents render per tool.** `agents/<name>.md` in a library (yours, project-listed, personal, or an active workflow pack's own `agents/`) is a neutral agent: name, description, tools, a model tier, and effort, rendered by `sync` into each enabled adapter's own format (`.claude/agents`, `.github/agents`, `.cursor/agents`, `.codex/agents`, `.gemini/agents`). Write it once; every tool gets its own file.
+
+  ```markdown
+  ---
+  name: reviewer
+  description: Reviews a diff for correctness bugs. Use after implementing a change.
+  tools: [read, search, shell]
+  model: strong
+  ---
+  Body: the prompt.
+  ```
+
+  Model tiers and effort map per tool through `MODEL_<TIER>_<TOOL>` / `EFFORT_<TIER>_<TOOL>` in `.agents/harness.conf` (missing: inherit). Personal agents never land in a shared repo, same as personal skills. See `.agents/library/README.md` for the full format, including `native:` lines for a tool's own fields and the escalation warning.
+- **Pack commands.** An active workflow pack's `bin/<name>` commands get a stable wrapper at `.agents/commands/<name>` that runs the pack from wherever its library resolves, so the path is the same on every machine (e.g. `.agents/commands/fdd` for feature-driven).
 
 Example: a personal skill and workflow for every project:
 
@@ -298,8 +312,13 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - In team mode, an active workflow that's both built in and in your personal library renders the built-in skill, but `verify` and `gitflow` run the personal pack's checks, since runtime lookup keeps the plain search order. `sync` says so in one message ("your personal workflow 'x' runs its checks here, but team mode renders the skill from the builtin library").
 - `eval`'s harness arms (B and C) still see your personal library, so personal skills and workflows can skew results between developers. Point `AGENTS_PERSONAL_DIR` at an empty directory for a clean run.
 - Library paths can't contain spaces (`LIBRARIES` is space-separated).
-- Renders are recognized as links into a library or marked copies in `.agents/skills/`; recording each render with its source in `.agents/generated.lock` is planned for when agents are rendered from libraries (phase 2).
+- Skill renders are recognized as links into a library or marked copies in `.agents/skills/`, not by an entry in `.agents/generated.lock` the way agent renders are.
 - feature-driven checks don't see every place a private feature ID can reach shared history: branch summaries (`gitflow start PROJ-123 <summary>`), plan titles that go into PR bodies, and code committed before a turn gate ran (`fdd-leak` only reads uncommitted changes).
+- VS Code reads both `.claude/agents` and `.github/agents`; with the claude and copilot adapters on, it may list an agent twice.
+- Codex loads project `.codex/` config only in a trusted project, and openai/codex#14579 reports project agents may not be callable by name.
+- Copilot's cloud agent sees only committed agents; personal agents and local mode don't reach it.
+- Cursor and Codex can limit an agent only to read-only; Codex effort values past high and Cursor's `[effort=...]` values beyond high aren't documented.
+- Per-agent MCP servers: Claude takes server names; Codex and Cursor can't limit them (phase 3 renders MCP servers themselves).
 
 ## Roadmap
 

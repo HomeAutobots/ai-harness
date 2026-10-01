@@ -16,10 +16,11 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `bin/tasks` | harness | Plan ledger CLI (`plans/<slug>/tasks.json`) |
 | `bin/eval` | harness | Replays real fixes to measure whether the harness helps |
 | `bin/gitflow` | harness | The repo's git workflow: branch, commit, update, push, PR, review, merge, checks |
-| `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, hook adapter |
+| `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, `agents_render.py` (per-tool agent renderer), hook adapter |
 | `builtin/` | harness | The built-in library: the harness's skills and its workflow and stack packs (e.g. req-driven, cpp-cmake), rebuilt on every install |
 | `library/` | project | Your library: `skills/`, `workflows/`, `stacks/`. Upgrades never touch it. Also searched: `LIBRARIES` in `harness.conf`, your personal `~/.config/ai-harness/` |
 | `skills/` | sync | Every resolved skill, rendered (links, or copies with `LINK_MODE=copy`). Don't edit here; a skill added by hand moves to `library/skills/` |
+| `commands/` | sync | One wrapper per `bin/<name>` command of each active workflow pack (e.g. `commands/fdd`); finds the pack at run time |
 | `stacks/<name>/lib.sh` | harness | Shim the tier scripts source; loads the stack pack from its library |
 | files a workflow pack seeds | project | Created once from the pack's `seed/` (e.g. a `.gitignore` for its local working files); a deleted one comes back on the next install |
 | `checks/{edit,turn,full}.sh` | project | What each tier actually runs. Tailor these. |
