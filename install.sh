@@ -264,6 +264,12 @@ fi
 EOF
 }
 
+# local_tracked <path>: local mode never moves, rewrites, or deletes what the project tracks, except
+# on a switch from team mode, where it's the harness's own files (untracked below).
+local_tracked() {
+  { [ "$MODE" = local ] && [ "$SWITCH" != local ]; } || return 1
+  [ -n "$(git -C "$DEST" ls-files -- "$1" 2>/dev/null | head -n 1)" ]
+}
 # stack_refs <name> <now-in>: once .agents/stacks/<name>/ keeps only the shim, each line elsewhere in
 # the project that points at another file in it (a tier script, a CI config) gets a path:line warning.
 stack_refs() {
@@ -295,6 +301,8 @@ if [ -d "$DEST/.agents/workflows" ]; then
     w="$(basename "$d")"
     if ! agents_valid_name "$w" || [ -L "${d%/}" ]; then
       say "warning: .agents/workflows/$w isn't a plain pack directory with a valid name; left in place, move it into .agents/library/workflows/ yourself"
+    elif local_tracked ".agents/workflows/$w"; then
+      say "warning: the project tracks files in .agents/workflows/$w; local mode leaves it in place (move it into .agents/library/workflows/ yourself, in a commit)"
     elif [ -d "$HARNESS/workflows/$w" ]; then
       # The old layout copied the pack without its skill, seed files, and config snippets.
       if shipped_copy "$HARNESS/workflows/$w" "${d%/}" -x skill -x seed -x harness.conf.snippet -x policy.conf.snippet; then
@@ -326,6 +334,10 @@ for d in "$DEST"/.agents/library/workflows/*/; do
   w="$(basename "$d")"; s="$DEST/.agents/skills/$w"
   case " $(conf_list WORKFLOWS) $NEW_WORKFLOWS " in *" $w "*) ;; *) continue ;; esac
   if [ -f "$s/SKILL.md" ] && [ ! -L "$s" ] && [ ! -f "$s/.harness-copy" ] && [ ! -e "${d}skill" ]; then
+    if local_tracked ".agents/skills/$w"; then
+      say "warning: the project tracks .agents/skills/$w; local mode leaves it in place instead of moving it to .agents/library/workflows/$w/skill"
+      continue
+    fi
     repath "$s" ".agents/workflows/$w" ".agents/library/workflows/$w"
     mv "$s" "${d}skill"
     migrated "moved .agents/skills/$w to .agents/library/workflows/$w/skill"
@@ -338,6 +350,8 @@ if [ -d "$DEST/.agents/stacks" ]; then
     if grep -qF "$STACK_SHIM_MARK" "${d}lib.sh" 2>/dev/null; then continue; fi
     if ! agents_valid_name "$s" || [ -L "${d%/}" ]; then
       say "warning: .agents/stacks/$s isn't a plain pack directory with a valid name; left in place, move it into .agents/library/stacks/ yourself"
+    elif local_tracked ".agents/stacks/$s"; then
+      say "warning: the project tracks files in .agents/stacks/$s; local mode leaves it in place (move it into .agents/library/stacks/ yourself, in a commit)"
     elif [ -d "$HARNESS/stacks/$s" ]; then
       shipped_copy "$HARNESS/stacks/$s" "${d%/}" || set_aside stacks "$DEST/.agents/stacks/$s"
       write_stack_shim "$s"

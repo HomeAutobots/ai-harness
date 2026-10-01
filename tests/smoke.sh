@@ -2703,6 +2703,25 @@ mkdir -p "$HSL/.agents/stacks/mine"; printf 'mine_ok() { :; }\n' > "$HSL/.agents
 printf '#!/usr/bin/env bash\npython3 .agents/stacks/mine/tool.py\n' > "$HSL/.agents/checks/turn.sh"
 out="$("$HARNESS/install.sh" "$HSL" 2>&1)"
 t    "local mode: tier scripts hidden from git are read too" hasl "$out" "install: warning: .agents/checks/turn.sh:2: points into .agents/stacks/mine/"
+HT=$(repo hardtracked)
+"$HARNESS/install.sh" "$HT" >/dev/null 2>&1
+oldlayout "$HT"; handmade "$HT"
+mkdir -p "$HT/.agents/stacks/mine"; printf 'mine_ok() { :; }\n' > "$HT/.agents/stacks/mine/lib.sh"
+git -C "$HT" add -f .agents/workflows/handmade .agents/stacks/mine .agents/stacks/cpp-cmake; commit "$HT" "tracked packs"
+cp -R "$HT/.agents/workflows/handmade" "$WORK/hardtracked-before"
+out="$("$HARNESS/install.sh" "$HT" 2>&1)"
+t    "local mode leaves a tracked old-layout pack in place, unchanged" diff -r "$WORK/hardtracked-before" "$HT/.agents/workflows/handmade"
+t    "...and says so"                  hasl "$out" "install: warning: the project tracks files in .agents/workflows/handmade; local mode leaves it in place"
+t    "...tracked stacks too"           bash -c "grep -qx 'mine_ok() { :; }' '$HT/.agents/stacks/mine/lib.sh' && test -f '$HT/.agents/stacks/cpp-cmake/cpp_tools.py'"
+t    "...with a warning each"          bash -c "printf '%s' \"\$1\" | grep -qF 'the project tracks files in .agents/stacks/mine;' && printf '%s' \"\$1\" | grep -qF 'the project tracks files in .agents/stacks/cpp-cmake;'" _ "$out"
+t    "...and git status stays clean"   test -z "$(git -C "$HT" status --porcelain)"
+HU=$(repo hardtrackedskill)
+"$HARNESS/install.sh" "$HU" >/dev/null 2>&1
+oldlayout "$HU"; handmade "$HU"
+git -C "$HU" add -f .agents/skills/handmade; commit "$HU" "a tracked pack skill"
+out="$("$HARNESS/install.sh" "$HU" 2>&1)"
+t    "local mode: an untracked pack moves, but its tracked skill stays" bash -c "test -d '$HU/.agents/library/workflows/handmade' && test ! -e '$HU/.agents/library/workflows/handmade/skill' && grep -q 'Run .agents/workflows/handmade/rule.sh first.' '$HU/.agents/skills/handmade/SKILL.md'"
+t    "...and git status stays clean"   test -z "$(git -C "$HU" status --porcelain)"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
