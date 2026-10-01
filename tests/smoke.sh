@@ -324,6 +324,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 
 echo "git workflow (gitflow)"
+SAVED_PERSONAL_DIR="$AGENTS_PERSONAL_DIR"; unset AGENTS_PERSONAL_DIR   # this section uses the XDG default
 export XDG_CONFIG_HOME="$WORK/xdg"
 mkdir -p "$XDG_CONFIG_HOME/ai-harness"
 printf 'GIT_PR_TOOL="gh"\nGIT_MERGE_METHOD="rebase"\nGIT_AGENT_MAY="branch commit push pr merge"\n' > "$XDG_CONFIG_HOME/ai-harness/git.conf"
@@ -336,6 +337,8 @@ git -C "$R" checkout -q -b develop && git -C "$R" push -q origin develop && git 
 "$HARNESS/install.sh" --team "$R" >/dev/null 2>&1
 t    "no git hooks without rules"      test ! -e "$R/.git/hooks/commit-msg"
 t    "personal layer applies"          bash -c "cd '$R' && .agents/bin/gitflow config | grep -q '^GIT_MERGE_METHOD *rebase'"
+mkdir -p "$WORK/pers-git"; printf 'GIT_MERGE_METHOD="merge"\n' > "$WORK/pers-git/git.conf"
+t    "AGENTS_PERSONAL_DIR holds the personal git.conf" bash -c "cd '$R' && AGENTS_PERSONAL_DIR='$WORK/pers-git' .agents/bin/gitflow config > '$WORK/pers-git.out' && grep -q '^GIT_MERGE_METHOD *merge' '$WORK/pers-git.out' && grep -qF 'sources: defaults, $WORK/pers-git/git.conf' '$WORK/pers-git.out'"
 tnot "personal layer not rendered"     grep -q 'Bash(git push:\*)' "$R/.claude/settings.json"
 cat >> "$R/.agents/git.conf" <<'EOF'
 GIT_BASE="develop"
@@ -394,6 +397,7 @@ printf 'GIT_COMMIT="{summary}"\nGIT_COMMIT_PATTERN="^.{5,}$"\n' >> "$H/.agents/g
 t    "respects existing hooksPath"     bash -c "cd '$H' && .agents/bin/gitflow install-hooks | grep -q 'core.hooksPath is .husky'"
 t    "no hooks written there"          test ! -e "$H/.git/hooks/commit-msg"
 unset XDG_CONFIG_HOME
+export AGENTS_PERSONAL_DIR="$SAVED_PERSONAL_DIR"
 
 echo "absence: no flow configured"
 git init -q --bare "$WORK/trunk.git"
@@ -1857,6 +1861,33 @@ edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
 t    "an in-repo listed library: sync --check clean" "$UL/.agents/bin/sync" --check
 printf 'Sneaky\342\200\213 text.\n' >> "$UL/vendor/lib/skills/libbed/SKILL.md"
 tnot "invisible Unicode in an in-repo listed library fails --check" "$UL/.agents/bin/sync" --check
+
+echo "a personal workflow over a built-in one"
+PO="$WORK/pers-over"; mkdir -p "$PO/workflows/req-driven/checks"
+printf '#!/usr/bin/env bash\ngrep -q OVER-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [over] mine"; exit 1; }\nexit 0\n' > "$PO/workflows/req-driven/checks/turn.sh"
+OL=$(repo overlocal)
+AGENTS_PERSONAL_DIR="$PO" "$HARNESS/install.sh" --workflow req-driven "$OL" >/dev/null 2>&1
+tnot "local: a winning pack with no skill/ renders no skill" bash -c "test -e '$OL/.agents/skills/req-driven' || test -L '$OL/.agents/skills/req-driven'"
+mkdir -p "$PO/workflows/req-driven/skill"; printf -- '---\nname: req-driven\ndescription: My req flow.\n---\n' > "$PO/workflows/req-driven/skill/SKILL.md"
+AGENTS_PERSONAL_DIR="$PO" "$OL/.agents/bin/sync" >/dev/null 2>&1
+t    "local: the winning pack's skill renders" test "$(readlink "$OL/.agents/skills/req-driven")" = "$PO/workflows/req-driven/skill"
+rm -rf "$PO/workflows/req-driven/skill"
+OT=$(repo overteam)
+out="$(AGENTS_PERSONAL_DIR="$PO" "$HARNESS/install.sh" --team --workflow req-driven "$OT" 2>&1)"
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$OT/.agents/checks/$tier.sh"; done
+t    "team: the shared skill renders even when the personal pack has none" test "$(readlink "$OT/.agents/skills/req-driven")" = ../../.agents/builtin/workflows/req-driven/skill
+t    "...sync says the personal checks run but the shared skill renders" hasl "$out" "your personal workflow 'req-driven' runs its checks here, but team mode renders the skill from the builtin library"
+tnot "...not that teammates skip its checks" hasl "$out" "workflow 'req-driven' comes from your personal library"
+echo OVER-BAD > "$OT/notes.txt"
+t    "...and the personal checks do run" bash -c "AGENTS_PERSONAL_DIR='$PO' '$OT/.agents/bin/verify' | grep -qF '[over]'"
+rm -f "$OT/notes.txt"
+mkdir -p "$PO/workflows/req-driven/skill"; printf -- '---\nname: req-driven\ndescription: My req flow.\n---\n' > "$PO/workflows/req-driven/skill/SKILL.md"
+out="$(AGENTS_PERSONAL_DIR="$PO" "$OT/.agents/bin/sync" 2>&1)"
+t    "team: the shared skill still renders when the personal pack has one" test "$(readlink "$OT/.agents/skills/req-driven")" = ../../.agents/builtin/workflows/req-driven/skill
+t    "...with the one message"         hasl "$out" "your personal workflow 'req-driven' runs its checks here, but team mode renders the skill from the builtin library"
+tnot "...not a second one about the skill" hasl "$out" "your personal skill 'req-driven'"
+commit "$OT" harness
+t    "...and git status stays clean"   test -z "$(git -C "$OT" status --porcelain)"
 
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "evals with a library kept inside the repo"

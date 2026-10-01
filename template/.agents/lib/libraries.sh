@@ -11,13 +11,14 @@
 #   builtin          .agents/builtin/, what the harness ships (AGENTS_BUILTIN_DIR overrides)
 # Directories that don't exist are skipped, and each directory counts once. Workflows and stacks
 # are used only when named in WORKFLOWS / STACKS in .agents/harness.conf; an active workflow's
-# skill/ joins the skills under the workflow's name, after every library's own skills.
+# skill/ joins the skills under the workflow's name, from the winning pack only, after every
+# library's own skills.
 #
 # Sourced by sync, verify and check scripts (through feedback.sh), gitflow, the stack shims, and
 # install.sh. As a command (harness.py resolve runs it):
 #   bash .agents/lib/libraries.sh libraries               source<TAB>path, in search order
 #   bash .agents/lib/libraries.sh resolve <kind> [name]   name<TAB>path<TAB>source, winners only
-#   bash .agents/lib/libraries.sh items <kind>            every item in search order, shadowed too
+#   bash .agents/lib/libraries.sh items <kind> [team]     every item in search order, shadowed too
 #   bash .agents/lib/libraries.sh shadows <kind>          name, winner source and path, shadowed source and path
 # Kinds: skills workflows stacks agents mcp. Config files are parsed, never sourced (git hooks
 # run this), and LIBRARIES is space-separated, so a library path can't contain spaces.
@@ -126,10 +127,23 @@ agents_lib_items() {
   return 0
 }
 
-# agents_items <kind>: agents_lib_items, plus for skills each active workflow's skill/, from every
-# library that has that workflow, after all the libraries' own skills
+# agents_shared_workflow <name>: source<TAB>path of the first shared (not personal) library that
+# has that workflow, the pack teammates and CI resolve to; 1 if none
+agents_shared_workflow() {
+  local src lib
+  while IFS="$AGENTS_TAB" read -r src lib; do
+    case "$src" in personal|personal-listed) continue ;; esac
+    if [ -d "$lib/workflows/$1" ]; then printf '%s\t%s\n' "$src" "$lib/workflows/$1"; return 0; fi
+  done < <(agents_libraries)
+  return 1
+}
+
+# agents_items <kind> [team]: agents_lib_items, plus for skills each active workflow's skill/, after
+# all the libraries' own skills. The skill comes from the pack that wins for that workflow (the
+# one whose checks run), never from a pack it shadows. With "team", a personal pack that wins
+# also brings the skill of the shared pack it shadows (team mode renders that one: it's committed).
 agents_items() {
-  local w src lib restoreglob=0
+  local w line wpath wsrc shared restoreglob=0
   agents_lib_items "$1" || return $?
   [ "$1" = skills ] || return 0
   # WORKFLOWS is split unquoted below; noglob until it's done, restored only if we turned it on
@@ -137,11 +151,15 @@ agents_items() {
   case $- in *f*) ;; *) set -f; restoreglob=1 ;; esac
   for w in $(agents_conf_get "$AGENTS_ROOT/.agents/harness.conf" WORKFLOWS); do
     agents_valid_name "$w" || continue
-    while IFS="$AGENTS_TAB" read -r src lib; do
-      if [ -f "$lib/workflows/$w/skill/SKILL.md" ]; then
-        printf '%s\t%s\t%s\n' "$w" "$lib/workflows/$w/skill" "$src"
-      fi
-    done < <(agents_libraries)
+    line="$(agents_lookup workflows "$w")" || continue
+    wsrc="${line##*"$AGENTS_TAB"}"; wpath="${line#*"$AGENTS_TAB"}"; wpath="${wpath%"$AGENTS_TAB"*}"
+    if [ -f "$wpath/skill/SKILL.md" ]; then printf '%s\t%s\t%s\n' "$w" "$wpath/skill" "$wsrc"; fi
+    [ "${2:-}" = team ] || continue
+    case "$wsrc" in personal|personal-listed) ;; *) continue ;; esac
+    shared="$(agents_shared_workflow "$w")" || continue
+    if [ -f "${shared#*"$AGENTS_TAB"}/skill/SKILL.md" ]; then
+      printf '%s\t%s\t%s\n' "$w" "${shared#*"$AGENTS_TAB"}/skill" "${shared%%"$AGENTS_TAB"*}"
+    fi
   done
   [ "$restoreglob" = 1 ] && set +f
   return 0
@@ -201,10 +219,10 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         *) echo "libraries.sh: unknown kind '${2:-}' (skills, workflows, stacks, agents, mcp)" >&2; exit 2 ;;
       esac
       case "$1" in
-        items) agents_items "$2" ;;
+        items) agents_items "$2" "${3:-}" ;;
         shadows) agents_shadows "$2" ;;
         *) if [ -n "${3:-}" ]; then agents_lookup "$2" "$3"; else agents_resolve_all "$2"; fi ;;
       esac ;;
-    *) echo "usage: libraries.sh libraries | resolve <kind> [name] | items <kind> | shadows <kind>" >&2; exit 2 ;;
+    *) echo "usage: libraries.sh libraries | resolve <kind> [name] | items <kind> [team] | shadows <kind>" >&2; exit 2 ;;
   esac
 fi

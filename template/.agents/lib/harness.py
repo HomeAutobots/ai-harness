@@ -505,8 +505,9 @@ def read_skills_lock():
 
 
 def lock_skill(name, source, ref):
-    found = [(p, lib) for n, p, lib in resolve("skills", command="items") if n == name]
-    if load_conf().get("HARNESS_MODE", "team") != "local":
+    team = load_conf().get("HARNESS_MODE", "team") != "local"
+    found = [(p, lib) for n, p, lib in resolve("skills", "team" if team else None, command="items") if n == name]
+    if team:
         # Team mode renders (and checks) the shared copy, as sync does; skills.lock is committed.
         found = [f for f in found if f[1] not in PERSONAL] + [f for f in found if f[1] in PERSONAL]
         if found and found[0][1] in PERSONAL:

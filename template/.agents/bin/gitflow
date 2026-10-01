@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ai-harness: gitflow. Harness-owned: replaced on upgrade.
 # This repo's git workflow, driven entirely by config. Settings layer, last wins:
-#   harness defaults < ~/.config/ai-harness/git.conf (personal) < .agents/git.conf (project)
+#   harness defaults < ~/.config/ai-harness/git.conf (personal; AGENTS_PERSONAL_DIR moves it) < .agents/git.conf (project)
 # Humans and agents both use it. Which steps an agent may take itself is GIT_AGENT_MAY; the
 # policy hook enforces that, and the git hooks enforce the rest for everyone.
 #
@@ -68,7 +68,8 @@ GIT_PUSH_REQUIRES="full"        # verify tier that must pass before gitflow push
 GIT_LOCAL_HOOKS="auto"          # commit-msg and pre-push git hooks: auto (only when something here needs
                                 # enforcing), on, or off
 
-USER_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ai-harness/git.conf"
+# The personal dir is the resolver's (libraries.sh agents_personal_dir), spelled out so it works without it.
+USER_CONF="${AGENTS_PERSONAL_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/ai-harness}/git.conf"
 PROJECT_CONF="$ROOT/.agents/git.conf"
 SOURCES="defaults"
 

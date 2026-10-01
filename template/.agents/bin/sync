@@ -323,7 +323,7 @@ compute_skill_set() {
   local d n p lib
   # Team mode commits what it renders, and that can't depend on anyone's personal library: there
   # the shared ones (project, project-listed, built-in) come first and personal ones after them.
-  agents_items skills | awk -F '\t' -v team="$TEAM" '
+  if [ "$TEAM" -eq 1 ]; then agents_items skills team; else agents_items skills; fi | awk -F '\t' -v team="$TEAM" '
     team && ($3 == "personal" || $3 == "personal-listed") { held[++k] = $0; next }
     { print }
     END { for (i = 1; i <= k; i++) print held[i] }' > "$SKILL_ITEMS"
@@ -369,6 +369,11 @@ report_shadows() {  # report_shadows <kind> <ALL | active names>
     agents_shadows "$1"
   fi | while IFS="$TAB" read -r n ws wp lsrc lpath; do
     [ "$2" = ALL ] || case " $2 " in *" $n "*) ;; *) continue ;; esac
+    # Team mode, a personal workflow over a shared one: one message for both, from the loop below.
+    if [ "$TEAM" -eq 1 ] && personal "$lsrc" && ! personal "$ws"; then
+      case "$1:$lpath" in "skills:"*/workflows/"$n"/skill) continue ;; esac
+    fi
+    if [ "$TEAM" -eq 1 ] && [ "$1" = workflows ] && personal "$ws" && ! personal "$lsrc"; then continue; fi
     if [ "$TEAM" -eq 1 ] && [ "$1" = skills ] && personal "$lsrc" && ! personal "$ws"; then
       case "$told" in *" $n "*) continue ;; esac
       told="$told$n "
@@ -456,7 +461,18 @@ done
 if [ "$TEAM" -eq 1 ]; then
   for w in ${WORKFLOWS:-}; do
     l="$(agents_lookup workflows "$w")" || continue
-    if personal "${l##*"$TAB"}"; then warn "workflow '$w' comes from your personal library; teammates and CI without it skip its checks"; fi
+    personal "${l##*"$TAB"}" || continue
+    # Your pack runs here (the resolver's order), but what team mode renders is committed, so the
+    # skill comes from the shared pack everyone else runs.
+    if sw="$(agents_shared_workflow "$w")"; then
+      if [ -f "${sw#*"$TAB"}/skill/SKILL.md" ]; then
+        warn "your personal workflow '$w' runs its checks here, but team mode renders the skill from the ${sw%%"$TAB"*} library ($(shown "${sw#*"$TAB"}/skill")): the repo commits that one, and teammates and CI run that pack"
+      else
+        warn "your personal workflow '$w' runs its checks here; teammates and CI run the one from the ${sw%%"$TAB"*} library ($(shown "${sw#*"$TAB"}"))"
+      fi
+    else
+      warn "workflow '$w' comes from your personal library; teammates and CI without it skip its checks"
+    fi
   done
 fi
 set +f
