@@ -259,6 +259,7 @@ agents_shadows() {
 }
 
 # agents_lookup <kind> <name>: that name's winning line; 1 if no library has it, 2 for a bad kind
+# (agents: the libraries' own only; an active pack's agents come from agents_items, as sync uses)
 agents_lookup() {
   local kind="$1" name="$2" src lib p line
   agents_valid_name "$name" || return 1
