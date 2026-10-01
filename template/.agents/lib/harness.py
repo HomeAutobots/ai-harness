@@ -12,6 +12,7 @@ re-render replaces exactly what the harness added and never touches anything els
   harness.py check-skills [<skill-set>]              verify pinned skills are unchanged
   harness.py unshare                                 strip harness entries from tracked configs
   harness.py agents [--check] <agent-set> <renders-out>     render library agents for each tool
+                                                     (0 ok, 1 drift, 5 agent-file errors, 3 failed)
 """
 import fnmatch
 import hashlib
@@ -525,7 +526,9 @@ def agents(check, set_path, out_path):
         print("sync: warning: " + w, file=sys.stderr)
     for e in res["errors"]:
         print("sync: error: " + e, file=sys.stderr)
-    return 1 if (res["drift"] or res["errors"]) else 0
+    if res["errors"]:
+        return 5   # sync can't fix a broken agent file; drift lines above still count
+    return 1 if res["drift"] else 0
 
 
 # ------------------------------------------------------------------ skills lock
@@ -638,7 +641,12 @@ def main(argv):
         chk = a[0] == "--check"
         a = a[1:] if chk else a
         if len(a) == 2:
-            return agents(chk, a[0], a[1])
+            try:
+                return agents(chk, a[0], a[1])
+            except Exception:   # sync keeps the old exclude entries when this didn't finish
+                import traceback
+                traceback.print_exc()
+                return 3
     if cmd == "resolve" and len(argv) in (3, 4):
         # The resolver is bash (verify and git hooks run without python3); this just asks it.
         return subprocess.call(["bash", LIBRARIES, "resolve"] + argv[2:], env=dict(os.environ, AGENTS_ROOT=ROOT))

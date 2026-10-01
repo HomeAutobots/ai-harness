@@ -311,6 +311,9 @@ AGENT_ITEMS="$WORK/agents.items"   # every library's agents (and active packs'),
 AGENT_SET="$WORK/agents.set"       # what gets rendered: name<TAB>path<TAB>library
 AGENT_RENDERS="$WORK/agents.renders"   # from harness.py agents: shared|personal<TAB>render path
 : > "$AGENT_RENDERS"
+AGENTS_DONE=0      # harness.py agents finished, so AGENT_RENDERS is complete
+AGENT_FINDINGS=0   # --check: an agent file has errors (sync can't fix those)
+AGENT_FAILED=0     # --check: rendering agents didn't finish
 
 # A skill someone put straight into .agents/skills/ moves to the project library: that dir is
 # rendered now, and sync would otherwise remove what it didn't make.
@@ -787,16 +790,29 @@ if [ -n "$PY" ]; then
   awk -F '\t' '$3 != "kept"' "$SKILL_SET" > "$WORK/skills.checked"
   "$PY" .agents/lib/harness.py check-skills "$WORK/skills.checked" || DRIFT=1
   # Library agents, one render per adapter. With a project-listed library missing, renders that
-  # may be its own stay as committed until it's back.
+  # may be its own stay as committed until it's back. It returns 0 ok, 1 drift, 5 agent-file
+  # errors (drift lines still printed); anything else, or no renders file, means it didn't finish.
   AG_RC=0
-  if [ -s "$MISSING_LIBS" ]; then AGENTS_LIBRARY_MISSING=1; else AGENTS_LIBRARY_MISSING=0; fi
-  export AGENTS_LIBRARY_MISSING
+  agmiss=0
+  if [ -s "$MISSING_LIBS" ]; then agmiss=1; fi
+  rm -f "$AGENT_RENDERS"
   if [ "$CHECK" -eq 1 ]; then
-    "$PY" .agents/lib/harness.py agents --check "$AGENT_SET" "$AGENT_RENDERS" || AG_RC=$?
-    [ "$AG_RC" -eq 0 ] || DRIFT=1
+    AOUT="$(AGENTS_LIBRARY_MISSING="$agmiss" "$PY" .agents/lib/harness.py agents --check "$AGENT_SET" "$AGENT_RENDERS")" || AG_RC=$?
   else
-    AOUT="$("$PY" .agents/lib/harness.py agents "$AGENT_SET" "$AGENT_RENDERS")" || AG_RC=$?
-    [ -n "$AOUT" ] && { printf '%s\n' "$AOUT"; CHANGED=1; }
+    AOUT="$(AGENTS_LIBRARY_MISSING="$agmiss" "$PY" .agents/lib/harness.py agents "$AGENT_SET" "$AGENT_RENDERS")" || AG_RC=$?
+  fi
+  if [ -n "$AOUT" ]; then printf '%s\n' "$AOUT"; fi
+  case "$AG_RC" in 0|1|5) if [ -f "$AGENT_RENDERS" ]; then AGENTS_DONE=1; fi ;; esac
+  if [ "$AGENTS_DONE" -eq 0 ]; then
+    : > "$AGENT_RENDERS"
+    warn "rendering library agents failed (see above)"
+    if [ "$CHECK" -eq 1 ]; then AGENT_FAILED=1; fi
+  elif [ "$CHECK" -eq 1 ]; then
+    case "$AOUT" in *"sync: out of date: "*) DRIFT=1 ;; esac
+    if [ "$AG_RC" -eq 5 ]; then AGENT_FINDINGS=1; fi
+  else
+    if [ -n "$AOUT" ]; then CHANGED=1; fi
+    if [ "$AG_RC" -eq 5 ]; then warn "some library agents weren't rendered (see the errors above)"; fi
   fi
 else
   warn "python3 not found: hooks, permission rules, and library agents were not rendered. Install python3 and re-run."
@@ -817,6 +833,13 @@ exclude_block() {
   if [ "$LOCAL" -eq 0 ] && [ ! -s "$PERSONAL_LIST" ] && ! grep -q '^personal' "$AGENT_RENDERS" \
      && ! { [ -f "$ex" ] && grep -qxF "$EXCL_BEGIN" "$ex"; }; then return 0; fi
   : > "$WORK/exclude.list"
+  # Agents didn't render (no python3, or it failed): keep the block's agent entries as they are,
+  # so a personal render isn't left for git add -A and --check sees no false drift.
+  if [ "$AGENTS_DONE" -eq 0 ] && [ -f "$ex" ]; then
+    AGENTS_EXCL_PRE="/$pre" awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" '$0 == b { f = 1; next } $0 == e { f = 0 }
+      f { p = ENVIRON["AGENTS_EXCL_PRE"]; if (index($0, p) != 1) next
+          if (substr($0, length(p) + 1) ~ /^\.(claude|github|cursor|codex|gemini)\/agents\//) print }' "$ex" >> "$WORK/exclude.list"
+  fi
   if [ "$LOCAL" -eq 0 ]; then
     # Team mode: the block holds only the personal skills this clone renders, their mirrors, and
     # its personal agent renders.
@@ -932,8 +955,11 @@ todos=$(cat "$AGENTS_FILE" .agents/checks/*.sh 2>/dev/null | grep -c 'TODO(harne
   || warn "$todos TODO(harness-tailor) markers left. Ask your agent to run the harness-tailor skill."
 
 if [ "$CHECK" -eq 1 ]; then
-  if [ "$DRIFT" -eq 0 ] && [ "$INFRA" -eq 0 ]; then say "up to date"; exit 0; fi
+  if [ "$DRIFT" -eq 0 ] && [ "$INFRA" -eq 0 ] && [ "$AGENT_FINDINGS" -eq 0 ] && [ "$AGENT_FAILED" -eq 0 ]; then
+    say "up to date"; exit 0
+  fi
   [ "$INFRA" -eq 0 ] || say "check out the libraries LIBRARIES lists (git submodule update --init, say), then re-run"
+  [ "$AGENT_FINDINGS" -eq 0 ] || say "fix the agent files named above, then re-run"
   [ "$DRIFT" -eq 0 ] || say "run .agents/bin/sync to fix"
   exit 1
 fi
