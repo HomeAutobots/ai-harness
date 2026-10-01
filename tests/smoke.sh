@@ -874,7 +874,11 @@ if [ "$HAVE_PY" -eq 1 ]; then
            "python3 .agents/workflows/feature-driven/fdd_tools.py approve . list" \
            "cd .agents/workflows/feature-driven/bin && ./fdd approve list" \
            ".agents/workflows/feature-driven/bin/fdd 'approve' list" \
-           "cd .agents/workflows/feature-driven/bin && PATH=.:\$PATH 'fdd' approve list"; do
+           "cd .agents/workflows/feature-driven/bin && PATH=.:\$PATH 'fdd' approve list" \
+           ".agents/commands/fdd approve list" \
+           "bash ./.agents/commands/fdd approve list" \
+           "cd .agents/commands && ./fdd approve list" \
+           "\\\".agents/commands/fdd\\\" 'approve' list"; do
     trc  "agent can't: $c" 2  hook "$F" pre-tool claude "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$c\"}}"
   done
   trc  "agent may run fdd status" 0  hook "$F" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":".agents/workflows/feature-driven/bin/fdd status"}}'
@@ -884,6 +888,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$(hook "$F" pre-tool claude '{"tool_name":"Bash","tool_input":{"command":"x=$(fdd approve list)"}}' 2>&1 || true)"
   t  "block says why, not the regex"  bash -c "printf '%s' \"\$1\" | grep -q 'blocked by policy: approving FDD gates is a human decision' && ! printf '%s' \"\$1\" | grep -q 'fdd(?:_tools'" _ "$out"
   t  "approve denied natively"         grep -q 'Bash(.agents/builtin/workflows/feature-driven/bin/fdd approve:\*)' "$F/.claude/settings.json"
+  t  "...through .agents/commands/fdd too" grep -q 'Bash(.agents/commands/fdd approve:\*)' "$F/.claude/settings.json"
   EXT="$WORK/fdd-outside"; cp -R "$FD" "$EXT"
   edit "$F/.agents/harness.conf" "s|^FDD_DIR=.*|FDD_DIR=\"$EXT\"|"
   mv "$FD" "$FD.hidden"
@@ -2484,6 +2489,11 @@ if [ "$HAVE_PY" -eq 1 ]; then
     edit "$AM2/.agents/harness.conf" 's|^HARNESS_MODE=.*|HARNESS_MODE="team"|'
     PATH="$NOPY" "$AM2/.agents/bin/sync" >/dev/null 2>&1 || true
     tnot "no python3 after a switch to team: a local block's agent lines aren't carried" grep -q 'agents/lm' "$AM2/.git/info/exclude"
+    edit "$AX/.agents/harness.conf" 's|^HARNESS_MODE=.*|HARNESS_MODE="local"|'
+    PATH="$NOPY" AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" >/dev/null 2>&1 || true
+    t  "no python3 after a switch to local: personal renders stay hidden" bash -c "cd '$AX' && git check-ignore -q .claude/agents/helper.md"
+    edit "$AX/.agents/harness.conf" 's|^HARNESS_MODE=.*|HARNESS_MODE="team"|'
+    AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" >/dev/null 2>&1
   fi
   cp "$AX/.agents/lib/agents_render.py" "$WORK/agents_render.keep"
   printf 'raise RuntimeError("boom")\n' > "$AX/.agents/lib/agents_render.py"
@@ -2550,6 +2560,49 @@ edit "$PC/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="feature-driven cmdfl
 out="$(cd /tmp && "$PC/.agents/commands/cmdflow-root" a 'b c')"
 t    "a pack outside the project runs with this project as AGENTS_ROOT" test "$(printf '%s\n' "$out" | sed -n 1p)" = "$(cd "$PC" && pwd)"
 t    "...and gets its arguments as given" test "$(printf '%s\n' "$out" | sed -n 3p)" = "b c"
+grep -v '^deny-cmd \.agents/commands/fdd approve' "$PC/.agents/policy.conf" > "$WORK/pol" && cat "$WORK/pol" > "$PC/.agents/policy.conf"
+out="$("$HARNESS/install.sh" --team "$PC" 2>&1)"
+t    "an old fdd snippet gets the deny rule for .agents/commands/fdd" test "$(grep -c '^deny-cmd \.agents/commands/fdd approve' "$PC/.agents/policy.conf")" = 1
+t    "...and says so"                  hasl "$out" ".agents/commands/fdd"
+"$HARNESS/install.sh" --team "$PC" >/dev/null 2>&1
+t    "...once"                         test "$(grep -c '^deny-cmd \.agents/commands/fdd approve' "$PC/.agents/policy.conf")" = 1
+mkdir -p "$CL/workflows/cmdflow2/bin" "$CL/workflows/cmdflow2/checks"
+cp "$CL/workflows/cmdflow/checks/turn.sh" "$CL/workflows/cmdflow2/checks/turn.sh"
+cp "$CL/workflows/cmdflow/bin/cmdflow-root" "$CL/workflows/cmdflow2/bin/cmdflow-root"
+edit "$PC/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="feature-driven cmdflow cmdflow cmdflow2"|'
+out="$("$PC/.agents/bin/sync" 2>&1)"
+t    "two packs with the same command: a warning names both" hasl "$out" "workflows 'cmdflow' and 'cmdflow2' both ship bin/cmdflow-root"
+t    "...the first wins"               grep -q "pack 'cmdflow'," "$PC/.agents/commands/cmdflow-root"
+tnot "a workflow listed twice isn't its own rival" hasl "$out" "'cmdflow' and 'cmdflow' both"
+edit "$PC/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="feature-driven"|'
+"$PC/.agents/bin/sync" >/dev/null 2>&1
+CP="$WORK/cmdpersonal"
+mkpack(){ mkdir -p "$1/workflows/$2/checks" "$1/workflows/$2/bin"; printf '#!/usr/bin/env bash\nexit 0\n' > "$1/workflows/$2/checks/turn.sh"; shift 2; }
+mkbin(){ printf '#!/usr/bin/env bash\necho %s\n' "$3" > "$1/workflows/$2/bin/$3"; chmod +x "$1/workflows/$2/bin/$3"; }
+mkpack "$CP" sharedflow; mkbin "$CP" sharedflow both; mkbin "$CP" sharedflow mineonly
+mkpack "$CP" pconly; mkbin "$CP" pconly pc
+TC=$(repo cmdsteam)
+AGENTS_PERSONAL_DIR="$CP" "$HARNESS/install.sh" --team "$TC" >/dev/null 2>&1
+mkpack "$TC/.agents/builtin" sharedflow; mkbin "$TC/.agents/builtin" sharedflow both; mkbin "$TC/.agents/builtin" sharedflow sharedonly
+commit "$TC" "shared pack"
+edit "$TC/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="sharedflow pconly"|'
+AGENTS_PERSONAL_DIR="$CP" "$TC/.agents/bin/sync" >/dev/null 2>&1
+for c in both sharedonly; do
+  t  "team: a command the shared pack ships is committed ($c)" bash -c "test -x '$TC/.agents/commands/$c' && cd '$TC' && ! git check-ignore -q .agents/commands/$c"
+done
+for c in mineonly pc; do
+  t  "team: a personal pack's own command stays out of git ($c)" bash -c "test -x '$TC/.agents/commands/$c' && cd '$TC' && git check-ignore -q .agents/commands/$c"
+done
+t    "team: --check clean"             env AGENTS_PERSONAL_DIR="$CP" "$TC/.agents/bin/sync" --check
+LT=$(repo cmdslocal)
+"$HARNESS/install.sh" --workflow feature-driven "$LT" >/dev/null 2>&1
+printf '#!/usr/bin/env bash\necho ours\n' > "$LT/.agents/commands/fdd"; git -C "$LT" add -f .agents/commands/fdd; commit "$LT" "our fdd"
+out="$("$LT/.agents/bin/sync" 2>&1)"
+t    "local: a tracked command is left alone" grep -q ours "$LT/.agents/commands/fdd"
+t    "...with a note"                  hasl "$out" ".agents/commands/fdd is tracked by the project; local mode leaves it alone"
+edit "$LT/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS=""|'
+"$LT/.agents/bin/sync" >/dev/null 2>&1
+t    "...and never removed as stale"   grep -q ours "$LT/.agents/commands/fdd"
 NC=$(repo nocmds)
 "$HARNESS/install.sh" --team "$NC" >/dev/null 2>&1
 t    "no active packs: no commands dir" test ! -e "$NC/.agents/commands"

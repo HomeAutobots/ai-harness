@@ -390,6 +390,18 @@ if [ -f "$DEST/.agents/policy.conf" ] && grep -q '^deny-cmd \.agents/workflows/f
   cat "$tmp" > "$DEST/.agents/policy.conf"; rm -f "$tmp"
   migrated "pointed the fdd approve rule in .agents/policy.conf at .agents/builtin/workflows/feature-driven/bin/fdd"
 fi
+# sync's .agents/commands/fdd runs the same command, so it gets the same native deny rule. Keyed on
+# the builtin rule, so a project that deleted the fdd rules on purpose doesn't get one back.
+if [ -f "$DEST/.agents/policy.conf" ] \
+   && grep -q '^deny-cmd \.agents/builtin/workflows/feature-driven/bin/fdd approve' "$DEST/.agents/policy.conf" \
+   && ! grep -q '^deny-cmd \.agents/commands/fdd approve' "$DEST/.agents/policy.conf"; then
+  tmp="$(mktemp)"
+  awk '{ print } /^deny-cmd \.agents\/builtin\/workflows\/feature-driven\/bin\/fdd approve/ && !done {
+         print "deny-cmd .agents/commands/fdd approve   # approving FDD gates is a human decision"; done = 1 }' \
+    "$DEST/.agents/policy.conf" > "$tmp"
+  cat "$tmp" > "$DEST/.agents/policy.conf"; rm -f "$tmp"
+  migrated "added a deny rule for .agents/commands/fdd approve to .agents/policy.conf"
+fi
 
 if [ "$SET_ASIDE" -gt 0 ]; then
   case "$SET_ASIDE_DIR" in "$DEST"/*) kept_in="${SET_ASIDE_DIR#"$DEST"/}" ;; *) kept_in="$SET_ASIDE_DIR" ;; esac

@@ -548,25 +548,50 @@ export AGENTS_ROOT="\$root"   # a pack outside the project finds the project by 
 exec "\$pack/bin/$1" "\$@"
 EOF
 }
+# Team mode commits the wrappers, so what's committed can't depend on anyone's personal library:
+# when a personal pack wins, the shared pack's commands are listed (committed) and the personal
+# pack's own ones are this clone's only (COMMANDS_PERSONAL, in the exclude block).
+COMMANDS_PERSONAL="$WORK/commands.personal"
+: > "$COMMANDS_PERSONAL"
+cmd_want() {  # cmd_want <workflow> <pack> <shared|personal>: the pack's bin/ commands
+  local f n first
+  [ -d "$2/bin" ] || return 0
+  for f in "$2"/bin/*; do
+    { [ -f "$f" ] && [ -x "$f" ]; } || continue
+    n="${f##*/}"
+    agents_valid_name "$n" || continue
+    first="$(awk -F '\t' -v n="$n" '$1 == n { print $2; exit }' "$WORK/commands.want")"
+    if [ -n "$first" ]; then
+      [ "$first" = "$1" ] || warn "workflows '$first' and '$1' both ship bin/$n; $CMD_DIR/$n runs the one from '$first'"
+      continue
+    fi
+    printf '%s\t%s\n' "$n" "$1" >> "$WORK/commands.want"
+    if [ "$3" = personal ]; then echo "$n" >> "$COMMANDS_PERSONAL"; fi
+  done
+}
 render_commands() {
-  local w p f n first target ws=()
+  local w p line src shared n target seen=" " ws=()
   : > "$WORK/commands.want"
   set -f; for w in ${WORKFLOWS:-}; do ws+=("$w"); done; set +f
   for w in "${ws[@]+"${ws[@]}"}"; do
+    case "$seen" in *" $w "*) continue ;; esac
+    seen="$seen$w "
     agents_valid_name "$w" || continue
-    p="$(agents_resolve workflows "$w" 2>/dev/null)" || continue
-    [ -d "$p/bin" ] || continue
-    for f in "$p"/bin/*; do
-      { [ -f "$f" ] && [ -x "$f" ]; } || continue
-      n="${f##*/}"
-      agents_valid_name "$n" || continue
-      first="$(awk -F '\t' -v n="$n" '$1 == n { print $2; exit }' "$WORK/commands.want")"
-      if [ -n "$first" ]; then warn "workflows '$first' and '$w' both ship bin/$n; $CMD_DIR/$n runs the one from '$first'"; continue; fi
-      printf '%s\t%s\n' "$n" "$w" >> "$WORK/commands.want"
-    done
+    line="$(agents_lookup workflows "$w" 2>/dev/null)" || continue
+    src="${line##*"$TAB"}"; p="${line#*"$TAB"}"; p="${p%"$TAB"*}"
+    if [ "$TEAM" -eq 1 ] && personal "$src"; then
+      if shared="$(agents_shared_workflow "$w")"; then cmd_want "$w" "${shared#*"$TAB"}" shared; fi
+      cmd_want "$w" "$p" personal
+    else
+      cmd_want "$w" "$p" shared
+    fi
   done
   while IFS="$TAB" read -r n w; do
     target="$CMD_DIR/$n"
+    if [ "$LOCAL" -eq 1 ] && tracked "$target"; then
+      warn "$target is tracked by the project; local mode leaves it alone"
+      continue
+    fi
     if { [ -e "$target" ] || [ -L "$target" ]; } && { [ -L "$target" ] || ! grep -qF "$CMD_MARK" "$target" 2>/dev/null; }; then
       warn "$target wasn't made by sync, leaving it alone (workflow '$w' ships bin/$n too)"
       continue
@@ -586,6 +611,7 @@ render_commands() {
     n="${target##*/}"
     grep -qF "$CMD_MARK" "$target" 2>/dev/null || continue
     if awk -F '\t' -v n="$n" '$1 == n { f = 1 } END { exit !f }' "$WORK/commands.want"; then continue; fi
+    if [ "$LOCAL" -eq 1 ] && tracked "$target"; then continue; fi
     if [ "$CHECK" -eq 1 ]; then drift "$target (stale)"; continue; fi
     rm -f "$target"
     CHANGED=1
@@ -900,24 +926,24 @@ exclude_block() {
   pre="$(git rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
   # Team mode with no block and no personal skills or agents: nothing of ours, so the file isn't
   # rewritten.
-  if [ "$LOCAL" -eq 0 ] && [ ! -s "$PERSONAL_LIST" ] && ! grep -q '^personal' "$AGENT_RENDERS" \
+  if [ "$LOCAL" -eq 0 ] && [ ! -s "$PERSONAL_LIST" ] && [ ! -s "$COMMANDS_PERSONAL" ] && ! grep -q '^personal' "$AGENT_RENDERS" \
      && ! { [ -f "$ex" ] && grep -qxF "$EXCL_BEGIN" "$ex"; }; then return 0; fi
   : > "$WORK/exclude.list"
   # Agents didn't render (no python3, or it failed): keep the block's agent entries as they are,
   # so a personal render isn't left for git add -A and --check sees no false drift.
-  # Only from a block written in this mode: a local block always has the whole-dir /.agents/ line,
-  # a team block never does.
+  # Not from a local block after a switch to team (a local block always has the whole-dir /.agents/
+  # line, a team block never does): local mode hides shared renders that team mode commits.
   if [ "$AGENTS_DONE" -eq 0 ] && [ -f "$ex" ]; then
     AGENTS_EXCL_PRE="/$pre" awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" -v nowlocal="$LOCAL" '$0 == b { f = 1; next } $0 == e { f = 0 }
       f { p = ENVIRON["AGENTS_EXCL_PRE"]; if (index($0, p) != 1) next
           r = substr($0, length(p) + 1)
           if (r == ".agents/") waslocal = 1
           else if (r ~ /^\.(claude|github|cursor|codex|gemini)\/agents\//) keep[++n] = $0 }
-      END { if ((nowlocal == 1) == (waslocal == 1)) for (i = 1; i <= n; i++) print keep[i] }' "$ex" >> "$WORK/exclude.list"
+      END { if (!(waslocal == 1 && nowlocal != 1)) for (i = 1; i <= n; i++) print keep[i] }' "$ex" >> "$WORK/exclude.list"
   fi
   if [ "$LOCAL" -eq 0 ]; then
-    # Team mode: the block holds only the personal skills this clone renders, their mirrors, and
-    # its personal agent renders.
+    # Team mode: the block holds only the personal skills this clone renders, their mirrors, its
+    # personal agent renders, and the commands only a personal pack ships.
     while IFS= read -r p; do
       if rendered "$SKILLS_DIR/$p"; then echo "/$pre$SKILLS_DIR/$p" >> "$WORK/exclude.list"; fi
       if owned ".claude/skills/$p"; then echo "/$pre.claude/skills/$p" >> "$WORK/exclude.list"; fi
@@ -925,6 +951,9 @@ exclude_block() {
     awk -F '\t' '$1 == "personal" { print $2 }' "$AGENT_RENDERS" | while IFS= read -r p; do
       echo "/$pre$p" >> "$WORK/exclude.list"
     done
+    while IFS= read -r p; do
+      if [ -f "$CMD_DIR/$p" ]; then echo "/$pre$CMD_DIR/$p" >> "$WORK/exclude.list"; fi
+    done < "$COMMANDS_PERSONAL"
   fi
   if [ "$LOCAL" -eq 1 ]; then
     echo "/${pre}.agents/" >> "$WORK/exclude.list"
