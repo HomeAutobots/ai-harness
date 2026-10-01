@@ -344,6 +344,16 @@ adopt_skills() {
     agents_valid_name "$n" || continue
     [ "$LOCAL" -eq 1 ] && tracked "$d" && continue   # the project's own; compute_skill_set lists it
     if [ -e ".agents/library/skills/$n" ] || [ -L ".agents/library/skills/$n" ]; then
+      # A link move (this one, or install.sh's migration) that stopped after making the library
+      # link: both point at the same skill, so the old link is the one left to remove.
+      if [ -L "$d" ] && [ -L ".agents/library/skills/$n" ] && t="$(cd "$d" 2>/dev/null && pwd -P)" \
+         && [ "$t" = "$(cd ".agents/library/skills/$n" 2>/dev/null && pwd -P)" ]; then
+        if [ "$CHECK" -eq 1 ]; then drift "$d (a move to .agents/library/skills/$n that didn't finish)"; continue; fi
+        rm -f "$d"
+        CHANGED=1
+        say "removed the link $d: .agents/library/skills/$n points at the same skill (an earlier move didn't finish)"
+        continue
+      fi
       warn "$d and .agents/library/skills/$n both exist; keep the one you want in .agents/library/skills/ and delete $d (sync renders .agents/skills/)"
       continue
     fi

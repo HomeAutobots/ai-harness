@@ -2659,6 +2659,26 @@ if [ "$HAVE_PY" -eq 1 ]; then
   AGENTS_PERSONAL_DIR="$HP" "$HL2/.agents/bin/sync" >/dev/null 2>&1
   t  "local mode records personal copies too" grep -q '".agents/skills/pmine"' "$HL2/.agents/generated.lock"
 fi
+HB=$(repo hardboth)
+"$HARNESS/install.sh" --team "$HB" >/dev/null 2>&1
+mkskill "$WORK/hard-far" farl "Far."; mkskill "$HB/tools" near "Near."
+mkdir -p "$HB/.agents/library/skills"
+# a link move that stopped after making the library link, before removing the old one
+ln -s "$WORK/hard-far/skills/farl" "$HB/.agents/library/skills/farl"; ln -s "$WORK/hard-far/skills/farl" "$HB/.agents/skills/farl"
+ln -s ../../../tools/skills/near "$HB/.agents/library/skills/near"; ln -s ../../tools/skills/near "$HB/.agents/skills/near"
+commit "$HB" "an interrupted link move"
+tnot "an interrupted link move is drift" "$HB/.agents/bin/sync" --check
+out="$("$HARNESS/install.sh" "$HB" 2>&1)"
+tnot "...and the next run doesn't call it both existing" hasl "$out" "both exist"
+t    "...it finishes the move"         hasl "$out" "removed the link .agents/skills/farl: .agents/library/skills/farl points at the same skill (an earlier move didn't finish)"
+t    "...and renders from the library" bash -c "test \"\$(readlink '$HB/.agents/skills/farl')\" = ../../.agents/library/skills/farl && test \"\$(readlink '$HB/.agents/skills/near')\" = ../../.agents/library/skills/near"
+t    "...then --check is clean"        "$HB/.agents/bin/sync" --check
+out="$("$HB/.agents/bin/sync" 2>&1)"
+tnot "...and it stays settled"         hasl "$out" "both exist"
+mkskill "$HB/.agents" twice "In the render dir."; mkskill "$HB/.agents/library" twice "In the library."
+out="$("$HB/.agents/bin/sync" 2>&1)"
+t    "two different skills of one name still warn" hasl "$out" ".agents/skills/twice and .agents/library/skills/twice both exist"
+t    "...and both stay"                bash -c "grep -q 'In the render dir' '$HB/.agents/skills/twice/SKILL.md' && grep -q 'In the library' '$HB/.agents/library/skills/twice/SKILL.md'"
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
