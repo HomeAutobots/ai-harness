@@ -2612,6 +2612,54 @@ NC=$(repo nocmds)
 "$HARNESS/install.sh" --team "$NC" >/dev/null 2>&1
 t    "no active packs: no commands dir" test ! -e "$NC/.agents/commands"
 
+echo "libraries hardening"
+if [ "$HAVE_PY" -eq 1 ]; then
+  HC=$(repo hardcopy)
+  "$HARNESS/install.sh" --team "$HC" >/dev/null 2>&1
+  tnot "symlink mode records no skill copies" grep -q skill_copies "$HC/.agents/generated.lock"
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  "$HC/.agents/bin/sync" >/dev/null 2>&1
+  t  "copy mode records each copy's hash" bash -c "grep -q '\"skill_copies\"' '$HC/.agents/generated.lock' && grep -q '\".agents/skills/plan-task\"' '$HC/.agents/generated.lock' && grep -q '\".claude/skills/plan-task\"' '$HC/.agents/generated.lock'"
+  t  "...and --check is clean"         "$HC/.agents/bin/sync" --check
+  echo "my note" >> "$HC/.agents/skills/plan-task/SKILL.md"
+  echo "my note" >> "$HC/.claude/skills/review-diff/SKILL.md"
+  tnot "a hand-edited copy is drift"   "$HC/.agents/bin/sync" --check
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  t  "sync warns before replacing a hand-edited copy" hasl "$out" "sync: warning: .agents/skills/plan-task was edited by hand; sync replaced it from .agents/builtin/skills/plan-task"
+  t  "...and a hand-edited mirror"     hasl "$out" "sync: warning: .claude/skills/review-diff was edited by hand; sync replaced it from .agents/builtin/skills/review-diff"
+  tnot "...and replaces them"          grep -rq "my note" "$HC/.agents/skills/plan-task" "$HC/.claude/skills/review-diff"
+  t  "...then --check is clean"        "$HC/.agents/bin/sync" --check
+  mkskill "$HC/.agents/library" ours "Ours."
+  "$HC/.agents/bin/sync" >/dev/null 2>&1
+  echo "v2" >> "$HC/.agents/library/skills/ours/SKILL.md"
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  tnot "a source change replaces the copy without a warning" hasl "$out" "edited by hand"
+  t  "...and the copy follows it"      grep -q v2 "$HC/.agents/skills/ours/SKILL.md"
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="symlink"/'
+  echo "my note" >> "$HC/.agents/skills/ours/SKILL.md"
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  t  "back to links: a hand-edited copy still warns" hasl "$out" ".agents/skills/ours was edited by hand; sync replaced it from .agents/library/skills/ours"
+  tnot "...and the records go"         grep -q skill_copies "$HC/.agents/generated.lock"
+  HP="$WORK/hard-pers"; mkskill "$HP" pmine "Mine."
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  AGENTS_PERSONAL_DIR="$HP" "$HC/.agents/bin/sync" >/dev/null 2>&1
+  t  "team mode: a personal copy renders" test -f "$HC/.agents/skills/pmine/.harness-copy"
+  tnot "...but isn't recorded in the committed lock" grep -q pmine "$HC/.agents/generated.lock"
+  HO="$WORK/hard-outside"; mkskill "$HO" farshared "Shared from outside."
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="symlink"/'
+  edit "$HC/.agents/harness.conf" "s|^LIBRARIES=.*|LIBRARIES=\"$HO\"|"
+  "$HC/.agents/bin/sync" >/dev/null 2>&1
+  t  "team mode: a shared skill from outside the repo is a recorded copy" bash -c "test -f '$HC/.agents/skills/farshared/.harness-copy' && grep -q '\".agents/skills/farshared\"' '$HC/.agents/generated.lock'"
+  echo "my note" >> "$HC/.agents/skills/farshared/SKILL.md"
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  t  "...and warns when its hand edit is replaced" hasl "$out" ".agents/skills/farshared was edited by hand; sync replaced it from $HO/skills/farshared"
+  HL2=$(repo hardcopylocal)
+  "$HARNESS/install.sh" "$HL2" >/dev/null 2>&1
+  edit "$HL2/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  AGENTS_PERSONAL_DIR="$HP" "$HL2/.agents/bin/sync" >/dev/null 2>&1
+  t  "local mode records personal copies too" grep -q '".agents/skills/pmine"' "$HL2/.agents/generated.lock"
+fi
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
