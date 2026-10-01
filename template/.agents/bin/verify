@@ -174,10 +174,27 @@ elif [ "$TIER" != edit ]; then
 fi
 
 # 3. Workflow packs listed in WORKFLOWS (harness.conf) add their own checks for the tier. Each
-# runs in place from whichever library has it; sync warns about names no library has.
+# runs in place from whichever library has it; sync warns about names no library has. While a
+# project-listed library isn't here (a submodule not checked out), a name that doesn't resolve may
+# be in it: a tooling problem, not a skip. Stacks too (their shims would stop the tier scripts).
 WF_RC=0
+MISSING_NOTE="$(agents_missing_note)"
+set -f   # the names are split on spaces; a glob character stays literal
+if [ -n "$MISSING_NOTE" ]; then
+  for st in ${STACKS:-}; do
+    agents_resolve stacks "$st" >/dev/null && continue
+    echo "infra: stack '$st' isn't available: $MISSING_NOTE" >> "$RAW"
+    WF_RC=3
+  done
+fi
 for wf in ${WORKFLOWS:-}; do
-  WD="$(agents_resolve workflows "$wf")" || continue
+  if ! WD="$(agents_resolve workflows "$wf")"; then
+    if [ -n "$MISSING_NOTE" ]; then
+      echo "infra: workflow '$wf' isn't available: $MISSING_NOTE" >> "$RAW"
+      WF_RC="$(agents_worst_rc "$WF_RC" 3)"
+    fi
+    continue
+  fi
   WS="$WD/checks/$TIER.sh"
   [ -f "$WS" ] || continue
   rc=0
@@ -185,6 +202,7 @@ for wf in ${WORKFLOWS:-}; do
   cat "$RAW.part" >> "$RAW"
   WF_RC="$(agents_worst_rc "$WF_RC" "$rc")"
 done
+set +f
 
 RC="$(agents_worst_rc "$GUARD_RC" "$LOCAL_RC" "$CHECK_RC" "$WF_RC")"
 case "$RC" in

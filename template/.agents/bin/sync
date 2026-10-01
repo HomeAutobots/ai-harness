@@ -46,6 +46,7 @@ HARNESS_MODE="team"
 [ -f .agents/harness.conf ] && . ./.agents/harness.conf
 
 DRIFT=0
+INFRA=0    # --check: a project-listed library isn't here
 CHANGED=0
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -236,6 +237,28 @@ agents_library_paths | while IFS= read -r p; do
   norm_path "$p"
   if [ -d "$p" ]; then (cd "$p" 2>/dev/null && pwd -P) || true; fi
 done > "$LIB_PATHS"
+# A project-listed library that isn't here (a submodule not checked out): the renders that may be
+# its own stay as they are until it's back, so this clone never removes or replaces what the
+# project commits. Paths as written, . and .. resolved.
+MISSING_LIBS="$WORK/missing-libs"
+agents_missing_listed | while IFS= read -r p; do norm_path "$p"; done > "$MISSING_LIBS"
+# from_missing <render>: it may come from a missing library: a link into one, or a marked copy when
+# a copy could be from one (LINK_MODE=copy, or a missing library outside the repo, which team mode
+# copies), since a copy doesn't say where it came from
+from_missing() {
+  local t
+  [ -s "$MISSING_LIBS" ] || return 1
+  if [ -L "$1" ]; then
+    t="$(readlink "$1")"
+    case "$t" in /*) ;; *) t="$ROOT/$(dirname "$1")/$t" ;; esac
+    AGENTS_LINK_TARGET="$(norm_path "$t")" \
+      awk '{ if (index(ENVIRON["AGENTS_LINK_TARGET"], $0 "/") == 1) f = 1 } END { exit !f }' "$MISSING_LIBS"
+    return
+  fi
+  [ -f "$1/.harness-copy" ] || return 1
+  [ "$LINK_MODE" = copy ] && return 0
+  AGENTS_ROOT_DIR="$ROOT/" awk '{ if (index($0, ENVIRON["AGENTS_ROOT_DIR"]) != 1) f = 1 } END { exit !f }' "$MISSING_LIBS"
+}
 # What this clone's sync linked last time (name<TAB>target), so a render still counts after its
 # library leaves the search path (taken off LIBRARIES, another personal dir) and goes as stale.
 RENDERED_LOG=.agents/cache/rendered-skills
@@ -332,7 +355,8 @@ compute_skill_set() {
     while IFS="$TAB" read -r n p lib; do
       if personal "$lib"; then
         if tracked "$SKILLS_DIR/$n" && rendered "$SKILLS_DIR/$n"; then
-          warn "the project tracks $SKILLS_DIR/$n, a render of your personal skill '$n'; sync removes it (commit that), then renders it for this clone only"
+          from_missing "$SKILLS_DIR/$n" \
+            || warn "the project tracks $SKILLS_DIR/$n, a render of your personal skill '$n'; sync removes it (commit that), then renders it for this clone only"
           continue
         elif tracked "$SKILLS_DIR/$n" || tracked ".claude/skills/$n"; then
           warn "your personal skill '$n' isn't rendered here: the project tracks $SKILLS_DIR/$n or .claude/skills/$n"
@@ -354,6 +378,46 @@ compute_skill_set() {
     printf '%s\t%s\t%s\n' "$n" "$ROOT/$d" tracked >> "$WORK/skills.tmp"
     LC_ALL=C sort "$WORK/skills.tmp" > "$SKILL_SET"
   done
+}
+
+# keep_missing: each render that may come from a missing project-listed library (from_missing)
+# stays as it is: it joins the set as "kept", in place of what would replace it. A winner from the
+# project library, or from a project-listed one listed before the first missing one, still takes
+# over (the missing one would lose to it anyway); any other winner doesn't, since the missing
+# library might have come first.
+KEPT="$WORK/kept"
+: > "$KEPT"
+LISTED_LIBS="$WORK/listed-libs"   # project-listed libraries in LIBRARIES order, as text
+agents_library_candidates | awk -F '\t' '$1 == "project-listed" { print $2 }' \
+  | while IFS= read -r p; do norm_path "$p"; done > "$LISTED_LIBS"
+FIRST_MISSING="$(awk 'NR == FNR { miss[$0] = 1; next } ($0 in miss) { print FNR; exit }' "$MISSING_LIBS" "$LISTED_LIBS")"
+keep_missing() {
+  local target name line wsrc i
+  [ -s "$MISSING_LIBS" ] && [ -d "$SKILLS_DIR" ] || return 0
+  for target in "$SKILLS_DIR"/*; do
+    { [ -e "$target" ] || [ -L "$target" ]; } || continue
+    name="${target##*/}"
+    agents_valid_name "$name" && rendered "$target" && from_missing "$target" || continue
+    line="$(awk -F '\t' -v n="$name" '$1 == n' "$SKILL_SET")"
+    if [ -n "$line" ]; then
+      case "${line##*"$TAB"}" in
+        project|tracked) continue ;;
+        project-listed)   # only from a library listed before the first missing one
+          wsrc="${line#*"$TAB"}"; wsrc="$(norm_path "${wsrc%"$TAB"*}")"
+          i="$(AGENTS_WINNER="$wsrc" awk 'index(ENVIRON["AGENTS_WINNER"], $0 "/") == 1 { print NR; exit }' "$LISTED_LIBS")"
+          if [ -n "$i" ] && [ "$i" -lt "$FIRST_MISSING" ]; then continue; fi ;;
+      esac
+    fi
+    echo "$name" >> "$KEPT"
+    if [ -L "$target" ]; then printf '%s\t%s\n' "$name" "$(readlink "$target")" >> "$RENDERED_NEW"; fi
+  done
+  [ -s "$KEPT" ] || return 0
+  { awk -F '\t' 'NR == FNR { k[$0] = 1; next } !($1 in k)' "$KEPT" "$SKILL_SET"
+    while IFS= read -r name; do printf '%s\t%s\t%s\n' "$name" "$ROOT/$SKILLS_DIR/$name" kept; done < "$KEPT"
+  } | LC_ALL=C sort > "$WORK/skills.tmp"
+  cat "$WORK/skills.tmp" > "$SKILL_SET"
+  awk 'NR == FNR { k[$0] = 1; next } !($0 in k)' "$KEPT" "$PERSONAL_LIST" > "$WORK/personal.tmp"
+  cat "$WORK/personal.tmp" > "$PERSONAL_LIST"
 }
 
 # The same name in two libraries: the higher one wins, with a warning naming both. Workflows and
@@ -391,7 +455,7 @@ render_skills() {
   local name src lib target rel copy how
   while IFS="$TAB" read -r name src lib; do
     target="$SKILLS_DIR/$name"
-    [ "$src" = "$ROOT/$target" ] && continue   # a tracked skill in place (local mode)
+    [ "$src" = "$ROOT/$target" ] && continue   # a tracked skill in place (local mode), or kept
     copy=0; [ "$LINK_MODE" = copy ] && copy=1
     case "$src" in
       "$ROOT"/*) rel="../../${src#"$ROOT"/}" ;;
@@ -448,19 +512,54 @@ render_skills() {
 
 adopt_skills
 compute_skill_set
+keep_missing
 report_shadows skills ALL
 report_shadows workflows "${WORKFLOWS:-}"
 report_shadows stacks "${STACKS:-}"
-# A LIBRARIES entry that isn't there (a typo, a submodule not checked out) is skipped; say so.
+# Something shaped like an item that isn't one (an empty pack directory, a skill without SKILL.md)
+# is ignored by the resolver, so it can't shadow a working one; say so. Packs only while active.
+report_unusable() {  # report_unusable <kind> <ALL | active names> <what it lacks>
+  local n p
+  agents_unusable "$1" | while IFS="$TAB" read -r n p _; do
+    [ "$2" = ALL ] || case " $2 " in *" $n "*) ;; *) continue ;; esac
+    warn "$(shown "$p") isn't a usable ${1%s} ($3); ignored"
+  done
+}
+report_unusable skills ALL "no SKILL.md"
+report_unusable workflows "${WORKFLOWS:-}" "no checks/ with a file, skill/SKILL.md, agents/, mcp/, or bin/"
+report_unusable stacks "${STACKS:-}" "no lib.sh or checks/ with a file"
+report_unusable agents ALL "empty"
+report_unusable mcp ALL "empty"
+# A LIBRARIES entry that isn't there. A personal-listed one is skipped with a warning. A project-
+# listed one is the project's config (a submodule not checked out, say): its renders stay (see
+# keep_missing), and --check fails, so CI notices instead of passing without it.
 while IFS="$TAB" read -r lsrc lp; do
-  case "$lsrc" in *-listed) [ -d "$lp" ] || warn "LIBRARIES ($lsrc) names $(shown "$lp"), which isn't there; its skills and packs are skipped" ;; esac
+  case "$lsrc" in
+    project-listed)
+      # missing as the resolver sees it: no directory, or an empty one (a submodule not checked out)
+      grep -qxF -- "$(norm_path "$lp")" "$MISSING_LIBS" || continue
+      if [ "$CHECK" -eq 1 ]; then
+        say "infra: LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills and packs can't be checked"
+        INFRA=1
+      elif [ "$TEAM" -eq 1 ]; then
+        warn "LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills keep their committed renders until it's back"
+      else
+        warn "LIBRARIES lists $(shown "$lp"), which isn't here (an uninitialized submodule?); its skills keep their renders until it's back"
+      fi ;;
+    personal-listed) [ -d "$lp" ] || warn "LIBRARIES ($lsrc) names $(shown "$lp"), which isn't there; its skills and packs are skipped" ;;
+  esac
 done < <(agents_library_candidates)
+MISSING_NOTE="$(agents_missing_note)"
 set -f   # the names are split on spaces; a glob character stays literal
 for w in ${WORKFLOWS:-}; do
-  agents_resolve workflows "$w" >/dev/null || warn "WORKFLOWS lists '$w', but no library has it; its checks and skill are skipped"
+  agents_resolve workflows "$w" >/dev/null && continue
+  if [ -n "$MISSING_NOTE" ]; then warn "WORKFLOWS lists '$w', which no library here has, and $MISSING_NOTE; verify and gitflow stop with a tooling problem until it's back"
+  else warn "WORKFLOWS lists '$w', but no library has it; its checks and skill are skipped"; fi
 done
 for s in ${STACKS:-}; do
-  agents_resolve stacks "$s" >/dev/null || warn "STACKS lists '$s', but no library has it; tier scripts that source .agents/stacks/$s/lib.sh stop with a tooling problem"
+  agents_resolve stacks "$s" >/dev/null && continue
+  if [ -n "$MISSING_NOTE" ]; then warn "STACKS lists '$s', which no library here has, and $MISSING_NOTE; verify stops with a tooling problem until it's back"
+  else warn "STACKS lists '$s', but no library has it; tier scripts that source .agents/stacks/$s/lib.sh stop with a tooling problem"; fi
 done
 if [ "$TEAM" -eq 1 ]; then
   for w in ${WORKFLOWS:-}; do
@@ -498,6 +597,11 @@ SKILLS_BODY="$WORK/skills.md"
   echo
   found=0
   while IFS="$TAB" read -r dname src lib; do
+    if [ "$lib" = kept ]; then
+      # its library isn't here: the index keeps the line it has, so it stays the same for everyone
+      kl="$(AGENTS_SKILL_LINE="- \`$dname\`: " awk 'index($0, ENVIRON["AGENTS_SKILL_LINE"]) == 1 { print; exit }' "$AGENTS_IN")"
+      if [ -n "$kl" ]; then printf '%s\n' "$kl"; found=1; continue; fi
+    fi
     f="$src/SKILL.md"
     [ -f "$f" ] || continue
     meta="$(skill_meta "$f")"
@@ -662,7 +766,9 @@ if [ -n "$PY" ]; then
     [ -n "$OUT" ] && { printf '%s\n' "$OUT"; CHANGED=1; }
     [ "$RENDER_RC" -eq 0 ] || warn "adapter rendering reported errors (see above)"
   fi
-  "$PY" .agents/lib/harness.py check-skills "$SKILL_SET" || DRIFT=1
+  # A kept render's library isn't here, so a pin on it can't be checked; check-skills says it's missing.
+  awk -F '\t' '$3 != "kept"' "$SKILL_SET" > "$WORK/skills.checked"
+  "$PY" .agents/lib/harness.py check-skills "$WORK/skills.checked" || DRIFT=1
 else
   warn "python3 not found: hooks and permission rules were not rendered. Install python3 and re-run."
 fi
@@ -787,8 +893,9 @@ todos=$(cat "$AGENTS_FILE" .agents/checks/*.sh 2>/dev/null | grep -c 'TODO(harne
   || warn "$todos TODO(harness-tailor) markers left. Ask your agent to run the harness-tailor skill."
 
 if [ "$CHECK" -eq 1 ]; then
-  if [ "$DRIFT" -eq 0 ]; then say "up to date"; exit 0; fi
-  say "run .agents/bin/sync to fix"
+  if [ "$DRIFT" -eq 0 ] && [ "$INFRA" -eq 0 ]; then say "up to date"; exit 0; fi
+  [ "$INFRA" -eq 0 ] || say "check out the libraries LIBRARIES lists (git submodule update --init, say), then re-run"
+  [ "$DRIFT" -eq 0 ] || say "run .agents/bin/sync to fix"
   exit 1
 fi
 [ "$CHANGED" -eq 1 ] || say "already up to date"

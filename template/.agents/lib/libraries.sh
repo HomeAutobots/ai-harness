@@ -9,7 +9,8 @@
 #   personal         ~/.config/ai-harness/ ($XDG_CONFIG_HOME/ai-harness; AGENTS_PERSONAL_DIR overrides)
 #   personal-listed  LIBRARIES in <personal>/harness.conf (absolute, ~/..., or relative to that dir)
 #   builtin          .agents/builtin/, what the harness ships (AGENTS_BUILTIN_DIR overrides)
-# Directories that don't exist are skipped, and each directory counts once. Workflows and stacks
+# Directories that don't exist are skipped, and each directory counts once. An entry counts only
+# when it's a real item of its kind (agents_item_ok): an empty directory never shadows anything. Workflows and stacks
 # are used only when named in WORKFLOWS / STACKS in .agents/harness.conf; an active workflow's
 # skill/ joins the skills under the workflow's name, from the winning pack only, after every
 # library's own skills.
@@ -110,9 +111,31 @@ agents_libraries() {
   _agents_libraries_scan
 }
 
-# agents_lib_items <kind>: name<TAB>path<TAB>source for every item in every library, in search order
-agents_lib_items() {
-  local kind="$1" ext="" src lib p n
+# agents_item_ok <kind> <path>: it's a real item of that kind, not just a name. A directory that
+# isn't (an empty one, say) never counts, so it can't shadow a working item further down.
+#   skill     <name>/SKILL.md
+#   workflow  any of checks/ holding a file, skill/SKILL.md, agents/, mcp/, bin/
+#   stack     lib.sh or checks/ holding a file
+#   agent     <name>.md, mcp <name>.json: a file that isn't empty
+_agents_has_file() { [ -n "$(find -L "$1" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | head -n 1)" ]; }
+agents_item_ok() {
+  case "$1" in
+    skills) [ -f "$2/SKILL.md" ] ;;
+    workflows)
+      [ -d "$2" ] || return 1
+      if [ -f "$2/skill/SKILL.md" ] || [ -d "$2/agents" ] || [ -d "$2/mcp" ] || [ -d "$2/bin" ]; then return 0; fi
+      _agents_has_file "$2/checks" ;;
+    stacks) [ -d "$2" ] && { [ -f "$2/lib.sh" ] || _agents_has_file "$2/checks"; } ;;
+    agents|mcp) [ -f "$2" ] && [ -s "$2" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# _agents_lib_entries <kind> <ok|unusable>: name<TAB>path<TAB>source for every entry with an item's
+# shape (a directory, or a .md / .json file) in every library, in search order: the usable ones,
+# or the ones agents_item_ok turns down
+_agents_lib_entries() {
+  local kind="$1" want="$2" ext="" src lib p n
   case "$kind" in skills|workflows|stacks) ;; agents) ext=md ;; mcp) ext=json ;; *) return 2 ;; esac
   while IFS="$AGENTS_TAB" read -r src lib; do
     [ -d "$lib/$kind" ] || continue
@@ -120,15 +143,55 @@ agents_lib_items() {
       n="${p##*/}"
       if [ -n "$ext" ]; then
         case "$n" in *."$ext") n="${n%."$ext"}" ;; *) continue ;; esac
-        [ -f "$p" ] || continue
       else
         [ -d "$p" ] || continue
-        if [ "$kind" = skills ] && [ ! -f "$p/SKILL.md" ]; then continue; fi
       fi
       agents_valid_name "$n" || continue
+      if agents_item_ok "$kind" "$p"; then
+        [ "$want" = ok ] || continue
+      else
+        [ "$want" = unusable ] || continue
+      fi
       printf '%s\t%s\t%s\n' "$n" "$p" "$src"
     done < <(find -H "$lib/$kind" -mindepth 1 -maxdepth 1 2>/dev/null | LC_ALL=C sort)
   done < <(agents_libraries)
+  return 0
+}
+
+# agents_lib_items <kind>: name<TAB>path<TAB>source for every item in every library, in search order
+agents_lib_items() {
+  _agents_lib_entries "$1" ok
+}
+
+# agents_unusable <kind>: name<TAB>path<TAB>source for what looks like an item but isn't one (an
+# empty pack directory, a skill without SKILL.md, an empty agent file). Ignored; sync warns.
+agents_unusable() {
+  _agents_lib_entries "$1" unusable
+}
+
+# agents_missing_listed: each LIBRARIES entry in .agents/harness.conf that isn't here, one path per
+# line: no directory, or an empty one (an uninitialized submodule is an empty directory). While one is missing, "no library has it" can't be known,
+# so callers treat a name that doesn't resolve as a tooling problem. Personal-listed libraries are
+# never counted: they're personal, and teammates never have them.
+agents_missing_listed() {
+  local src p
+  while IFS="$AGENTS_TAB" read -r src p; do
+    [ "$src" = project-listed ] || continue
+    if [ ! -d "$p" ] || [ -z "$(ls -A "$p" 2>/dev/null)" ]; then printf '%s\n' "$p"; fi
+  done < <(_agents_lib_candidates)
+  return 0
+}
+
+# agents_missing_note: "LIBRARIES lists <path>[, <path>], which isn't here" (paths as written
+# relative to the project), or nothing when every project-listed library is here
+agents_missing_note() {
+  local p list=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in "$AGENTS_ROOT"/*) p="${p#"$AGENTS_ROOT"/}" ;; esac
+    list="${list:+$list, }$p"
+  done < <(agents_missing_listed)
+  if [ -n "$list" ]; then printf 'LIBRARIES lists %s, which isn'"'"'t here\n' "$list"; fi
   return 0
 }
 
@@ -138,7 +201,7 @@ agents_shared_workflow() {
   local src lib
   while IFS="$AGENTS_TAB" read -r src lib; do
     case "$src" in personal|personal-listed) continue ;; esac
-    if [ -d "$lib/workflows/$1" ]; then printf '%s\t%s\n' "$src" "$lib/workflows/$1"; return 0; fi
+    if agents_item_ok workflows "$lib/workflows/$1"; then printf '%s\t%s\n' "$src" "$lib/workflows/$1"; return 0; fi
   done < <(agents_libraries)
   return 1
 }
@@ -197,10 +260,11 @@ agents_lookup() {
   esac
   while IFS="$AGENTS_TAB" read -r src lib; do
     case "$kind" in
-      workflows|stacks) p="$lib/$kind/$name"; [ -d "$p" ] || continue ;;
-      agents) p="$lib/agents/$name.md"; [ -f "$p" ] || continue ;;
-      mcp) p="$lib/mcp/$name.json"; [ -f "$p" ] || continue ;;
+      workflows|stacks) p="$lib/$kind/$name" ;;
+      agents) p="$lib/agents/$name.md" ;;
+      mcp) p="$lib/mcp/$name.json" ;;
     esac
+    agents_item_ok "$kind" "$p" || continue
     printf '%s\t%s\t%s\n' "$name" "$p" "$src"
     return 0
   done < <(agents_libraries)

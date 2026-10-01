@@ -1705,11 +1705,11 @@ mkskill "$HL/vendor/lib" libbed "From a library."
 edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
 "$HL/.agents/bin/sync" >/dev/null 2>&1
 t    "a listed library's skill renders" test "$(readlink "$HL/.agents/skills/libbed")" = ../../vendor/lib/skills/libbed
-rm -rf "$HL/vendor/lib"
+mv "$HL/vendor/lib" "$WORK/hl-lib-away"
 out="$("$HL/.agents/bin/sync" 2>&1)"
-t    "a render whose library is gone is removed as stale" bash -c "test ! -L '$HL/.agents/skills/libbed' && test ! -e '$HL/.agents/library/skills/libbed'"
-t    "...and says so"                  hasl "$out" "removed stale .agents/skills/libbed"
-mkskill "$HL/vendor/lib" libbed "From a library."
+t    "a render whose listed library is gone is kept, not adopted" bash -c "test -L '$HL/.agents/skills/libbed' && test ! -e '$HL/.agents/library/skills/libbed'"
+tnot "...not removed as stale"         hasl "$out" "removed stale .agents/skills/libbed"
+mv "$WORK/hl-lib-away" "$HL/vendor/lib"
 edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
 "$HL/.agents/bin/sync" >/dev/null 2>&1
 edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES=""|'
@@ -1883,7 +1883,7 @@ out="$("$UL/.agents/bin/sync" 2>&1)"
 tnot "no LIBRARIES, no missing-library warning" hasl "$out" "LIBRARIES"
 edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/nope"|'
 out="$("$UL/.agents/bin/sync" 2>&1)"
-t    "a LIBRARIES entry that isn't there gets a warning" hasl "$out" "LIBRARIES (project-listed) names vendor/nope, which isn't there"
+t    "a LIBRARIES entry that isn't there gets a warning" hasl "$out" "LIBRARIES lists vendor/nope, which isn't here (an uninitialized submodule?)"
 edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
 "$UL/.agents/bin/sync" >/dev/null 2>&1
 t    "an in-repo listed library: sync --check clean" "$UL/.agents/bin/sync" --check
@@ -1934,6 +1934,112 @@ if [ "$HAVE_PY" -eq 1 ]; then
   R=$(ls -d "$EV"/.agents/evals/results/*/ | tail -1)
   t  "eval copies a project-listed library inside the repo" grep -q '^add-fix,C,1,1,' "$R/results.csv"
 fi
+
+echo "an item only counts when it's usable"
+EU=$(repo emptyitems)
+EP="$WORK/pers-empty"; mkdir -p "$EP"
+AGENTS_PERSONAL_DIR="$EP" "$HARNESS/install.sh" --team --workflow feature-driven "$EU" >/dev/null 2>&1
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$EU/.agents/checks/$tier.sh"; done
+printf '#!/usr/bin/env bash\necho "x:1: error: [fdd-ran] built-in feature-driven ran"; exit 1\n' > "$EU/.agents/builtin/workflows/feature-driven/checks/turn.sh"
+commit "$EU" harness
+esync(){ AGENTS_PERSONAL_DIR="$EP" "$EU/.agents/bin/sync"; }
+out="$(esync 2>&1)"
+tnot "absence: nothing odd, no unusable-item warning" hasl "$out" "isn't a usable"
+t    "the built-in pack's checks run"  bash -c "AGENTS_PERSONAL_DIR='$EP' '$EU/.agents/bin/verify' | grep -qF '[fdd-ran]'"
+mkdir -p "$EP/workflows/feature-driven"
+t    "an empty personal workflow dir doesn't shadow the built-in" bash -c "AGENTS_PERSONAL_DIR='$EP' '$EU/.agents/bin/verify' | grep -qF '[fdd-ran]'"
+t    "...the resolver skips it"        test "$(cd "$EU" && AGENTS_ROOT="$EU" AGENTS_PERSONAL_DIR="$EP" bash .agents/lib/libraries.sh resolve workflows feature-driven | cut -f3)" = builtin
+out="$(esync 2>&1)"
+t    "...and sync says it's ignored"   hasl "$out" "$EP/workflows/feature-driven isn't a usable workflow (no checks/ with a file, skill/SKILL.md, agents/, mcp/, or bin/); ignored"
+t    "...once"                         test "$(printf '%s\n' "$out" | grep -c "isn't a usable workflow")" = 1
+tnot "...not as a shadow"              hasl "$out" "shadows"
+mkdir -p "$EP/workflows/feature-driven/checks"
+t    "an empty checks/ doesn't count either" bash -c "AGENTS_PERSONAL_DIR='$EP' '$EU/.agents/bin/verify' | grep -qF '[fdd-ran]'"
+mkdir -p "$EU/.agents/library/skills/review-diff"
+out="$(esync 2>&1)"
+t    "an empty skill dir doesn't shadow the built-in" test "$(readlink "$EU/.agents/skills/review-diff")" = ../../.agents/builtin/skills/review-diff
+t    "...and sync says it's ignored"   hasl "$out" ".agents/library/skills/review-diff isn't a usable skill (no SKILL.md); ignored"
+mkdir -p "$EU/.agents/library/stacks/cpp-cmake/docs" "$EU/.agents/library/agents" "$EU/.agents/library/mcp"
+: > "$EU/.agents/library/agents/helper.md"; : > "$EU/.agents/library/mcp/srv.json"
+eres(){ (cd "$EU" && AGENTS_ROOT="$EU" AGENTS_PERSONAL_DIR="$EP" bash .agents/lib/libraries.sh "$@"); }
+t    "a stack without lib.sh or checks/ doesn't shadow" test "$(eres resolve stacks cpp-cmake | cut -f3)" = builtin
+tnot "an empty agent file doesn't resolve" eres resolve agents helper
+tnot "an empty mcp file doesn't resolve" eres resolve mcp srv
+printf 'x\n' > "$EU/.agents/library/agents/helper.md"
+t    "...a non-empty one does"         eres resolve agents helper
+rm -rf "$EP/workflows" "$EU/.agents/library/skills/review-diff" "$EU/.agents/library/stacks" "$EU/.agents/library/agents" "$EU/.agents/library/mcp"
+out="$(esync 2>&1)"
+tnot "...and the warnings go with them" hasl "$out" "isn't a usable"
+
+echo "a project-listed library that isn't here"
+TL=$(repo teamlib)
+"$HARNESS/install.sh" --team "$TL" >/dev/null 2>&1
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$TL/.agents/checks/$tier.sh"; done
+mkskill "$TL/vendor/team" teamskill "The team's skill."
+mkdir -p "$TL/vendor/team/workflows/teamflow/checks" "$TL/vendor/team/workflows/teamflow/skill"
+printf -- '---\nname: teamflow\ndescription: Team flow.\n---\n' > "$TL/vendor/team/workflows/teamflow/skill/SKILL.md"
+printf '#!/usr/bin/env bash\ngrep -q TEAM-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [teamflow] rule"; exit 1; }\nexit 0\n' > "$TL/vendor/team/workflows/teamflow/checks/turn.sh"
+printf '#!/usr/bin/env bash\ngrep -q TEAM-ID "$1" && { echo "teamflow says no"; exit 1; }\nexit 0\n' > "$TL/vendor/team/workflows/teamflow/checks/commit-msg.sh"
+mkskill "$TL/vendor/team" review-diff "The team's review."
+mkskill "$TL/vendor/later" teamskill "A later library's copy."
+mkdir -p "$TL/vendor/team/stacks/teamstack"; printf 'teamstack_ok() { :; }\n' > "$TL/vendor/team/stacks/teamstack/lib.sh"
+edit "$TL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/team vendor/later"|'
+edit "$TL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="teamflow"/'
+"$TL/.agents/bin/sync" >/dev/null 2>&1; commit "$TL" "team library"
+t    "the team library's skill renders" test "$(readlink "$TL/.agents/skills/teamskill")" = ../../vendor/team/skills/teamskill
+t    "...and its review-diff over the built-in" test "$(readlink "$TL/.agents/skills/review-diff")" = ../../vendor/team/skills/review-diff
+mv "$TL/vendor/team" "$WORK/teamlib-away"
+out="$("$TL/.agents/bin/sync" 2>&1)"
+t    "library gone: sync keeps its committed renders" bash -c "test -L '$TL/.agents/skills/teamskill' && test -L '$TL/.agents/skills/teamflow' && test -L '$TL/.claude/skills/teamskill'"
+t    "...not taken over by the built-in" test "$(readlink "$TL/.agents/skills/review-diff")" = ../../vendor/team/skills/review-diff
+t    "...nor by a library listed after it" test "$(readlink "$TL/.agents/skills/teamskill")" = ../../vendor/team/skills/teamskill
+t    "...and leaves git status clean"  test -z "$(git -C "$TL" status --porcelain -- .agents .claude AGENTS.md CLAUDE.md)"
+t    "...and says why"                 hasl "$out" "sync: warning: LIBRARIES lists vendor/team, which isn't here (an uninitialized submodule?); its skills keep their committed renders until it's back"
+tnot "...not that they're stale"       hasl "$out" "stale"
+out="$("$TL/.agents/bin/sync" --check 2>&1)" || true
+trc  "sync --check fails"              1 "$TL/.agents/bin/sync" --check
+t    "...naming the library"           hasl "$out" "infra: LIBRARIES lists vendor/team, which isn't here"
+tnot "...not as stale renders"         hasl "$out" "stale"
+out="$("$TL/.agents/bin/verify" --no-cache 2>&1)" || true
+trc  "verify: a workflow that may be in it is a tooling problem" 3 "$TL/.agents/bin/verify" --no-cache
+t    "...with an infra line"           hasl "$out" "infra: workflow 'teamflow' isn't available: LIBRARIES lists vendor/team, which isn't here"
+trc  "gitflow check-msg: same (3)"     3 bash -c "cd '$TL' && printf 'fix: x\n' | .agents/bin/gitflow check-msg"
+out="$(cd "$TL" && printf 'fix: x\n' | .agents/bin/gitflow check-msg 2>&1)" || true
+t    "...with the infra line"          hasl "$out" "infra: workflow 'teamflow' isn't available: LIBRARIES lists vendor/team, which isn't here"
+echo x > "$TL/notes.txt"; git -C "$TL" add notes.txt
+trc  "gitflow commit: blocked (3)"     3 bash -c "cd '$TL' && .agents/bin/gitflow commit 'add notes'"
+git -C "$TL" reset -q notes.txt; rm -f "$TL/notes.txt"
+edit "$TL/.agents/harness.conf" 's/^STACKS=.*/STACKS="teamstack"/'
+out="$("$TL/.agents/bin/verify" --no-cache 2>&1)" || true
+t    "verify: a stack that may be in it too" hasl "$out" "infra: stack 'teamstack' isn't available: LIBRARIES lists vendor/team, which isn't here"
+edit "$TL/.agents/harness.conf" 's/^STACKS=.*/STACKS=""/'
+git -C "$TL" checkout -q -b feat
+for n in one two; do echo "$n" > "$TL/$n.txt"; git -C "$TL" add "$n.txt"; git -C "$TL" -c core.hooksPath=/dev/null commit -qm "fix: $n"; done
+out="$(cd "$TL" && .agents/bin/gitflow check 2>&1)" || true
+trc  "gitflow check: a tooling problem (3)" 3 bash -c "cd '$TL' && .agents/bin/gitflow check"
+t    "...naming it once for all commits" test "$(printf '%s\n' "$out" | grep -c "^infra: workflow 'teamflow'")" = 1
+git -C "$TL" checkout -q -; git -C "$TL" branch -qD feat
+mkdir "$TL/vendor/team"
+out="$("$TL/.agents/bin/sync" 2>&1)"
+t    "an empty dir (a submodule not checked out) counts as missing" hasl "$out" "LIBRARIES lists vendor/team, which isn't here"
+t    "...and keeps the renders"        bash -c "test -L '$TL/.agents/skills/teamskill' && test \"\$(readlink '$TL/.agents/skills/review-diff')\" = ../../vendor/team/skills/review-diff"
+trc  "...sync --check fails"           1 "$TL/.agents/bin/sync" --check
+trc  "...verify exits 3"               3 "$TL/.agents/bin/verify" --no-cache
+rmdir "$TL/vendor/team"
+mv "$WORK/teamlib-away" "$TL/vendor/team"
+t    "library back: sync --check clean" "$TL/.agents/bin/sync" --check
+t    "...verify passes"                "$TL/.agents/bin/verify"
+t    "...gitflow check-msg passes"     bash -c "cd '$TL' && printf 'fix: x\n' | .agents/bin/gitflow check-msg"
+out="$("$TL/.agents/bin/sync" 2>&1)"
+tnot "...and no warning"               hasl "$out" "LIBRARIES"
+t    "...git status clean"             test -z "$(git -C "$TL" status --porcelain -- .agents .claude AGENTS.md CLAUDE.md)"
+TP="$WORK/pers-teamlib"; mkdir -p "$TP"; printf 'LIBRARIES="gone"\n' > "$TP/harness.conf"
+edit "$TL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="teamflow nowhere"/'
+out="$(AGENTS_PERSONAL_DIR="$TP" "$TL/.agents/bin/sync" 2>&1)"
+t    "a missing personal-listed library only warns" hasl "$out" "LIBRARIES (personal-listed) names $TP/gone, which isn't there"
+t    "...verify still skips a name no library has" env AGENTS_PERSONAL_DIR="$TP" "$TL/.agents/bin/verify"
+t    "...and so does gitflow"          bash -c "cd '$TL' && printf 'fix: x\n' | AGENTS_PERSONAL_DIR='$TP' .agents/bin/gitflow check-msg"
+edit "$TL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="teamflow"/'
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

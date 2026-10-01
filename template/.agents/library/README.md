@@ -17,6 +17,9 @@ Libraries are searched in this order; the first one with a name wins, and sync w
 shadows another: this directory, `LIBRARIES` in `.agents/harness.conf`, your personal library
 `~/.config/ai-harness/`, `LIBRARIES` in `~/.config/ai-harness/harness.conf`, then the harness's
 built-ins in `.agents/builtin/`. To change a built-in, put your version here under the same name.
+Only a real item counts: a skill needs SKILL.md, a workflow needs checks/ with a file, skill/SKILL.md,
+agents/, mcp/, or bin/, and a stack needs lib.sh or checks/ with a file. An empty directory is ignored (sync
+warns), so it never hides the one it's named after.
 
 Pack scripts run from wherever the pack lives, so find the pack's own files from the script's
 path (`"$(dirname "$0")/../tool.py"`) and the project from `$AGENTS_ROOT`. verify and gitflow run

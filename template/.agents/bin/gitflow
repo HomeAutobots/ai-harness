@@ -19,11 +19,13 @@
 #   gitflow merge                                    merge the PR/MR (GIT_MERGE_METHOD)
 #   gitflow install-hooks [--quiet]                  commit-msg and pre-push git hooks (when needed)
 # Workflow packs can add commit-message rules: <library>/workflows/<name>/checks/commit-msg.sh <file>
-# (exit 1 or 2 rejects with its output; any other failure, like a missing tool, also blocks).
+# (exit 1 or 2 rejects with its output; any other failure, like a missing tool, also blocks, and so
+# does an active workflow that doesn't resolve while a LIBRARIES entry isn't here: exit 3).
 # Packs see every message, including merge, fixup, and revert messages that git.conf rules skip.
 # Internal: check-branch <name>, check-msg <file>, check-cmd <command>, hook-commit-msg <file>,
 #           hook-prepare-commit-msg <file> [source], hook-pre-push.
-# Exit: 0 ok, 1 problem, 2 blocked by the workflow (check-cmd).
+# Exit: 0 ok, 1 problem, 2 blocked by the workflow (check-cmd), 3 an active workflow pack isn't
+# available (check-msg, commit, the commit-msg hook).
 set -uo pipefail
 set -f   # patterns in config (release/*) are matched, never expanded against files
 
@@ -307,49 +309,65 @@ check_branch() {  # prints why a branch name is not allowed
 }
 
 check_msg() {  # check_msg <message file> <branch>: prints what's wrong with a commit message
-  local bad=0
+  # Returns 1 for findings, 3 when a workflow pack isn't available (the message is rejected either way)
+  local bad=0 rc=0
   check_msg_conf "$@" || bad=1
-  workflow_msg_checks "$1" || bad=1
+  workflow_msg_checks "$1" || rc=$?
+  [ "$rc" -eq 0 ] || bad="$rc"
   return $bad
 }
 
 workflow_msg_scripts() {  # commit-message checks of active workflow packs, from whichever library has each
-  local w d
+  # A name that doesn't resolve while a project-listed library isn't here (a submodule not checked
+  # out) may be in it: an "infra: ..." line instead of a path (paths are absolute).
+  local w d note
   [ -f "$ROOT/.agents/harness.conf" ] || return 0
   command -v agents_resolve >/dev/null 2>&1 || return 0
+  note="$(agents_missing_note)"
   for w in $(agents_conf_get "$ROOT/.agents/harness.conf" WORKFLOWS); do
-    d="$(agents_resolve workflows "$w")" || continue
+    if ! d="$(agents_resolve workflows "$w")"; then
+      if [ -n "$note" ]; then echo "infra: workflow '$w' isn't available: $note"; fi
+      continue
+    fi
     if [ -f "$d/checks/commit-msg.sh" ]; then echo "$d/checks/commit-msg.sh"; fi
   done
   return 0
 }
 
+MSG_INFRA_HINT="so its commit-message rules can't be checked and commits are blocked"
 workflow_msg_checks() {  # workflow_msg_checks <message file>: any nonzero exit rejects, including a check that can't run
+  # Returns 1 for a rejected message, 3 when a pack isn't available (its library isn't here).
   local s out rc bad=0
   while IFS= read -r s; do
     [ -n "$s" ] || continue
+    case "$s" in "infra: "*)
+      # fail closed, as for a check that can't run: the pack's rules can't be checked
+      echo "$s"
+      echo "$MSG_INFRA_HINT; check out the library (git submodule update --init, say), or a human can bypass the git hooks with --no-verify"
+      bad=3; continue ;;
+    esac
     rc=0
     out="$(AGENTS_ROOT="$ROOT" bash "$s" "$1" </dev/null 2>&1)" || rc=$?
     case "$rc" in
       0) ;;
-      1|2) printf '%s\n' "${out:-rejected by ${s#"$ROOT"/}}"; bad=1 ;;
+      1|2) printf '%s\n' "${out:-rejected by ${s#"$ROOT"/}}"; [ "$bad" -eq 3 ] || bad=1 ;;
       *) # fail closed: an unchecked message could carry what the check exists to stop
          echo "${s#"$ROOT"/} couldn't check the message (exit $rc), so the commit is blocked"
          [ -n "$out" ] && printf '%s\n' "$out"
          echo "fix the tooling it needs (e.g. python3); a human can bypass with git commit --no-verify"
-         bad=1 ;;
+         [ "$bad" -eq 3 ] || bad=1 ;;
     esac
   done < <(workflow_msg_scripts)
   return $bad
 }
 
 msg_gate() {  # msg_gate <message file>: pack rules for gitflow commit, which can't rely on the hook
-  local out
-  out="$(workflow_msg_checks "$1")" && return 0
+  local out rc=0
+  out="$(workflow_msg_checks "$1")" && return 0 || rc=$?
   rm -f "$1"
   echo "gitflow: commit rejected by a workflow pack:" >&2
   printf '%s\n' "$out" | sed 's/^/  /' >&2
-  exit 1
+  exit "$rc"
 }
 
 check_msg_conf() {  # check_msg_conf <message file> <branch>: the git.conf rules
@@ -400,15 +418,25 @@ branch_commits() {  # commits on this branch beyond the base, oldest first
   fi
 }
 
-check_commits() {  # check_commits <branch> <rev-list args...>
-  local b="$1" c bad=0 tmp out
+check_commits() {  # check_commits <branch> <rev-list args...>: 1 for findings, 3 if a pack isn't available
+  local b="$1" c bad=0 rc tmp out infra=""
   shift
   tmp="$(mktemp)"
   for c in $(git rev-list --reverse "$@" 2>/dev/null); do
     git log -1 --format=%B "$c" > "$tmp"
-    out="$(check_msg "$tmp" "$b")" || { printf '%s\n' "$out" | sed "s/^/commit $(git rev-parse --short "$c"): /"; bad=1; }
+    rc=0
+    out="$(check_msg "$tmp" "$b")" || rc=$?
+    [ "$rc" -eq 0 ] && continue
+    # A pack that isn't available is the same for every commit: say so once, after the findings.
+    if [ "$rc" -eq 3 ]; then
+      bad=3
+      infra="$(printf '%s\n' "$out" | grep -E "^(infra: |$MSG_INFRA_HINT)")"
+      out="$(printf '%s\n' "$out" | grep -vE "^(infra: |$MSG_INFRA_HINT)")"
+    elif [ "$bad" -eq 0 ]; then bad=1; fi
+    if [ -n "$out" ]; then printf '%s\n' "$out" | sed "s/^/commit $(git rev-parse --short "$c"): /"; fi
   done
   rm -f "$tmp"
+  if [ -n "$infra" ]; then printf '%s\n' "$infra"; fi
   return $bad
 }
 
@@ -575,18 +603,22 @@ cmd_check() {
   if [ -z "$list" ]; then echo "no commits on $b beyond $GIT_BASE"; rc=1
   else
     # shellcheck disable=SC2086
-    check_commits "$b" --no-walk $list || rc=1
+    check_commits "$b" --no-walk $list || rc=$?
   fi
   if [ "$GIT_PUSH_REQUIRES" != off ] && [ -x "$ROOT/.agents/bin/verify" ]; then
     local vrc=0
     out="$("$ROOT/.agents/bin/verify" --tier="$GIT_PUSH_REQUIRES" 2>&1)" || vrc=$?
     case "$vrc" in
       0) ;;
-      1|2) echo "$out"; rc=1 ;;
+      1|2) echo "$out"; [ "$rc" -eq 3 ] || rc=1 ;;
       *) echo "note: verify --tier=$GIT_PUSH_REQUIRES couldn't run (exit $vrc), so this push isn't verified: $(printf '%s\n' "$out" | tail -1)" ;;
     esac
   fi
-  if [ "$rc" -eq 0 ]; then echo "ok gitflow check: $b is ready to push"; else echo "FAIL gitflow check"; fi
+  case "$rc" in
+    0) echo "ok gitflow check: $b is ready to push" ;;
+    3) echo "INFRA gitflow check" ;;
+    *) echo "FAIL gitflow check" ;;
+  esac
   return $rc
 }
 
@@ -808,13 +840,13 @@ tidy_optional() {  # drop optional template sections a human left empty, then co
 }
 
 hook_commit_msg() {
-  local b out
+  local b out rc=0
   b="$(current_branch)"
-  out="$(check_msg "$1" "$b")" && { tidy_optional "$1"; return 0; }
+  out="$(check_msg "$1" "$b")" && { tidy_optional "$1"; return 0; } || rc=$?
   echo "commit rejected by this repo's git workflow (.agents/git.conf, workflow packs):" >&2
   printf '%s\n' "$out" | sed 's/^/  /' >&2
   echo "  tip: .agents/bin/gitflow commit \"<summary>\" builds a valid message" >&2
-  return 1
+  return "$rc"
 }
 
 hook_pre_push() {
