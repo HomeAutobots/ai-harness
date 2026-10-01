@@ -12,8 +12,8 @@
 # Directories that don't exist are skipped, and each directory counts once. An entry counts only
 # when it's a real item of its kind (agents_item_ok): an empty directory never shadows anything. Workflows and stacks
 # are used only when named in WORKFLOWS / STACKS in .agents/harness.conf; an active workflow's
-# skill/ joins the skills under the workflow's name, and its agents/*.md join the agents by file
-# name, both from the winning pack only, after every library's own skills and agents.
+# skill/ joins the skills under the workflow's name, and its agents/*.md and mcp/*.json join the
+# agents and MCP servers by file name, all from the winning pack only, after every library's own.
 #
 # Sourced by sync, verify and check scripts (through feedback.sh), gitflow, the stack shims, and
 # install.sh. As a command (harness.py resolve runs it):
@@ -207,20 +207,21 @@ agents_shared_workflow() {
   return 1
 }
 
-# agents_items <kind> [team]: agents_lib_items, plus for skills each active workflow's skill/ and
-# for agents each active workflow's agents/*.md, after all the libraries' own items. They come
-# from the pack that wins for that workflow (the one whose checks run), never from a pack it
-# shadows. With "team", a personal pack that wins also brings the items of the shared pack it
-# shadows (team mode renders those: they're committed).
+# agents_items <kind> [team]: agents_lib_items, plus for skills each active workflow's skill/, for
+# agents each active workflow's agents/*.md, and for mcp its mcp/*.json, after all the libraries'
+# own items. They come from the pack that wins for that workflow (the one whose checks run), never
+# from a pack it shadows. With "team", a personal pack that wins also brings the items of the
+# shared pack it shadows (team mode renders those: they're committed).
 _agents_pack_items() {  # _agents_pack_items <kind> <workflow> <pack path> <source>
-  local f n
+  local f n ext=md
   case "$1" in
     skills) if [ -f "$3/skill/SKILL.md" ]; then printf '%s\t%s\t%s\n' "$2" "$3/skill" "$4"; fi ;;
-    agents)
-      [ -d "$3/agents" ] || return 0
-      find -H "$3/agents" -mindepth 1 -maxdepth 1 -name '*.md' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
-        n="${f##*/}"; n="${n%.md}"
-        agents_valid_name "$n" && agents_item_ok agents "$f" || continue
+    agents|mcp)
+      if [ "$1" = mcp ]; then ext=json; fi
+      [ -d "$3/$1" ] || return 0
+      find -H "$3/$1" -mindepth 1 -maxdepth 1 -name "*.$ext" 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+        n="${f##*/}"; n="${n%."$ext"}"
+        agents_valid_name "$n" && agents_item_ok "$1" "$f" || continue
         printf '%s\t%s\t%s\n' "$n" "$f" "$4"
       done ;;
   esac
@@ -228,7 +229,7 @@ _agents_pack_items() {  # _agents_pack_items <kind> <workflow> <pack path> <sour
 agents_items() {
   local w line wpath wsrc shared restoreglob=0
   agents_lib_items "$1" || return $?
-  case "$1" in skills|agents) ;; *) return 0 ;; esac
+  case "$1" in skills|agents|mcp) ;; *) return 0 ;; esac
   # WORKFLOWS is split unquoted below; noglob until it's done, restored only if we turned it on
   # (this runs in the caller's shell, unlike _agents_lib_candidates, so it must not stay changed).
   case $- in *f*) ;; *) set -f; restoreglob=1 ;; esac
@@ -259,7 +260,7 @@ agents_shadows() {
 }
 
 # agents_lookup <kind> <name>: that name's winning line; 1 if no library has it, 2 for a bad kind
-# (agents: the libraries' own only; an active pack's agents come from agents_items, as sync uses)
+# (agents, mcp: the libraries' own only; an active pack's come from agents_items, as sync uses)
 agents_lookup() {
   local kind="$1" name="$2" src lib p line
   agents_valid_name "$name" || return 1

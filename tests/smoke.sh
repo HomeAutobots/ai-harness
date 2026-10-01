@@ -2612,6 +2612,28 @@ NC=$(repo nocmds)
 "$HARNESS/install.sh" --team "$NC" >/dev/null 2>&1
 t    "no active packs: no commands dir" test ! -e "$NC/.agents/commands"
 
+echo "mcp servers from libraries"
+mkmcp(){ mkdir -p "$1/mcp"; printf '%s\n' "${3:-{\"command\": \"npx\", \"args\": [\"-y\", \"srv\"]\}}" > "$1/mcp/$2.json"; }
+MR=$(repo mcpresolve)
+"$HARNESS/install.sh" --team "$MR" >/dev/null 2>&1
+mkmcp "$MR/.agents/library" github
+mkdir -p "$WORK/mcppack/workflows/mcpflow/checks"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/mcppack/workflows/mcpflow/checks/turn.sh"; chmod +x "$WORK/mcppack/workflows/mcpflow/checks/turn.sh"
+mkmcp "$WORK/mcppack/workflows/mcpflow" tracker
+mkmcp "$WORK/mcppack/workflows/mcpflow" github
+printf 'not a server\n' > "$WORK/mcppack/workflows/mcpflow/mcp/README.md"
+edit "$MR/.agents/harness.conf" "s|^LIBRARIES=.*|LIBRARIES=\"$WORK/mcppack\"|"
+edit "$MR/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="mcpflow"|'
+out="$(cd "$MR" && bash .agents/lib/libraries.sh resolve mcp)"
+t    "a library server resolves"       hasl "$out" "$(row github "$MR/.agents/library/mcp/github.json" project)"
+t    "an active workflow's server resolves" hasl "$out" "$(row tracker "$WORK/mcppack/workflows/mcpflow/mcp/tracker.json" project-listed)"
+tnot "...only its .json files"         hasl "$out" "README"
+out="$(cd "$MR" && bash .agents/lib/libraries.sh shadows mcp)"
+t    "a library server shadows the pack's server of the same name" hasl "$out" "$(row github project "$MR/.agents/library/mcp/github.json" project-listed "$WORK/mcppack/workflows/mcpflow/mcp/github.json")"
+edit "$MR/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS=""|'
+out="$(cd "$MR" && bash .agents/lib/libraries.sh resolve mcp)"
+tnot "an inactive workflow's servers don't resolve" hasl "$out" "tracker"
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
