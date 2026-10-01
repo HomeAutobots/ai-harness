@@ -2342,6 +2342,73 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "a committed render sync didn't record stays" test -f "$AL/.claude/agents/other.md"
   t    "...with a warning"             hasl "$out" ".claude/agents/other.md is committed but sync didn't record it"
 fi
+if [ "$HAVE_PY" -eq 1 ]; then
+  edit "$AG/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude copilot cursor codex gemini"|'
+  printf 'MODEL_STRONG_CLAUDE="opus"\n' >> "$AG/.agents/harness.conf"
+  out="$("$AG/.agents/bin/sync" 2>&1)"
+  for f in .claude/agents/reviewer.md .github/agents/reviewer.agent.md .cursor/agents/reviewer.md .codex/agents/reviewer.toml .gemini/agents/reviewer.md .claude/agents/flowbot.md; do
+    t  "sync renders $f"               test -f "$AG/$f"
+  done
+  t    "the project library's reviewer wins over the pack's" grep -q 'description: "Reviews diffs."' "$AG/.claude/agents/reviewer.md"
+  t    "...with a shadow warning"      hasl "$out" "agent 'reviewer' from the project library"
+  t    "shared renders are in generated.lock" grep -q '".claude/agents/reviewer.md"' "$AG/.agents/generated.lock"
+  t    "claude deny rules survive in the lock" grep -q '"claude_deny"' "$AG/.agents/generated.lock"
+  t    "sync --check is clean after"   "$AG/.agents/bin/sync" --check
+  t    "a second sync changes nothing" bash -c "'$AG/.agents/bin/sync' 2>&1 | grep -q 'already up to date'"
+  echo "hand edit" >> "$AG/.claude/agents/reviewer.md"
+  tnot "--check sees a hand-edited render" "$AG/.agents/bin/sync" --check
+  out="$("$AG/.agents/bin/sync" 2>&1)"
+  t    "sync rewrites it and says so"  hasl "$out" ".claude/agents/reviewer.md was edited by hand"
+  tnot "...without the edit"           grep -q 'hand edit' "$AG/.claude/agents/reviewer.md"
+  mkdir -p "$AG/.claude/agents"; printf -- '---\nname: mine\ndescription: x\n---\nmine\n' > "$AG/.claude/agents/mine.md"
+  mkagent "$AG/.agents/library" mine "Library mine."
+  out="$("$AG/.agents/bin/sync" 2>&1)"
+  t    "a hand-made agent file is kept" grep -qx 'mine' "$AG/.claude/agents/mine.md"
+  t    "...with a warning"             hasl "$out" ".claude/agents/mine.md wasn't made by sync"
+  t    "...and other tools still get the library agent" test -f "$AG/.codex/agents/mine.toml"
+  rm "$AG/.agents/library/agents/mine.md"
+  "$AG/.agents/bin/sync" >/dev/null 2>&1
+  t    "a stale render goes"           test ! -e "$AG/.codex/agents/mine.toml"
+  t    "...a hand-made file never does" test -f "$AG/.claude/agents/mine.md"
+  edit "$AG/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude"|'
+  "$AG/.agents/bin/sync" >/dev/null 2>&1
+  t    "dropping an adapter removes its renders" bash -c "test ! -e '$AG/.codex/agents/reviewer.toml' && test ! -e '$AG/.github/agents/reviewer.agent.md' && test -f '$AG/.claude/agents/reviewer.md'"
+  printf -- '---\ndescription: d\ntargets: [codex]\n---\nb\n' > "$AG/.agents/library/agents/onlycodex.md"
+  "$AG/.agents/bin/sync" >/dev/null 2>&1
+  t    "targets limits the tools"      test ! -e "$AG/.claude/agents/onlycodex.md"
+  rm "$AG/.agents/library/agents/onlycodex.md"
+  printf -- '---\nname: wrong\ndescription: d\n---\nb\n' > "$AG/.agents/library/agents/badname.md"
+  out="$("$AG/.agents/bin/sync" 2>&1)"
+  t    "a broken agent is reported with path:line" hasl "$out" ".agents/library/agents/badname.md:2: "
+  trc  "...and --check fails"          1 "$AG/.agents/bin/sync" --check
+  rm "$AG/.agents/library/agents/badname.md"
+  "$AG/.agents/bin/sync" >/dev/null 2>&1
+
+  echo "agents: a listed library that isn't here"
+  AM=$(repo agentsmissing)
+  "$HARNESS/install.sh" --team "$AM" >/dev/null 2>&1
+  mkagent "$AM/vendor/team" far "Far agent."
+  edit "$AM/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/team"|'
+  edit "$AM/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude"|'
+  "$AM/.agents/bin/sync" >/dev/null 2>&1; commit "$AM" "team agents"
+  t    "a listed library's agent renders" test -f "$AM/.claude/agents/far.md"
+  mv "$AM/vendor/team" "$WORK/amteam-away"
+  out="$("$AM/.agents/bin/sync" 2>&1)" || true
+  t    "library gone: sync keeps the committed agent render" test -f "$AM/.claude/agents/far.md"
+  t    "...with a warning"             hasl "$out" ".claude/agents/far.md is committed but sync didn't record it (or a library LIBRARIES lists isn't here)"
+  t    "...and leaves git status clean" test -z "$(git -C "$AM" status --porcelain -- .agents .claude)"
+  out="$("$AM/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
+  t    "sync --check fails for the missing library" test "$rc" = 1
+  t    "...naming it"                  hasl "$out" "check out the libraries LIBRARIES lists"
+  tnot "...not for the render"         hasl "$out" "out of date: .claude/agents/far.md"
+
+  echo "agents: absence"
+  AB=$(repo agentsabsent)
+  "$HARNESS/install.sh" --team "$AB" >/dev/null 2>&1
+  t    "no agents: no agent dirs"      bash -c "test ! -e '$AB/.claude/agents' && test ! -e '$AB/.github/agents' && test ! -e '$AB/.cursor/agents'"
+  tnot "...and no agents key in the lock" grep -q '"agents"' "$AB/.agents/generated.lock"
+  t    "...and --check is clean"       "$AB/.agents/bin/sync" --check
+fi
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

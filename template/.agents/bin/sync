@@ -307,6 +307,10 @@ personal() { case "$1" in personal|personal-listed) return 0 ;; esac; return 1; 
 PERSONAL_LIST="$WORK/personal.list"   # team mode: personal skills rendered for this clone only
 : > "$PERSONAL_LIST"
 SKILL_ITEMS="$WORK/skills.items"   # compute_skill_set: every library's skills, in winning order
+AGENT_ITEMS="$WORK/agents.items"   # every library's agents (and active packs'), in winning order
+AGENT_SET="$WORK/agents.set"       # what gets rendered: name<TAB>path<TAB>library
+AGENT_RENDERS="$WORK/agents.renders"   # from harness.py agents: shared|personal<TAB>render path
+: > "$AGENT_RENDERS"
 
 # A skill someone put straight into .agents/skills/ moves to the project library: that dir is
 # rendered now, and sync would otherwise remove what it didn't make.
@@ -380,6 +384,16 @@ compute_skill_set() {
   done
 }
 
+# The agents to render: first match by name wins; in team mode the shared ones come first, as for
+# skills, so what's committed is the same on every machine.
+compute_agent_set() {
+  if [ "$TEAM" -eq 1 ]; then agents_items agents team; else agents_items agents; fi | awk -F '\t' -v team="$TEAM" '
+    team && ($3 == "personal" || $3 == "personal-listed") { held[++k] = $0; next }
+    { print }
+    END { for (i = 1; i <= k; i++) print held[i] }' > "$AGENT_ITEMS"
+  awk -F '\t' '!seen[$1]++' "$AGENT_ITEMS" > "$AGENT_SET"
+}
+
 # keep_missing: each render that may come from a missing project-listed library (from_missing)
 # stays as it is: it joins the set as "kept", in place of what would replace it. A winner from the
 # project library, or from a project-listed one listed before the first missing one, still takes
@@ -422,13 +436,14 @@ keep_missing() {
 
 # The same name in two libraries: the higher one wins, with a warning naming both. Workflows and
 # stacks only matter while they're active.
-# Skills go by SKILL_ITEMS, so in team mode a personal skill that loses to a shared one gets its
-# own message (once per name) instead.
+# Skills and agents go by their items files, so in team mode a personal one that loses to a shared
+# one gets its own message (once per name) instead.
 report_shadows() {  # report_shadows <kind> <ALL | active names>
-  local n ws wp lsrc lpath told=" "
-  if [ "$1" = skills ]; then
+  local n ws wp lsrc lpath told=" " items=""
+  case "$1" in skills) items="$SKILL_ITEMS" ;; agents) items="$AGENT_ITEMS" ;; esac
+  if [ -n "$items" ]; then
     awk -F '\t' '($1 in wp) { printf "%s\t%s\t%s\t%s\t%s\n", $1, ws[$1], wp[$1], $3, $2; next }
-                 { wp[$1] = $2; ws[$1] = $3 }' "$SKILL_ITEMS"
+                 { wp[$1] = $2; ws[$1] = $3 }' "$items"
   else
     agents_shadows "$1"
   fi | while IFS="$TAB" read -r n ws wp lsrc lpath; do
@@ -438,10 +453,10 @@ report_shadows() {  # report_shadows <kind> <ALL | active names>
       case "$1:$lpath" in "skills:"*/workflows/"$n"/skill) continue ;; esac
     fi
     if [ "$TEAM" -eq 1 ] && [ "$1" = workflows ] && personal "$ws" && ! personal "$lsrc"; then continue; fi
-    if [ "$TEAM" -eq 1 ] && [ "$1" = skills ] && personal "$lsrc" && ! personal "$ws"; then
+    if [ "$TEAM" -eq 1 ] && { [ "$1" = skills ] || [ "$1" = agents ]; } && personal "$lsrc" && ! personal "$ws"; then
       case "$told" in *" $n "*) continue ;; esac
       told="$told$n "
-      warn "your personal skill '$n' isn't used in team mode ($(shown "$lpath")): the repo commits the shared one from $ws, so everyone gets the same. Give yours another name to use both."
+      warn "your personal ${1%s} '$n' isn't used in team mode ($(shown "$lpath")): the repo commits the shared one from $ws, so everyone gets the same. Give yours another name to use both."
       continue
     fi
     warn "${1%s} '$n' from the $ws library ($(shown "$wp")) shadows the one in $lsrc ($(shown "$lpath"))"
@@ -516,6 +531,8 @@ keep_missing
 report_shadows skills ALL
 report_shadows workflows "${WORKFLOWS:-}"
 report_shadows stacks "${STACKS:-}"
+compute_agent_set
+report_shadows agents ALL
 # Something shaped like an item that isn't one (an empty pack directory, a skill without SKILL.md)
 # is ignored by the resolver, so it can't shadow a working one; say so. Packs only while active.
 report_unusable() {  # report_unusable <kind> <ALL | active names> <what it lacks>
@@ -769,29 +786,47 @@ if [ -n "$PY" ]; then
   # A kept render's library isn't here, so a pin on it can't be checked; check-skills says it's missing.
   awk -F '\t' '$3 != "kept"' "$SKILL_SET" > "$WORK/skills.checked"
   "$PY" .agents/lib/harness.py check-skills "$WORK/skills.checked" || DRIFT=1
+  # Library agents, one render per adapter. With a project-listed library missing, renders that
+  # may be its own stay as committed until it's back.
+  AG_RC=0
+  if [ -s "$MISSING_LIBS" ]; then AGENTS_LIBRARY_MISSING=1; else AGENTS_LIBRARY_MISSING=0; fi
+  export AGENTS_LIBRARY_MISSING
+  if [ "$CHECK" -eq 1 ]; then
+    "$PY" .agents/lib/harness.py agents --check "$AGENT_SET" "$AGENT_RENDERS" || AG_RC=$?
+    [ "$AG_RC" -eq 0 ] || DRIFT=1
+  else
+    AOUT="$("$PY" .agents/lib/harness.py agents "$AGENT_SET" "$AGENT_RENDERS")" || AG_RC=$?
+    [ -n "$AOUT" ] && { printf '%s\n' "$AOUT"; CHANGED=1; }
+  fi
 else
-  warn "python3 not found: hooks and permission rules were not rendered. Install python3 and re-run."
+  warn "python3 not found: hooks, permission rules, and library agents were not rendered. Install python3 and re-run."
 fi
 
 # Local mode: keep everything the harness created out of git in this clone; team mode: only the
-# personal skills it renders. A marked block in the clone's exclude file lists exact paths; lines
-# outside the markers belong to someone else. verify reads these same markers (local mode) to
-# flag files tracked by accident; keep them in sync.
+# personal skills and agents it renders. A marked block in the clone's exclude file lists exact
+# paths; lines outside the markers belong to someone else. verify reads these same markers (local
+# mode) to flag files tracked by accident; keep them in sync.
 exclude_block() {
   local ex p pre
   ex="$(git rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   [ -n "$ex" ] || return 0
   # Patterns there are relative to the repo top, so an install in a subdirectory prefixes them.
   pre="$(git rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
-  # Team mode with no block and no personal skills: nothing of ours, so the file isn't rewritten.
-  if [ "$LOCAL" -eq 0 ] && [ ! -s "$PERSONAL_LIST" ] && ! { [ -f "$ex" ] && grep -qxF "$EXCL_BEGIN" "$ex"; }; then return 0; fi
+  # Team mode with no block and no personal skills or agents: nothing of ours, so the file isn't
+  # rewritten.
+  if [ "$LOCAL" -eq 0 ] && [ ! -s "$PERSONAL_LIST" ] && ! grep -q '^personal' "$AGENT_RENDERS" \
+     && ! { [ -f "$ex" ] && grep -qxF "$EXCL_BEGIN" "$ex"; }; then return 0; fi
   : > "$WORK/exclude.list"
   if [ "$LOCAL" -eq 0 ]; then
-    # Team mode: the block holds only the personal skills this clone renders, and their mirrors.
+    # Team mode: the block holds only the personal skills this clone renders, their mirrors, and
+    # its personal agent renders.
     while IFS= read -r p; do
       if rendered "$SKILLS_DIR/$p"; then echo "/$pre$SKILLS_DIR/$p" >> "$WORK/exclude.list"; fi
       if owned ".claude/skills/$p"; then echo "/$pre.claude/skills/$p" >> "$WORK/exclude.list"; fi
     done < "$PERSONAL_LIST"
+    awk -F '\t' '$1 == "personal" { print $2 }' "$AGENT_RENDERS" | while IFS= read -r p; do
+      echo "/$pre$p" >> "$WORK/exclude.list"
+    done
   fi
   if [ "$LOCAL" -eq 1 ]; then
     echo "/${pre}.agents/" >> "$WORK/exclude.list"
@@ -803,6 +838,9 @@ exclude_block() {
     for p in .claude/skills/*; do
       { [ -e "$p" ] || [ -L "$p" ]; } || continue
       if owned "$p" && ! tracked "$p"; then echo "/$pre$p" >> "$WORK/exclude.list"; fi
+    done
+    cut -f2 "$AGENT_RENDERS" | while IFS= read -r p; do
+      if [ -n "$p" ] && { [ -e "$p" ] || [ -L "$p" ]; } && ! tracked "$p"; then echo "/$pre$p" >> "$WORK/exclude.list"; fi
     done
   fi
   {
@@ -861,6 +899,7 @@ printf '\342\200\213\n\342\200\214\n\342\200\215\n\342\200\216\n\342\200\217\n\3
   # Skills and active packs are instructions too, wherever their library is: outside the project
   # (personal, listed), in it but outside .agents/, or a link the find above doesn't follow.
   { cut -f2 "$SKILL_SET"
+    cut -f2 "$AGENT_SET"
     set -f
     for w in ${WORKFLOWS:-}; do agents_resolve workflows "$w" 2>/dev/null || true; done
     for s in ${STACKS:-}; do agents_resolve stacks "$s" 2>/dev/null || true; done

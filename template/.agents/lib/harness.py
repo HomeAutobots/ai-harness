@@ -22,6 +22,8 @@ import shlex
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True   # it imports agents_render: no __pycache__ left in the project
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 LOCK = os.path.join(ROOT, ".agents", "generated.lock")
 SKILLS_LOCK = os.path.join(ROOT, ".agents", "skills.lock")
