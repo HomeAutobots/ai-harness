@@ -255,11 +255,11 @@ my-project/
     ├── guard.allow, baselines/      project: approved exceptions, known findings
     ├── context/, evals/             project: on-demand docs, eval tasks
     ├── plans/                   project: ledgers (gitignored by default)
-    ├── generated.lock           sync: what it added to shared config files
+    ├── generated.lock           sync: what it added to shared config files, hashes of agent renders
     └── cache/                   local: logs, verify cache, hook state (gitignored)
 ```
 
-Merged config files keep everything that isn't the harness's. Harness entries are recognized by their `.agents/hooks/` command path, and deny rules by `generated.lock`, so a re-render replaces exactly what the harness added.
+Merged config files keep everything that isn't the harness's. Harness entries are recognized by their `.agents/hooks/` command path, and deny rules by `generated.lock`, so a re-render replaces exactly what the harness added. Agent renders are recognized by their marker line; the lock also keeps their hashes so sync can warn before rewriting one edited by hand.
 
 ## Upgrading projects
 
@@ -312,7 +312,7 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - In team mode, an active workflow that's both built in and in your personal library renders the built-in skill, but `verify` and `gitflow` run the personal pack's checks, since runtime lookup keeps the plain search order. `sync` says so in one message ("your personal workflow 'x' runs its checks here, but team mode renders the skill from the builtin library").
 - `eval`'s harness arms (B and C) still see your personal library, so personal skills and workflows can skew results between developers. Point `AGENTS_PERSONAL_DIR` at an empty directory for a clean run.
 - Library paths can't contain spaces (`LIBRARIES` is space-separated).
-- Skill renders are recognized as links into a library or marked copies in `.agents/skills/`, not by an entry in `.agents/generated.lock` the way agent renders are.
+- Skill renders don't record a hash in `.agents/generated.lock` the way agent renders do, so sync doesn't warn before replacing a skill copy edited by hand (`LINK_MODE=copy`).
 - feature-driven checks don't see every place a private feature ID can reach shared history: branch summaries (`gitflow start PROJ-123 <summary>`), plan titles that go into PR bodies, and code committed before a turn gate ran (`fdd-leak` only reads uncommitted changes).
 - VS Code reads both `.claude/agents` and `.github/agents`; with the claude and copilot adapters on, it may list an agent twice.
 - Codex loads project `.codex/` config only in a trusted project, and openai/codex#14579 reports project agents may not be callable by name.

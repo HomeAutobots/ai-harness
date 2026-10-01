@@ -2451,6 +2451,11 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "local: a tracked agent file is never touched" grep -qx 'theirs' "$AL/.claude/agents/theirs.md"
   t    "...with a note"                hasl "$out" ".claude/agents/theirs.md"
   t    "local: status clean"           test -z "$(git -C "$AL" status --porcelain)"
+  echo "hand edit" >> "$AL/.claude/agents/helper.md"
+  out="$(AGENTS_PERSONAL_DIR="$PL" "$AL/.agents/bin/sync" 2>&1)"
+  t    "local: a hand-edited render is rewritten with a warning" hasl "$out" ".claude/agents/helper.md was edited by hand"
+  tnot "...without the edit"           grep -q 'hand edit' "$AL/.claude/agents/helper.md"
+  t    "...and status stays clean"     test -z "$(git -C "$AL" status --porcelain)"
 fi
 
 echo "agents: when rendering can't finish"

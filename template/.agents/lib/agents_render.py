@@ -530,7 +530,7 @@ def sync_agents(root, conf, rows, check, tracked, old_lock, team, library_missin
     def hold(rel, personal):
         """A marked render sync keeps as is: still hidden or recorded as before."""
         res["renders"].append((rel, personal))
-        if team and not personal and rel in old_lock:
+        if (local or not personal) and rel in old_lock:
             res["lock"][rel] = old_lock[rel]
 
     for name, path, lib in rows:
@@ -586,7 +586,8 @@ def sync_agents(root, conf, rows, check, tracked, old_lock, team, library_missin
             continue
         res["renders"].append((rel, personal))
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if team and not personal:
+        # Team mode commits the lock, so personal renders stay out of it; local mode hides it.
+        if local or not personal:
             res["lock"][rel] = digest
         if have == text:
             continue
