@@ -11,7 +11,7 @@ real ticket key.
 
 ## What it adds
 - **Skill** `feature-driven` (harness-owned): the five FDD processes and three check-ins.
-- **`fdd`** at `.agents/builtin/workflows/feature-driven/bin/fdd`: `approve list | design <ID> | inspect <ID>`
+- **`fdd`** at `.agents/commands/fdd`: `approve list | design <ID> | inspect <ID>`
   (people only; the policy blocks agents) and `status [ID]`.
 - **Checks** that `verify` runs after the project's own tier scripts, and a commit-message check.
 - **Settings** appended to `.agents/harness.conf` (`FDD_*`), filled in by harness-tailor.

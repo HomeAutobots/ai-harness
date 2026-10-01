@@ -208,7 +208,7 @@ A pack can also ship:
 
 - **req-driven**: every change starts from a requirement ID in any exported requirements source (CSV, JSON, Markdown, text). Deterministic checks: IDs must exist, new tests must name the requirement they verify, changes in scope must reference one (in code, tests, or the plan task in progress), and the full tier writes a requirement to code to tests trace with optional untested-requirement gating. Standard-agnostic. See `workflows/req-driven/README.md`.
   The skill's phases (pin the requirement, tests first, implement, report) each end at a `validate` gate, so they map onto planner, tester, implementer, and validator roles when roles land.
-- **feature-driven**: classic FDD for one developer. The agent drafts a domain model and feature list, then plans, designs, and builds one feature at a time; you approve the list, each design, and each finished feature with `fdd approve` (`.agents/builtin/workflows/feature-driven/bin/fdd`), which agents can't run. Checks: design before build, a task in progress for every in-scope change, no private feature IDs in shared code or commit messages, and a parking-lot progress report. All FDD files stay local. See `workflows/feature-driven/README.md`.
+- **feature-driven**: classic FDD for one developer. The agent drafts a domain model and feature list, then plans, designs, and builds one feature at a time; you approve the list, each design, and each finished feature with `fdd approve` (`.agents/commands/fdd`), which agents can't run. Checks: design before build, a task in progress for every in-scope change, no private feature IDs in shared code or commit messages, and a parking-lot progress report. All FDD files stay local. See `workflows/feature-driven/README.md`.
 
 ## Integrity
 
