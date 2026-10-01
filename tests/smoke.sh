@@ -802,7 +802,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "no design blocks build"          has "$("$F/.agents/bin/verify" || true)" "[fdd-no-design] building F-12, but it has no design (.agents/fdd/designs/F-12.md)"
   mkdir -p "$FD/designs"; printf '# F-12\nApproach: add the lines.\n' > "$FD/designs/F-12.md"
   t  "unapproved design blocks build"  has "$("$F/.agents/bin/verify" || true)" "building F-12, but its design isn't approved"
-  t  "the fix names where fdd runs from" has "$("$F/.agents/bin/verify" || true)" "ask the human to run .agents/builtin/workflows/feature-driven/bin/fdd approve design F-12"
+  t  "the fix names sync's stable fdd path" has "$("$F/.agents/bin/verify" || true)" "ask the human to run .agents/commands/fdd approve design F-12"
+  mv "$F/.agents/commands/fdd" "$WORK/fdd-wrapper"
+  t  "...else where fdd runs from"     has "$("$F/.agents/bin/verify" --no-cache || true)" "ask the human to run .agents/builtin/workflows/feature-driven/bin/fdd approve design F-12"
+  mv "$WORK/fdd-wrapper" "$F/.agents/commands/fdd"
   "$FDDX" approve design F-12 >/dev/null
   t  "approved design passes"          "$F/.agents/bin/verify"
   printf 'Also rounding.\n' >> "$FD/designs/F-12.md"
