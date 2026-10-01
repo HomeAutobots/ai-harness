@@ -884,6 +884,8 @@ if [ -n "$PY" ]; then
   fi
 else
   warn "python3 not found: hooks, permission rules, and library agents were not rendered. Install python3 and re-run."
+  # With agents to render, --check can't say they're current.
+  if [ "$CHECK" -eq 1 ] && [ -s "$AGENT_SET" ]; then AGENT_FAILED=1; fi
 fi
 
 # Local mode: keep everything the harness created out of git in this clone; team mode: only the
@@ -903,10 +905,15 @@ exclude_block() {
   : > "$WORK/exclude.list"
   # Agents didn't render (no python3, or it failed): keep the block's agent entries as they are,
   # so a personal render isn't left for git add -A and --check sees no false drift.
+  # Only from a block written in this mode: a local block always has the whole-dir /.agents/ line,
+  # a team block never does.
   if [ "$AGENTS_DONE" -eq 0 ] && [ -f "$ex" ]; then
-    AGENTS_EXCL_PRE="/$pre" awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" '$0 == b { f = 1; next } $0 == e { f = 0 }
+    AGENTS_EXCL_PRE="/$pre" awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" -v nowlocal="$LOCAL" '$0 == b { f = 1; next } $0 == e { f = 0 }
       f { p = ENVIRON["AGENTS_EXCL_PRE"]; if (index($0, p) != 1) next
-          if (substr($0, length(p) + 1) ~ /^\.(claude|github|cursor|codex|gemini)\/agents\//) print }' "$ex" >> "$WORK/exclude.list"
+          r = substr($0, length(p) + 1)
+          if (r == ".agents/") waslocal = 1
+          else if (r ~ /^\.(claude|github|cursor|codex|gemini)\/agents\//) keep[++n] = $0 }
+      END { if ((nowlocal == 1) == (waslocal == 1)) for (i = 1; i <= n; i++) print keep[i] }' "$ex" >> "$WORK/exclude.list"
   fi
   if [ "$LOCAL" -eq 0 ]; then
     # Team mode: the block holds only the personal skills this clone renders, their mirrors, and
@@ -1028,6 +1035,7 @@ if [ "$CHECK" -eq 1 ]; then
   fi
   [ "$INFRA" -eq 0 ] || say "check out the libraries LIBRARIES lists (git submodule update --init, say), then re-run"
   [ "$AGENT_FINDINGS" -eq 0 ] || say "fix the agent files named above, then re-run"
+  [ "$AGENT_FAILED" -eq 0 ] || say "fix the error above (or install python3), then re-run"
   [ "$DRIFT" -eq 0 ] || say "run .agents/bin/sync to fix"
   exit 1
 fi

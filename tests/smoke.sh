@@ -2460,8 +2460,27 @@ if [ "$HAVE_PY" -eq 1 ]; then
   if ! PATH="$NOPY" bash -c 'command -v python3' >/dev/null 2>&1; then   # a new shell: this one has python3 hashed
     out="$(PATH="$NOPY" AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" 2>&1)" || true
     t  "no python3: the personal render stays hidden" bash -c "cd '$AX' && git check-ignore -q .claude/agents/helper.md"
-    out="$(PATH="$NOPY" AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" --check 2>&1)" || true
-    tnot "...and --check sees no block drift" hasl "$out" "harness block"
+    out="$(PATH="$NOPY" AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
+    t  "...--check fails: the agents can't be checked" test "$rc" = 1
+    t  "...saying what to do"           hasl "$out" "fix the error above (or install python3), then re-run"
+    tnot "...and sees no block drift"   hasl "$out" "harness block"
+    out="$(PATH="$NOPY" "$AB/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
+    t  "no python3 and no agents: --check still passes" test "$rc" = 0
+    t  "...with the python3 warning"    hasl "$out" "python3 not found"
+    rm "$PL/agents/helper.md"
+    PATH="$NOPY" AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" >/dev/null 2>&1 || true
+    AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" >/dev/null 2>&1
+    t  "an agent removed while python3 was missing: its exclude line goes once it's back" bash -c "! grep -q 'helper' '$AX/.git/info/exclude' && test ! -e '$AX/.claude/agents/helper.md'"
+    mkagent "$PL" helper "My helper."
+    AGENTS_PERSONAL_DIR="$PL" "$AX/.agents/bin/sync" >/dev/null 2>&1
+    AM2=$(repo agentsmode)
+    "$HARNESS/install.sh" "$AM2" >/dev/null 2>&1
+    mkagent "$AM2/.agents/library" lm "Local mode."
+    "$AM2/.agents/bin/sync" >/dev/null 2>&1
+    t  "local: the render is in the block" grep -qx '/.claude/agents/lm.md' "$AM2/.git/info/exclude"
+    edit "$AM2/.agents/harness.conf" 's|^HARNESS_MODE=.*|HARNESS_MODE="team"|'
+    PATH="$NOPY" "$AM2/.agents/bin/sync" >/dev/null 2>&1 || true
+    tnot "no python3 after a switch to team: a local block's agent lines aren't carried" grep -q 'agents/lm' "$AM2/.git/info/exclude"
   fi
   cp "$AX/.agents/lib/agents_render.py" "$WORK/agents_render.keep"
   printf 'raise RuntimeError("boom")\n' > "$AX/.agents/lib/agents_render.py"
