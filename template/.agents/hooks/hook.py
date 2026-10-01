@@ -57,12 +57,15 @@ def load_conf():
     return conf
 
 
+POLICY = os.path.join(".agents", "policy.conf")
+
+
 def load_policy():
+    """Rules as (kind, pattern, reason, line number in policy.conf)."""
     rules = []
-    path = os.path.join(ROOT, ".agents", "policy.conf")
     try:
-        with open(path, encoding="utf-8") as fh:
-            for raw in fh:
+        with open(os.path.join(ROOT, POLICY), encoding="utf-8") as fh:
+            for n, raw in enumerate(fh, 1):
                 line = raw.strip()
                 if not line or line.startswith("#"):
                     continue
@@ -72,7 +75,7 @@ def load_policy():
                     line, reason = line.strip(), reason.strip()
                 parts = line.split(None, 1)
                 if len(parts) == 2:
-                    rules.append((parts[0], parts[1].strip(), reason))
+                    rules.append((parts[0], parts[1].strip(), reason, n))
     except OSError:
         pass
     return rules
@@ -197,16 +200,27 @@ def path_matches(path, pattern, cwd=None):
     return glob_match(rel, pat)
 
 
-def read_denied(path, rules, cwd=None):
+def read_match(path, rules, cwd=None):
+    """(message, rule): the deny-read rule a read of path hits, or (None, the allow-read exception
+    that let it through), or (None, None)."""
     if not path:
-        return None
-    for kind, pat, _ in rules:
-        if kind == "allow-read" and path_matches(path, pat, cwd):
-            return None
-    for kind, pat, reason in rules:
-        if kind == "deny-read" and path_matches(path, pat, cwd):
-            return "reading %s is blocked by policy (%s)%s" % (path, pat, ": " + reason if reason else "")
-    return None
+        return None, None
+    deny = None
+    for rule in rules:
+        if rule[0] == "deny-read" and path_matches(path, rule[1], cwd):
+            deny = rule
+            break
+    if deny is None:
+        return None, None
+    for rule in rules:
+        if rule[0] == "allow-read" and path_matches(path, rule[1], cwd):
+            return None, rule
+    pat, reason = deny[1], deny[2]
+    return "reading %s is blocked by policy (%s)%s" % (path, pat, ": " + reason if reason else ""), deny
+
+
+def read_denied(path, rules, cwd=None):
+    return read_match(path, rules, cwd)[0]
 
 
 def segments(cmd):
@@ -227,22 +241,25 @@ def segments(cmd):
             yield seg
 
 
-def shell_denied(cmd, rules, cwd=None, parent=None):
+def shell_match(cmd, rules, cwd=None, parent=None):
+    """(message, rule) for what a shell command hits. rule is the policy.conf rule, or None for a
+    block from the repo's git workflow (gitflow check-cmd). (None, None) when it's allowed."""
     if not cmd:
-        return None
+        return None, None
     try:
         tokens = shlex.split(cmd, comments=False, posix=True)
     except ValueError:
         tokens = cmd.split()
-    for kind, pat, reason in rules:
+    for rule in rules:
+        kind, pat, reason = rule[:3]
         why = ": " + reason if reason else ""
         if kind == "deny-cmd":
             for seg in segments(cmd):
                 if seg == pat or seg.startswith(pat + " "):
-                    return "`%s` is blocked by policy%s" % (pat, why)
+                    return "`%s` is blocked by policy%s" % (pat, why), rule
         elif kind == "deny-arg":
             if any(t == pat or t.startswith(pat + "=") for t in tokens):
-                return "`%s` is blocked by policy%s" % (pat, why)
+                return "`%s` is blocked by policy%s" % (pat, why), rule
         elif kind == "deny-regex":
             if parent is not None and cmd in parent:
                 continue  # already matched against the whole command, where this argument appears verbatim
@@ -250,7 +267,7 @@ def shell_denied(cmd, rules, cwd=None, parent=None):
                 if re.search(pat, cmd):
                     # The reason says what's blocked; the raw regex only helps when there is none.
                     return ("this command is blocked by policy%s" % why if reason
-                            else "this command matches a blocked pattern (%s)" % pat)
+                            else "this command matches a blocked pattern (%s)" % pat), rule
             except re.error:
                 pass
     gitflow = os.path.join(ROOT, ".agents", "bin", "gitflow")
@@ -262,20 +279,60 @@ def shell_denied(cmd, rules, cwd=None, parent=None):
                 except (OSError, subprocess.SubprocessError):
                     continue
                 if p.returncode == 2:
-                    return (p.stdout.strip() or "blocked by this repo's git workflow") + " (.agents/git.conf)"
+                    return (p.stdout.strip() or "blocked by this repo's git workflow") + " (.agents/git.conf)", None
     for t in tokens:
         if " " in t.strip() and t.strip() != cmd.strip():
-            inner = shell_denied(t, rules, cwd, parent=cmd)  # e.g. bash -c "git push"
-            if inner:
+            inner = shell_match(t, rules, cwd, parent=cmd)  # e.g. bash -c "git push"
+            if inner[0]:
                 return inner
             continue
         if t.startswith("-") or any(c in t for c in "*?[]$"):
             continue
         t = t.lstrip("<>")
-        denied = read_denied(t, rules, cwd)
-        if denied:
+        denied = read_match(t, rules, cwd)
+        if denied[0]:
             return denied
-    return None
+    return None, None
+
+
+def shell_denied(cmd, rules, cwd=None, parent=None):
+    return shell_match(cmd, rules, cwd, parent)[0]
+
+
+def policy_test(argv):
+    """`.agents/bin/policy test`: what the pre-tool hook would say about a command or a read,
+    using the same matching code. Exit 2 blocked, 0 allowed, 3 usage."""
+    usage = ("usage: policy test \"<shell command>\"\n"
+             "       policy test --read <path>\n")
+    if len(argv) < 2 or argv[0] != "test" or (argv[1] == "--read" and len(argv) != 3) \
+            or (argv[1] != "--read" and len(argv) != 2):
+        if argv and argv[0] in ("-h", "--help"):
+            sys.stdout.write(usage)
+            return 0
+        sys.stderr.write(usage)
+        return 3
+    rules = load_policy()
+    cwd = os.getcwd()
+    real_root = os.path.realpath(ROOT)
+    if cwd == real_root or cwd.startswith(real_root + os.sep):  # a symlinked path to the repo (/tmp on macOS)
+        cwd = os.path.join(ROOT, os.path.relpath(cwd, real_root))
+    if argv[1] == "--read":
+        msg, rule = read_match(argv[2], rules, cwd)
+    else:
+        msg, rule = shell_match(argv[1], rules, cwd)
+    where = ""
+    if rule:
+        kind, pat, reason, n = rule
+        where = "%s:%d: %s %s%s" % (POLICY, n, kind, pat, "  # " + reason if reason else "")
+    if msg:
+        print("blocked: " + msg)
+        if where:
+            print(where)
+        if "policy" not in load_conf().get("HOOKS", "").split() or os.environ.get("AGENTS_HOOKS", "on") == "off":
+            print("note: the policy hook is off here (HOOKS in .agents/harness.conf, or AGENTS_HOOKS=off), so it isn't enforced")
+        return 2
+    print("allowed" + (" (an exception: %s)" % where if where else ": no policy rule matches"))
+    return 0
 
 
 def pre_tool(tool, data, conf):

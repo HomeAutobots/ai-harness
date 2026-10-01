@@ -24,3 +24,18 @@ skipped-test	(^|[^A-Za-z0-9_])(it|test|describe)\.only\(	remove .only; it silent
 skipped-test	@(Disabled|Ignore)([^A-Za-z]|$)	make the test pass instead of disabling it
 skipped-test	#\[ignore\]	make the test pass instead of ignoring it
 skipped-test	t\.Skip\(	make the test pass instead of skipping it
+# Secrets. Rules named "secret" also scan docs and the project's own .agents files (not the
+# harness's). Every finding prints its line with all secrets redacted. A match is dropped when it
+# looks like a reference or placeholder (${X}, $(...), {{x}}, <your-key>, EXAMPLE, sample,
+# changeme, xxxx, sk_test_), and an assignment's value must mix letters and digits. A leading (?i) makes a rule ignore case.
+# {n} and {n,} after a bracket expression work on every awk.
+secret	-----BEGIN[ A-Z]*PRIVATE KEY( BLOCK)?-----	private key: remove it and load it from a file outside the repo or a secret store; a test fixture needs a human to run guard allow
+secret	(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)	AWS access key: remove it and read credentials from the environment; a test fixture needs a human to run guard allow
+secret	(^|[^A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{36}([^A-Za-z0-9]|$)	GitHub token: remove it, revoke it, and read it from the environment
+secret	github_pat_[A-Za-z0-9_]{50,}	GitHub token: remove it, revoke it, and read it from the environment
+secret	xox[abprs]-[0-9]{6,}-[A-Za-z0-9-]{10,}	Slack token: remove it, revoke it, and read it from the environment
+secret	https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{20,}	Slack webhook: remove it, rotate it, and read it from the environment
+secret	(^|[^A-Za-z0-9_])[rs]k_live_[A-Za-z0-9]{20,}	Stripe live key: remove it, roll it, and read it from the environment
+secret	(^|[^A-Za-z0-9_])AIza[A-Za-z0-9_-]{35}	Google API key: remove it, rotate it, and read it from the environment
+secret	(?i)(password|passwd|secret|api_?key|access_?key|auth_?token|private_?key|secret_?key|client_?secret|token)["']?[[:space:]]*(:=|=>|=|:)[[:space:]]*["'][^"'[:space:]]{12,}["']	credential literal: read it from the environment or a secret store instead; a test fixture needs a human to run guard allow
+secret	^[[:space:]]*(export[[:space:]]+)?[A-Z0-9_]*(PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY|SECRET_KEY)=["']?[^[:space:]"'$]{12,}	credential in an env-style line: keep real values out of the repo (an ignored .env, or a secret store)

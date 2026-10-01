@@ -12,7 +12,8 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `core/` | harness | Core rules rendered into AGENTS.md, guard patterns |
 | `bin/sync` | harness | Renders AGENTS.md blocks and tool adapters; `--check` for CI |
 | `bin/verify`, `bin/check` | harness | Feedback orchestrator: tiers, caching, output shaping |
-| `bin/guard` | harness | Blocks new suppressions and skipped or deleted tests |
+| `bin/guard` | harness | Blocks new suppressions, skipped or deleted tests, and likely secrets |
+| `bin/policy` | harness | `policy test "<command>"` or `--read <path>`: what the policy hook would do, and which rule decides |
 | `bin/tasks` | harness | Plan ledger CLI (`plans/<slug>/tasks.json`) |
 | `bin/eval` | harness | Replays real fixes to measure whether the harness helps |
 | `bin/gitflow` | harness | The repo's git workflow: branch, commit, update, push, PR, review, merge, checks |
@@ -49,7 +50,9 @@ Exit codes everywhere: 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 
 - Change a built-in skill or pack: copy it to `.agents/library/skills/<name>/`, `workflows/<name>/`, or `stacks/<name>/` under the same name and edit it there (edits in `builtin/` are lost on upgrade).
 - Where a skill, workflow, or stack comes from: `bash .agents/lib/libraries.sh resolve <skills|workflows|stacks>`.
 - Pre-existing lint findings: `.agents/bin/verify --tier=full --update-baseline`.
-- Approve a suppression (humans only): `.agents/bin/guard allow <file-glob> <text> <reason>`.
+- Approve a suppression, or a fake key in a test fixture (humans only): `.agents/bin/guard allow <file-glob> <text> <reason>`.
+- Your own secret shapes for guard: a `secret<TAB><regex><TAB><fix hint>` line in `.agents/guard.patterns`.
+- Why a command or read is blocked: `.agents/bin/policy test "<command>"` or `.agents/bin/policy test --read <path>`.
 - Turn hooks off for a session: `AGENTS_HOOKS=off`.
 - See this repo's git workflow: `.agents/bin/gitflow config`, then `gitflow status`.
 - CI (team mode only; local mode keeps the harness out of CI): `.agents/bin/sync --check && .agents/bin/verify --tier=full`.

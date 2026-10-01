@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ai-harness: guard. Harness-owned: replaced on upgrade.
 # Blocks the ways an agent can get to green without fixing anything: new suppressions,
-# skipped or disabled tests, deleted test files, and removed test cases. It only looks at
-# lines added in the working tree (vs HEAD), so existing code never trips it.
+# skipped or disabled tests, deleted test files, and removed test cases. Also blocks likely
+# secrets (private keys, cloud and chat tokens, credential literals), in docs too, printing
+# the line with the secret redacted. It only looks at lines added in the working tree (vs
+# HEAD), so existing code never trips it.
 #
 #   .agents/bin/guard [files...]                      scan the whole diff, or just these files
 #   .agents/bin/guard allow <file-glob> <text> <reason...>   record an approved exception
@@ -26,7 +28,7 @@ case "${1:-}" in
   list)
     [ -f "$ALLOW" ] && cat "$ALLOW" || echo "(no exceptions)"
     exit 0 ;;
-  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
@@ -79,20 +81,99 @@ awk -F '\t' -v OFS='\t' '
     }
     return r "$"
   }
-  FILENAME == ARGV[1] { rule[++np] = $1; re[np] = $2; hint[np] = $3; next }
+  # Secret rules also scan docs and the project'"'"'s .agents files, but not the harness'"'"'s own
+  # files, the allowlist, or the patterns (they name what they match).
+  function harness_own(p) {
+    return p ~ /^\.agents\/(core|builtin|cache|bin|lib|hooks|commands)\// || p == ".agents/README.md" ||
+           p == ".agents/guard.allow" || p == ".agents/guard.patterns"
+  }
+  # Expand {n} and {n,} after a bracket expression into plain repeats: not every awk has them.
+  function expand(r,   out, i, j, k, L, c, cls, n, m) {
+    out = ""; i = 1; L = length(r)
+    while (i <= L) {
+      c = substr(r, i, 1)
+      if (c == "\\") { out = out substr(r, i, 2); i += 2; continue }
+      if (c != "[") { out = out c; i++; continue }
+      j = i + 1
+      if (substr(r, j, 1) == "^") j++
+      if (substr(r, j, 1) == "]") j++
+      while (j <= L && substr(r, j, 1) != "]") {
+        if (substr(r, j, 2) == "[:" && (k = index(substr(r, j + 2), ":]")) > 0) { j += k + 3; continue }
+        j++
+      }
+      cls = substr(r, i, j - i + 1); i = j + 1
+      if (substr(r, i, 1) == "{") {
+        k = i + 1; n = ""
+        while (substr(r, k, 1) ~ /[0-9]/) { n = n substr(r, k, 1); k++ }
+        m = ""
+        if (n != "" && substr(r, k, 2) == ",}") { for (j = 0; j < n + 0; j++) m = m cls; out = out m cls "*"; i = k + 2; continue }
+        if (n != "" && substr(r, k, 1) == "}") { for (j = 0; j < n + 0; j++) m = m cls; out = out m; i = k + 1; continue }
+      }
+      out = out cls
+    }
+    return out
+  }
+  # A secret match at t[ms..ms+ml-1] counts unless it looks like a reference or placeholder.
+  # Boundary characters around it are dropped first. Sets A..B to the value (after an assignment
+  # operator, if any): the part that gets redacted.
+  function plausible(t, ms, ml,   e, e0, m, raw, v, op) {
+    e = e0 = ms + ml - 1
+    while (ms <= e && substr(t, ms, 1) ~ /[^A-Za-z0-9_-]/) ms++
+    while (e >= ms && substr(t, e, 1) ~ /[^A-Za-z0-9_-]/) e--
+    if (e < ms) return 0
+    m = substr(t, ms, e - ms + 1); A = ms; op = 0
+    if (match(m, /(:=|=>|=|:)[[:space:]]*["'"'"']?/)) { A = ms + RSTART + RLENGTH - 1; op = 1 }
+    raw = substr(t, A, e0 - A + 1)
+    B = e
+    while (A < B && substr(t, A, 1) ~ /[^A-Za-z0-9_-]/) A++
+    v = substr(t, A, B - A + 1)
+    if (raw ~ /\$\{|\$\(|\{\{|%\(|<[A-Za-z0-9_ .-]*>/) return 0
+    if (tolower(raw) ~ /example|sample|changeme|change_me|replace_?me|placeholder|your[_-]|dummy|fake|redacted|xxxx|\*\*\*\*|\.\.\.|[sp]k_test_/) return 0
+    if (op && (v !~ /[0-9]/ || v !~ /[A-Za-z]/)) return 0
+    return 1
+  }
+  # First plausible match of secret rule i in t, scanning past placeholders: sets MS, or 0.
+  function find(i, t,   off, s, n) {
+    off = 1; n = 0
+    while (off <= length(t) && n++ < 50) {
+      s = substr(t, off)
+      if (!match(ci[i] ? tolower(s) : s, re[i]) || RLENGTH < 1) return 0
+      MS = off + RSTART - 1
+      if (plausible(t, MS, RLENGTH)) return 1
+      off = MS + 1
+    }
+    return 0
+  }
+  # The line with every plausible secret replaced, whichever rule the finding is for.
+  function redact(t,   i, n) {
+    for (i = 1; i <= np; i++) {
+      if (rule[i] != "secret") continue
+      n = 0
+      while (n++ < 50 && find(i, t)) t = substr(t, 1, A - 1) "<redacted>" substr(t, B + 1)
+    }
+    return t
+  }
+  FILENAME == ARGV[1] {
+    rule[++np] = $1; re[np] = $2; hint[np] = $3
+    if (substr(re[np], 1, 4) == "(?i)") { ci[np] = 1; re[np] = tolower(substr(re[np], 5)) }
+    re[np] = expand(re[np]); next
+  }
   FILENAME == ARGV[2] { if ($1 != "") { ag[++na] = glob2re($1); at[na] = $2 }; next }
   {
     path = $1; ln = $2; text = $0; sub(/^[^\t]*\t[^\t]*\t/, "", text)
-    if (skip(path)) next
+    sk = skip(path); own = harness_own(path)
     for (i = 1; i <= np; i++) {
-      if (text ~ re[i]) {
-        ok = 0
-        for (j = 1; j <= na; j++) if (path ~ ag[j] && index(text, at[j]) > 0) { ok = 1; break }
-        if (ok) break
-        s = text; sub(/^[ \t]+/, "", s); s = substr(s, 1, 80)
-        printf "%s:%s: block: [%s] %s\n  fix: %s\n", path, ln, rule[i], s, hint[i]
-        break
-      }
+      sec = (rule[i] == "secret")
+      if (sec ? own : sk) continue
+      if (sec ? !find(i, text) : (ci[i] ? tolower(text) : text) !~ re[i]) continue
+      ok = 0
+      for (j = 1; j <= na; j++) if (path ~ ag[j] && index(text, at[j]) > 0) { ok = 1; break }
+      if (ok) break
+      # Any finding prints the line with every secret on it redacted (a key next to a noqa too).
+      s = own ? text : redact(text)
+      sub(/^[ \t]+/, "", s); s = substr(s, 1, 80)
+      printf "%s:%s: block: [%s] %s\n  fix: %s\n", path, ln, rule[i], s, hint[i]
+      break
     }
   }' "$PATTERNS" "$ALLOWF" "$ADDED" >> "$OUT"
 

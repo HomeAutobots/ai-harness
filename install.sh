@@ -127,7 +127,7 @@ replace .agents/hooks
 replace .agents/README.md
 replace .agents/.gitattributes
 replace .agents/.gitignore
-for tool in sync verify check guard tasks eval gitflow; do
+for tool in sync verify check guard policy tasks eval gitflow; do
   replace ".agents/bin/$tool"
 done
 # An upgrade from before libraries: any link in .agents/skills/ was made by hand then. A local

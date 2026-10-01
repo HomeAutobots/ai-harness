@@ -93,7 +93,21 @@ Three tiers, each a project-owned script in `.agents/checks/`, all run through o
 
 **Guard** scans only lines added in the working tree and blocks the ways to get green without fixing anything: new suppressions (NOLINT, cppcheck-suppress, pragma ignores, `-Wno-`, noqa, eslint-disable, ts-ignore, and friends), skipped or disabled tests, `.only`, deleted test files, and removed test cases. A human can approve an exception with `guard allow <file-glob> <text> <reason>`; the policy blocks agents from running that.
 
+Guard also blocks likely secrets in added lines: private key headers, AWS access key IDs, GitHub, Slack, and Stripe live tokens, Slack webhooks, Google API keys, and credential literals like `db_password = "s3cr3t..."` or `export API_TOKEN=...` (a value of 12 or more characters mixing letters and digits). Secret rules scan docs too, and every finding redacts every secret on its line: `config.py:2: block: [secret] aws_key = "<redacted>"`. References and placeholders pass: `${TOKEN}`, `$(cat ...)`, `os.environ[...]`, `<your-key>`, `{{ secret }}`, Stripe test keys, and values containing `example`, `sample`, `changeme`, `replace_me`, `dummy`, `fake`, or `xxxx`. A fake key in a test fixture is the same human call as any other exception: `guard allow 'tests/fixtures/*' 'KEY = ' 'fake keys for parser tests'`. The text can be any part of the line; use a part that isn't the key, since `guard.allow` gets committed and reviewed. There's no inline marker, since an agent could write one. Add your own with a `secret` rule in `.agents/guard.patterns` (`secret<TAB><regex><TAB><fix hint>`); a leading `(?i)` ignores case, and `{n}` or `{n,}` after a bracket expression works on every awk.
+
 **Policy** lives in `.agents/policy.conf`: `deny-cmd` (command prefix, checked per segment of chains and pipelines, including inside `bash -c`), `deny-arg`, `deny-regex`, `deny-read` and `allow-read` (paths, also when named in a shell command). Defaults block `reset --hard`, `clean -f`, `git clean -x`/`-X`, `git stash -a`, history rewrites, `--no-verify`, piping downloads into a shell, `sudo`, and reads of `.env` files, key material, and credential directories. Git workflow rules (pushes, PRs, merges, branch and commit formats) live in `.agents/git.conf`.
+
+To see what the hook would do with a command or a read, and which rule decides it, run `policy test`. It uses the hook's own matching code, so its answer is the hook's answer:
+
+```
+$ .agents/bin/policy test "sudo apt install x"
+blocked: `sudo` is blocked by policy: no privilege escalation
+.agents/policy.conf:24: deny-cmd sudo  # no privilege escalation
+$ .agents/bin/policy test --read config/.env.example
+allowed (an exception: .agents/policy.conf:32: allow-read ./**/.env.example)
+```
+
+Exit 2 when blocked, 0 when allowed, 3 on a usage error or without python3. A block from the git workflow names `.agents/git.conf` instead of a line.
 
 ## Validation gates
 
@@ -243,7 +257,7 @@ my-project/
 ├── .cursor/hooks.json           hooks merged in                          (cursor)
 └── .agents/
     ├── core/                    harness: core rules, guard patterns
-    ├── bin/                     harness: sync, verify, check, guard, tasks, eval
+    ├── bin/                     harness: sync, verify, check, guard, policy, tasks, eval, gitflow
     ├── lib/, hooks/             harness: shell library, renderer, hook adapter
     ├── builtin/                 harness: built-in skills, workflow and stack packs (a library)
     ├── library/                 project: your skills, workflows, stacks (a library)
@@ -304,6 +318,7 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Hooks were tested with recorded payload shapes, not yet inside live Claude Code, Copilot, and Cursor sessions. Watch `.agents/cache/hook-events.log` on first use. The question-tool payloads (AskUserQuestion input and answers, Copilot ask_user) are the least certain; the capture falls back to recording the raw answer text.
 - `gitflow` was tested against a local bare remote and a stand-in `gh`, not live GitHub, GitLab, or Jira. `gitflow review` lists all PR comments (inline ones as `path:line`), not only unresolved threads.
 - Duplicate-question detection is word overlap with light stemming, not semantics. It catches rewordings of the same question; it can miss a paraphrase and, rarely, flag two different questions that share most words (`--force` overrides).
+- Guard's secret rules go by shape, not entropy: a random token with no known prefix and no telling variable name gets through. Guard sees only lines added in the working tree, never history or ignored files, and slows a little on very large diffs (about 2x on a 20,000-line new file). Treat it as a tripwire; a key that reached a commit still needs revoking. A `guard allow` entry clears every rule on the lines it matches, so an approval for a suppression also hides a secret on that same line.
 - No sandbox profile ships with the harness. Pair it with a devcontainer that allowlists egress for unattended runs.
 - Policy rules block commands and reads, not writes. An agent can't run `guard allow` or `fdd approve`, but it could edit `.agents/guard.allow` or the local FDD `approvals` file directly. Command rules also match patterns, not intent: an agent that writes its own script to do the same thing is outside them.
 - Tools that read `.agents/skills/` natively are assumed to follow the symlinks `sync` renders there, as Claude Code does in `.claude/skills/`. If one doesn't, set `LINK_MODE="copy"`.

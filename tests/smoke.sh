@@ -25,6 +25,14 @@ HAVE_PY=0; command -v python3 >/dev/null 2>&1 && HAVE_PY=1
 hasl(){ printf '%s' "$1" | grep -qF -- "$2"; }
 row(){ local IFS; IFS="$(printf '\t')"; printf '%s' "$*"; }   # row a b c: a<TAB>b<TAB>c, as the resolver prints
 mkskill(){ mkdir -p "$1/skills/$2"; printf -- '---\nname: %s\ndescription: %s\n---\n' "$2" "${3:-A skill.}" > "$1/skills/$2/SKILL.md"; }
+# Fake credentials for the guard's secret patterns, spliced so this file never holds a key-shaped string.
+FAKE_AWS="AKI""AQ7R2X9PLMN4BVC3T"
+FAKE_GH="gh""p_""$(printf 'aB3dE5fG7h%.0s' 1 2 3 4)"   # ghp_ plus 40 chars
+FAKE_GH="${FAKE_GH%????}"                          # trimmed to the real 36
+FAKE_SLACK="xo""xb-""2048193746-5839201746381-Qm8xK2pL9vR4tY7wZ1nB"
+FAKE_PEM="-----BEGIN RSA PRI""VATE KEY-----"
+guard_rc(){ local rc=0; (cd "$1" && .agents/bin/guard) >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }   # guard_rc <repo>
+policy(){ local p="$1"; shift; (cd "$p" && .agents/bin/policy "$@"); }   # policy <repo> <args...>
 
 echo "fresh install"
 P=$(repo fresh)
@@ -2611,6 +2619,130 @@ t    "...and never removed as stale"   grep -q ours "$LT/.agents/commands/fdd"
 NC=$(repo nocmds)
 "$HARNESS/install.sh" --team "$NC" >/dev/null 2>&1
 t    "no active packs: no commands dir" test ! -e "$NC/.agents/commands"
+
+echo "guard secrets and policy test"
+S=$(repo secrets)
+"$HARNESS/install.sh" --team "$S" >/dev/null 2>&1
+commit "$S" harness
+t    "nothing new: guard passes"       test "$(guard_rc "$S")" = 0
+printf 'region = "us-east-1"\naws_key = "%s"\n' "$FAKE_AWS" > "$S/config.py"
+t    "AWS access key blocked"          test "$(guard_rc "$S")" = 2
+out="$(cd "$S" && .agents/bin/guard 2>&1)" || true
+t    "...as path:line [secret]"        hasl "$out" "config.py:2: block: [secret]"
+tnot "...without echoing the key"      hasl "$out" "$FAKE_AWS"
+t    "...and says how to fix it"       hasl "$out" "fix:"
+printf 'aws_key = "%s"  # noqa\n' "$FAKE_AWS" > "$S/config.py"
+out="$(cd "$S" && .agents/bin/guard 2>&1)" || true
+t    "a key next to a suppression is still redacted" hasl "$out" "[suppression]"
+tnot "...in that finding too"          hasl "$out" "$FAKE_AWS"
+printf 'creds = {"aws": "%s", "gh": "%s"}\n' "$FAKE_AWS" "$FAKE_GH" > "$S/config.py"
+out="$(cd "$S" && .agents/bin/guard 2>&1)" || true
+t    "two keys on a line: both redacted" bash -c "! printf '%s' \"\$1\" | grep -qF -e \"\$2\" -e \"\$3\"" _ "$out" "$FAKE_AWS" "$FAKE_GH"
+rm "$S/config.py"
+printf 'git clone https://%s:x-oauth-basic@github.com/o/r\n' "$FAKE_GH" > "$S/clone.sh"
+t    "token followed by a colon blocked" test "$(guard_rc "$S")" = 2
+rm "$S/clone.sh"
+printf '<settings><aws_key>%s</aws_key></settings>\n' "$FAKE_AWS" > "$S/settings.xml"
+t    "key inside XML tags blocked"     test "$(guard_rc "$S")" = 2
+rm "$S/settings.xml"
+printf '%s\nMIIEow\n' "$FAKE_PEM" > "$S/deploy_key"
+t    "private key header blocked"      test "$(guard_rc "$S")" = 2
+rm "$S/deploy_key"
+printf 'Use this token: %s\n' "$FAKE_GH" > "$S/SETUP.md"
+t    "GitHub token blocked, in docs too" test "$(guard_rc "$S")" = 2
+rm "$S/SETUP.md"
+printf 'SLACK = "%s"\n' "$FAKE_SLACK" > "$S/notify.py"
+t    "Slack token blocked"             test "$(guard_rc "$S")" = 2
+rm "$S/notify.py"
+printf 'db_password = "s3cr3tP4ssw0rd99"\n' > "$S/db.py"
+t    "password literal blocked"        test "$(guard_rc "$S")" = 2
+rm "$S/db.py"
+printf 'export API_TOKEN=9f8e7d6c5b4a39281706\n' > "$S/deploy.sh"
+t    ".env-style line blocked"         test "$(guard_rc "$S")" = 2
+rm "$S/deploy.sh"
+cat > "$S/ok.py" <<'EOF'
+token = os.environ["GITHUB_TOKEN"]
+password = "${DB_PASSWORD}"
+api_key: "<your-key>"
+API_KEY=${API_KEY}
+export SECRET_KEY=$(cat /run/secrets/key)
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+password = getpass()
+token_url = "https://example.com/oauth/token2"
+secret = "not-a-secret-just-words"
+max_tokens = 4096
+client_secret = "changeme12345678"
+api_key = "xxxxxxxxxxxxxxxxxxxx"
+STRIPE_SECRET_KEY=sk_test_51Habcdef0123456789
+API_TOKEN=replace_me_123456
+EOF
+t    "references and placeholders pass" test "$(guard_rc "$S")" = 0
+rm "$S/ok.py"
+mkdir -p "$S/tests/fixtures"; printf 'KEY = "%s"\n' "$FAKE_AWS" > "$S/tests/fixtures/keys.py"
+t    "fixture key blocked until approved" test "$(guard_rc "$S")" = 2
+(cd "$S" && .agents/bin/guard allow 'tests/fixtures/*' 'KEY = ' 'fake key for parser tests' >/dev/null)
+t    "approved fixture passes"         test "$(guard_rc "$S")" = 0
+printf 'KEY = "%s"\n' "$FAKE_AWS" > "$S/src.py"
+t    "approval is scoped to its glob"  test "$(guard_rc "$S")" = 2
+rm -rf "$S/src.py" "$S/tests"
+(cd "$S" && .agents/bin/guard allow '*' "$FAKE_AWS" 'whole key as the text' >/dev/null)
+rm -f "$S/a.py"; printf 'x = 1\n' > "$S/a.py"
+t    "guard.allow itself is never flagged" test "$(guard_rc "$S")" = 0
+rm -f "$S/a.py" "$S/.agents/guard.allow"
+printf 'secret\tACME-[0-9]{6}\tuse the vault\nsecret\t(?i)internal_pw[[:space:]]*=[[:space:]]*[a-z0-9]{10,}\tuse the vault\n' > "$S/.agents/guard.patterns"
+printf 'id = "ACME-123456"\n' > "$S/a.py"
+t    "project secret pattern with {n}" test "$(guard_rc "$S")" = 2
+printf 'id = "ACME-12345"\n' > "$S/a.py"
+t    "...counts repeats exactly"       test "$(guard_rc "$S")" = 0
+printf 'INTERNAL_PW = Q9w8E7r6T5y4\n' > "$S/a.py"
+t    "(?i) project rule ignores case"  test "$(guard_rc "$S")" = 2
+rm -f "$S/a.py" "$S/.agents/guard.patterns"
+L=$(repo secretslocal)
+"$HARNESS/install.sh" "$L" >/dev/null 2>&1
+t    "absence: a fresh local install passes guard" test "$(guard_rc "$L")" = 0
+printf 'aws_key = "%s"\n' "$FAKE_AWS" > "$S/config.py"
+out="$("$S/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+t    "verify blocks on a secret (2)"   test "$rc" = 2
+tnot "...and its output hides the key" hasl "$out" "$FAKE_AWS"
+rm "$S/config.py"
+if [ "$HAVE_PY" -eq 1 ]; then
+  sudo_ln="$(line_of "$S/.agents/policy.conf" 'deny-cmd sudo')"
+  out="$(policy "$S" test "sudo ls" 2>&1)" && rc=0 || rc=$?
+  t  "policy test: blocked exits 2"    test "$rc" = 2
+  t  "...names file:line and reason"   hasl "$out" ".agents/policy.conf:$sudo_ln: deny-cmd sudo"
+  t  "...with the reason"              hasl "$out" "no privilege escalation"
+  out="$(policy "$S" test "git status" 2>&1)" && rc=0 || rc=$?
+  t  "policy test: allowed exits 0"    test "$rc" = 0
+  t  "...and says so"                  hasl "$out" "allowed"
+  t  "nested bash -c caught"           test "$(policy "$S" test 'bash -c "sudo ls"' >/dev/null 2>&1; echo $?)" = 2
+  env_ln="$(line_of "$S/.agents/policy.conf" 'deny-read ./**/.env*')"
+  out="$(policy "$S" test --read .env 2>&1)" && rc=0 || rc=$?
+  t  "--read .env blocked (2)"         test "$rc" = 2
+  t  "...names the deny-read line"     hasl "$out" ".agents/policy.conf:$env_ln: deny-read"
+  out="$(policy "$S" test --read .env.example 2>&1)" && rc=0 || rc=$?
+  t  "--read .env.example allowed"     test "$rc" = 0
+  t  "...and names the allow-read line" hasl "$out" ".agents/policy.conf:$(line_of "$S/.agents/policy.conf" 'allow-read ./**/.env.example'): allow-read"
+  echo 'allow-read ./docs/**' >> "$S/.agents/policy.conf"
+  out="$(policy "$S" test --read docs/guide.md 2>&1)" && rc=0 || rc=$?
+  t  "an exception is named only when it changed the answer" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'no policy rule matches'" _ "$out"
+  edit "$S/.agents/policy.conf" '/^allow-read \.\/docs/d'
+  t  "a shell read is caught too"      test "$(policy "$S" test 'cat .env' >/dev/null 2>&1; echo $?)" = 2
+  out="$(policy "$S" test "git push origin main" 2>&1)" && rc=0 || rc=$?
+  t  "git workflow blocks show git.conf" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF .agents/git.conf" _ "$out"
+  echo 'deny-regex make\s+depl[o0]y   # prod deploys are for humans' >> "$S/.agents/policy.conf"
+  last="$(wc -l < "$S/.agents/policy.conf" | tr -d ' ')"
+  out="$(policy "$S" test "make  depl0y" 2>&1)" && rc=0 || rc=$?
+  t  "a project rule: same verdict as the hook" bash -c "test $rc = 2 && printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make  depl0y\"}}' | (cd '$S' && .agents/hooks/run pre-tool --tool=claude) >/dev/null 2>&1; test \$? = 2"
+  t  "...at its line"                  hasl "$out" ".agents/policy.conf:$last: deny-regex"
+  trc "usage error is a tooling problem (3)" 3 policy "$S" test
+  trc "unknown subcommand (3)"         3 policy "$S" frob
+  mv "$S/.agents/policy.conf" "$S/policy.off"
+  out="$(policy "$S" test "sudo ls" 2>&1)" && rc=0 || rc=$?
+  t  "absence: no policy.conf allows (0)" test "$rc" = 0
+  mv "$S/policy.off" "$S/.agents/policy.conf"
+else
+  echo "  skip  (python3 not found)"; SKIP=$((SKIP + 1))
+fi
 
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

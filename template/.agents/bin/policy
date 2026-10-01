@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# ai-harness: policy. Harness-owned: replaced on upgrade.
+# Shows what the pre-tool hook would do with a shell command or a file read, and which rule
+# decided it (.agents/policy.conf:<line>, or the git workflow in .agents/git.conf). It runs the
+# hook's own matching code, so the answer is the hook's answer.
+#
+#   .agents/bin/policy test "<shell command>"   e.g. policy test "git clean -fdx"
+#   .agents/bin/policy test --read <path>       e.g. policy test --read config/.env.local
+#
+# Exit: 0 allowed, 2 blocked, 3 usage error or no python3.
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+case "${1:-}" in
+  -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+py="$(command -v python3 || command -v python || true)"
+if [ -z "$py" ]; then
+  echo "policy: python3 not found; the policy hook needs it too, so no policy is enforced here" >&2
+  exit 3
+fi
+PYTHONDONTWRITEBYTECODE=1 exec "$py" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import hook
+sys.exit(hook.policy_test(sys.argv[2:]))
+' "$ROOT/.agents/hooks" "$@"
