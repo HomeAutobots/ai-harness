@@ -2634,6 +2634,42 @@ edit "$MR/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS=""|'
 out="$(cd "$MR" && bash .agents/lib/libraries.sh resolve mcp)"
 tnot "an inactive workflow's servers don't resolve" hasl "$out" "tracker"
 
+echo "mcp: server files"
+if [ "$HAVE_PY" -eq 1 ]; then
+  MP="$MR/.agents/lib/mcp_render.py"
+  mc(){ printf '%s\n' "$2" > "$WORK/mcp-$1.json"; python3 "$MP" check "$WORK/mcp-$1.json" 2>&1 || true; }   # mc <name> <json>: check's output
+  mcrc(){ printf '%s\n' "$2" > "$WORK/mcp-$1.json"; python3 "$MP" check "$WORK/mcp-$1.json" >/dev/null 2>&1; }
+  t    "a stdio server checks clean"     test -z "$(mc ok '{"type": "stdio", "command": "npx", "args": ["-y", "s"], "env": {"LOG_LEVEL": "debug", "GITHUB_TOKEN": "${GITHUB_TOKEN}"}, "cwd": "tools"}')"
+  t    "an http server checks clean"     test -z "$(mc okh '{"type": "http", "url": "https://x.example/mcp", "headers": {"Authorization": "Bearer ${LINEAR_TOKEN}", "X-Region": "eu"}, "tools": ["a"], "targets": ["claude"]}')"
+  t    "no type with a command is stdio" mcrc notype '{"command": "npx"}'
+  out="$(mc badjson "$(printf '{\n  "command": "npx",\n  "args": [1,\n}')")"
+  t    "invalid JSON is an error with path:line" hasl "$out" "mcp-badjson.json:4: not valid JSON"
+  tnot "...and fails check"              mcrc badjson "$(printf '{\n  "command": "npx",\n  "args": [1,\n}')"
+  t    "a file that isn't an object is an error" hasl "$(mc arr '[]')" "mcp-arr.json: expected a JSON object"
+  t    "a url with no type is an error"  hasl "$(mc nourltype '{"url": "https://x"}')" "type: a server with a url needs \"type\": \"http\" or \"sse\""
+  t    "an unknown type is an error"     hasl "$(mc badtype '{"type": "ws", "url": "https://x"}')" "type: 'ws' isn't stdio, http, or sse"
+  t    "stdio needs a command"           hasl "$(mc nocmd '{"type": "stdio", "args": []}')" "command: required for a stdio server"
+  t    "http needs a url"                hasl "$(mc nourl '{"type": "http"}')" "url: required for an http server"
+  t    "args must be a list of strings"  hasl "$(mc badargs '{"command": "x", "args": "-y"}')" "args: expected a list of strings"
+  t    "env values must be strings"      hasl "$(mc badenv '{"command": "x", "env": {"N": 1}}')" "env.N: expected a string"
+  out="$(mc secret '{"command": "x", "env": {"GITHUB_TOKEN": "ghp_abc123"}}')"
+  t    "a literal secret is refused with its path" hasl "$out" "mcp-secret.json: env.GITHUB_TOKEN is a literal; use \${VAR} so the secret stays out of the repo"
+  tnot "...and fails check"              mcrc secret '{"command": "x", "env": {"GITHUB_TOKEN": "ghp_abc123"}}'
+  t    "secret names match in any case"  hasl "$(mc lsecret '{"command": "x", "env": {"my_api_key": "abc"}}')" "env.my_api_key is a literal"
+  t    "an Authorization header literal is refused" hasl "$(mc hsecret '{"type": "http", "url": "https://x", "headers": {"Authorization": "Bearer abc"}}')" "headers.Authorization is a literal"
+  t    "a secret built from a reference and fixed text is fine" mcrc hok '{"type": "sse", "url": "https://x", "headers": {"Proxy-Authorization": "Basic ${PROXY_CRED}", "X-Api-Key": "${X_KEY:-none}"}}'
+  t    "a \$VAR without braces is still a literal" hasl "$(mc dollar '{"command": "x", "env": {"TOKEN": "$TOKEN"}}')" "env.TOKEN is a literal"
+  t    "other literals are fine"         test -z "$(mc lit '{"command": "x", "env": {"LOG_LEVEL": "debug"}, "headers": {}}' | grep -v 'ignored')"
+  t    "an unknown key warns"            hasl "$(mc unk '{"command": "x", "colour": "blue"}')" "warning: $WORK/mcp-unk.json: unknown key 'colour', ignored (put a tool's own keys under native)"
+  t    "...but isn't an error"           mcrc unk '{"command": "x", "colour": "blue"}'
+  t    "a key for the other transport warns" hasl "$(mc mixed '{"command": "x", "url": "https://x"}')" "url: not used by a stdio server; ignored"
+  t    "tools must be a list of strings" hasl "$(mc badtools '{"command": "x", "tools": "all"}')" "tools: expected a list of strings"
+  t    "an unknown target warns"         hasl "$(mc badtgt '{"command": "x", "targets": ["claude", "vim"]}')" "targets: unknown tool 'vim'"
+  t    "an unknown native tool warns"    hasl "$(mc badnat '{"command": "x", "native": {"vim": {}}}')" "native: unknown tool 'vim'"
+  t    "a native block must be an object" hasl "$(mc badnat2 '{"command": "x", "native": {"claude": "x"}}')" "native.claude: expected an object"
+  t    "native gemini trust warns as escalation" hasl "$(mc trust '{"command": "x", "native": {"gemini": {"trust": true}}}')" "native.gemini: trust: true skips gemini's confirmation for every tool this server has"
+fi
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
