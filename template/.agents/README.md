@@ -54,5 +54,6 @@ Exit codes everywhere: 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 
 - Your own secret shapes for guard: a `secret<TAB><regex><TAB><fix hint>` line in `.agents/guard.patterns`.
 - Why a command or read is blocked: `.agents/bin/policy test "<command>"` or `.agents/bin/policy test --read <path>`.
 - Turn hooks off for a session: `AGENTS_HOOKS=off`.
-- See this repo's git workflow: `.agents/bin/gitflow config`, then `gitflow status`.
+- See this repo's git workflow: `.agents/bin/gitflow config`, then `gitflow status`. Any step's usage: `gitflow <step> --help` (it changes nothing).
+- cpp-cmake says `no tests ran`: CTest has no tests registered. Register them, or run the test binaries from `checks/turn.sh` and `checks/full.sh` (in full, from the sanitizer tree too: the commented `agents_step sanitizer-tests` line) and set `CPP_NO_TESTS=ok` there; a project with no tests sets it in `harness.conf`.
 - CI (team mode only; local mode keeps the harness out of CI): `.agents/bin/sync --check && .agents/bin/verify --tier=full`.

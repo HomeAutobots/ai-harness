@@ -5,8 +5,9 @@
 #
 # Deterministic C/C++ feedback built from the compiler, CMake, CTest, and static analyzers.
 # Every function follows the feedback contract: silent on success, path:line findings on
-# failure, exit 0 clean / 1 findings / 3 tool missing. Override the settings below in the
-# check scripts (before calling) or in .agents/harness.conf.
+# failure, exit 0 clean / 1 findings / 3 tool missing or no tests ran. Override the settings
+# below in the check scripts (before calling). .agents/harness.conf doesn't reach them, except
+# CPP_NO_TESTS, which is read from there when the script leaves it unset.
 
 . "$AGENTS_ROOT/.agents/lib/feedback.sh"
 CPP_PACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # wherever this pack's library is
@@ -21,6 +22,10 @@ CPP_PACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # wherever this pack'
 : "${CPP_SANITIZERS:=address,undefined}"
 : "${CPP_TEST_TIMEOUT:=120}"               # per-test timeout, seconds
 : "${CPP_CPPCHECK_ARGS:=}"                 # e.g. --addon=misra (MISRA needs the rule texts file)
+# CPP_NO_TESTS: when CTest has no tests in a build tree, the test steps report "no tests ran" as a
+# tooling problem (exit 3), never a silent ok. Set it to ok when the project has no tests, or runs
+# them from the tier scripts itself (agents_step tests ...). Read when a test step runs, so the
+# check script can set it after sourcing this file. Unset (existing installs): reported.
 
 cpp_py() { python3 "$CPP_PACK/cpp_tools.py" "$@"; }
 
@@ -156,12 +161,43 @@ _cpp_ctest() {  # _cpp_ctest <build dir> [ctest args...]
   (cd "$b" && ctest --output-on-failure --timeout "$CPP_TEST_TIMEOUT" -j "${CPP_JOBS:-$(cpp_nproc)}" "$@")
 }
 
+# _cpp_test_count <build dir> [ctest args...]: how many tests CTest lists there (0 without a CTest
+# file), or nothing when the listing can't be read. Counted from `ctest -N`, never from ctest's exit
+# code: with no tests ctest prints "No tests were found!!!" and exits 0 or 8, depending on its
+# version and CTEST_NO_TESTS_ACTION.
+_cpp_test_count() {
+  local b="$1"
+  shift
+  [ -f "$b/CTestTestfile.cmake" ] || { echo 0; return 0; }
+  (cd "$b" && ctest -N "$@" 2>/dev/null) | awk '/^Total Tests: *[0-9]+/ { n = $3 } END { print n }'
+}
+
+# _cpp_tests_ready <step> <build dir>: 0 when the tree has tests to run. Otherwise says that no tests
+# ran and returns 3 (a tooling problem: the check couldn't do its job), or 1 to skip quietly when
+# CPP_NO_TESTS=ok. ctest missing is 3 too.
+_cpp_tests_ready() {
+  local n how="${CPP_NO_TESTS:-}"
+  if [ -f "$AGENTS_ROOT/$2/CTestTestfile.cmake" ]; then
+    command -v ctest >/dev/null 2>&1 || { echo "infra: ctest not found (needed for $1)"; return 3; }
+  fi
+  n="$(_cpp_test_count "$AGENTS_ROOT/$2")"
+  [ "$n" = 0 ] || return 0   # tests, or a listing we can't read: run ctest and let it speak
+  if [ -z "$how" ] && command -v agents_conf_get >/dev/null 2>&1; then
+    how="$(agents_conf_get "$AGENTS_ROOT/.agents/harness.conf" CPP_NO_TESTS)"
+  fi
+  [ "$how" = ok ] && return 1
+  echo "infra: $1: no tests ran: CTest has none registered in $2. Register them with add_test(), or run them from .agents/checks/*.sh and set CPP_NO_TESTS=ok there; if the project has no tests, a person sets CPP_NO_TESTS=ok in .agents/harness.conf"
+  return 3
+}
+
 # cpp_test_affected <files...>: run only the tests whose targets depend on the changed sources.
-# Falls back to all tests for header, CMake, or unknown changes, and when the codemodel is missing.
+# Falls back to all tests for header, CMake, or unknown changes, when the codemodel is missing, and
+# when the selection matches no test CTest knows.
 cpp_test_affected() {
-  local b="$AGENTS_ROOT/$CPP_BUILD_DIR" sel
-  [ -f "$b/CTestTestfile.cmake" ] || return 0
+  local b="$AGENTS_ROOT/$CPP_BUILD_DIR" sel rc=0
+  _cpp_tests_ready tests "$CPP_BUILD_DIR" || { rc=$?; [ "$rc" -eq 1 ] && return 0; return "$rc"; }
   sel="$(cpp_py affected "$AGENTS_ROOT" "$b" "$@")" || sel=ALL
+  case "$sel" in NONE|ALL) ;; *) [ "$(_cpp_test_count "$b" -R "$sel")" = 0 ] && sel=ALL ;; esac
   case "$sel" in
     NONE) return 0 ;;
     ALL) agents_step tests _cpp_ctest "$b" ;;
@@ -171,8 +207,8 @@ cpp_test_affected() {
 
 # cpp_test_all: every test in the agent build tree
 cpp_test_all() {
-  local b="$AGENTS_ROOT/$CPP_BUILD_DIR"
-  [ -f "$b/CTestTestfile.cmake" ] || return 0
+  local b="$AGENTS_ROOT/$CPP_BUILD_DIR" rc=0
+  _cpp_tests_ready tests "$CPP_BUILD_DIR" || { rc=$?; [ "$rc" -eq 1 ] && return 0; return "$rc"; }
   agents_step tests _cpp_ctest "$b"
 }
 
@@ -182,9 +218,9 @@ cpp_sanitize() {
   local f="-fsanitize=$CPP_SANITIZERS -fno-omit-frame-pointer -fno-sanitize-recover=all"
   cpp_configure "$CPP_SAN_DIR" "-DCMAKE_C_FLAGS=$f" "-DCMAKE_CXX_FLAGS=$f" \
     "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=$CPP_SANITIZERS" "-DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=$CPP_SANITIZERS" || return $?
-  local b="$AGENTS_ROOT/$CPP_SAN_DIR"
+  local b="$AGENTS_ROOT/$CPP_SAN_DIR" rc=0
   agents_step sanitizer-build cmake --build "$b" -j "${CPP_JOBS:-$(cpp_nproc)}" || return 1
-  [ -f "$b/CTestTestfile.cmake" ] || return 0
+  _cpp_tests_ready sanitizer-tests "$CPP_SAN_DIR" || { rc=$?; [ "$rc" -eq 1 ] && return 0; return "$rc"; }
   # No detect_leaks=1: ASan already enables leak checks where LeakSanitizer exists (Linux), and
   # Apple clang aborts every binary at startup when it's set ("not supported on this platform").
   ASAN_OPTIONS="${ASAN_OPTIONS:-abort_on_error=1}" \

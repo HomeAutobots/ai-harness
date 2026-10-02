@@ -20,6 +20,7 @@ ALLOW=".agents/guard.allow"
 
 case "${1:-}" in
   allow)
+    for a in "$@"; do case "$a" in -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac; done
     [ $# -ge 4 ] || { echo "usage: guard allow <file-glob> <text> <reason...>" >&2; exit 3; }
     glob="$2" text="$3"; shift 3
     printf '%s\t%s\t%s\n' "$glob" "$text" "$*" >> "$ALLOW"

@@ -32,6 +32,7 @@ case "${1:-}" in
     [ -n "$PY" ] || { echo "sync: python3 is required to pin skills" >&2; exit 2; }
     exec "$PY" .agents/lib/harness.py lock-skill "$2" "$3" "$4" ;;
   "") ;;
+  -h|--help) sed -n '5,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $0 [--check | --unshare | --lock-skill <name> <source> <ref>]" >&2; exit 2 ;;
 esac
 

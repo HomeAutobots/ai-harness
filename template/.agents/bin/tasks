@@ -20,12 +20,33 @@
 #   tasks link <slug> [branch]               record the plan's branch (default: current), for gitflow pr
 #   tasks log <slug> <message...>            append a dated line to progress.log
 #   tasks check [slug]                       validate ledger format
+#   tasks similar <text...>                  answered questions like this one (the hooks use it)
+#   tasks record [--gate=<g>] [--source=<s>] <question> [answer]
+#                                            a question asked with the tool's own question tool,
+#                                            into the active plan (the hooks use it)
+# `tasks <command> --help` (or -h) prints its usage and writes nothing. An unknown option, or
+# --help among other words, is refused before anything is written (exit 3); text that starts
+# with - goes after --.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PLANS="$ROOT/.agents/plans"
 
 die() { echo "tasks: $*" >&2; exit 1; }
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
+# usage_of <command>: that command's lines from the header above
+usage_of() {
+  awk -v c="$1" 'NR > 1 && !/^#/ { exit }
+    /^#   tasks / { on = ($3 == c) }
+    !/^#   tasks / && !/^#      / { on = 0 }
+    on { sub(/^# /, ""); print }' "$0"
+}
+# takes_opt <command> <arg>: an option that command takes
+takes_opt() {
+  case "$1:$2" in
+    ask:--gate=*|ask:--force|questions:--open|questions:--plan=*|record:--gate=*|record:--source=*) return 0 ;;
+  esac
+  return 1
+}
 
 plan_dir() {
   [ -n "${1:-}" ] || die "missing <slug>"
@@ -162,6 +183,34 @@ active_plan() {
 
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
+# Before any command runs: -h or --help alone prints its usage and nothing else (with other words
+# before any --, it's a usage error, exit 3), and an unknown option is refused rather than becoming a slug, a branch, or recorded text. The commands
+# with options keep the -- for their own loops; for the rest it has done its job here.
+case "$cmd" in
+  new|add|list|next|set|ask|answer|questions|similar|link|log|check|record)
+    for a in "$@"; do
+      case "$a" in
+        --) break ;;
+        -h|--help)
+          [ $# -eq 1 ] && { echo "usage:"; usage_of "$cmd"; exit 0; }
+          echo "tasks: $cmd: -h or --help with other arguments; nothing was written (text that starts with - goes after --)" >&2
+          echo "usage:" >&2; usage_of "$cmd" >&2; exit 3 ;;
+      esac
+    done
+    rest=() dd=0
+    for a in "$@"; do
+      if [ "$dd" -eq 0 ]; then
+        case "$a" in
+          --) dd=1; case "$cmd" in ask|questions|record) rest+=("$a") ;; esac; continue ;;
+          -?*) takes_opt "$cmd" "$a" || {
+                 echo "tasks: $cmd: unknown option '$a' (text that starts with - goes after --)" >&2
+                 echo "usage:" >&2; usage_of "$cmd" >&2; exit 3; } ;;
+        esac
+      fi
+      rest+=("$a")
+    done
+    set -- ${rest[@]+"${rest[@]}"} ;;
+esac
 case "$cmd" in
   new)
     slug="${1:-}"; [ $# -gt 0 ] && shift
@@ -250,7 +299,7 @@ PLAN
     id="${1:-}"; [ $# -gt 0 ] && shift
     gate="" force=0
     while [ $# -gt 0 ]; do
-      case "$1" in --gate=*) gate="${1#--gate=}"; shift ;; --force) force=1; shift ;; *) break ;; esac
+      case "$1" in --gate=*) gate="${1#--gate=}"; shift ;; --force) force=1; shift ;; --) shift; break ;; *) break ;; esac
     done
     [ $# -gt 0 ] || die "usage: tasks ask <slug> <T-id> [--gate=plan|tests|impl] [--force] <question...>"
     parse "$d/tasks.json" | awk -F '\t' -v id="$id" '$1 == id { f = 1 } END { exit f ? 0 : 1 }' || die "no task '$id'"
@@ -307,7 +356,7 @@ PLAN
   questions)
     only_open=0 plan=""
     while [ $# -gt 0 ]; do
-      case "$1" in --open) only_open=1; shift ;; --plan=*) plan="${1#--plan=}"; shift ;; *) break ;; esac
+      case "$1" in --open) only_open=1; shift ;; --plan=*) plan="${1#--plan=}"; shift ;; --) shift; break ;; *) break ;; esac
     done
     all_questions | awk -F '\t' -v open="$only_open" -v plan="$plan" -v words="$*" '
       BEGIN { nw = split(tolower(words), w, " ") }

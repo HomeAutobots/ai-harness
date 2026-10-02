@@ -5,6 +5,9 @@
 # Runs from whichever library has the pack. The project is the one the pack sits in
 # (.agents/builtin/ or .agents/library/), else $AGENTS_ROOT, else the nearest directory at or
 # above the working directory with an .agents/harness.conf.
+for a in "$@"; do   # -h or --help anywhere prints the usage and does nothing else
+  case "$a" in -h|--help) printf 'usage: fdd approve list | design <ID> | inspect <ID>\n       fdd status [ID]\n'; exit 0 ;; esac
+done
 PACK="$(cd "$(dirname "$0")/.." && pwd)"
 case "$PACK" in
   */.agents/builtin/workflows/*|*/.agents/library/workflows/*) ROOT="${PACK%/.agents/*}" ;;

@@ -203,8 +203,13 @@ if "B" in summary and "C" in summary and abs(summary["B"][0] - summary["C"][0]) 
 PYEOF
 }
 
+for a in "$@"; do   # -h or --help anywhere prints the usage and does nothing else
+  case "$a" in -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+done
 case "${1:-}" in
-  new) shift; cmd_new "$@" ;;
+  new) shift
+    case "${1:-}" in -*) echo "eval: new: unknown option '$1' (usage: eval new <id> <fix-commit>)" >&2; exit 3 ;; esac
+    cmd_new "$@" ;;
   run) shift; cmd_run "$@" ;;
   report) shift; cmd_report "$@" ;;
   *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;

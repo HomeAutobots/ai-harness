@@ -139,7 +139,7 @@ Every repo's git workflow is described in config and carried out by one CLI, `.a
 - **Settings layer**, last wins: harness defaults, then your personal `~/.config/ai-harness/git.conf` (or `$AGENTS_PERSONAL_DIR/git.conf`; your workflow follows you across repos), then the project's `.agents/git.conf`. `gitflow config` shows the result.
 - **Templates do double duty.** `GIT_BRANCH="{type}/{ticket}-{slug}"` and `GIT_COMMIT="{ticket}: {summary}"` both build names and messages (`gitflow start`, `gitflow commit`) and validate them. Extra rules go in `GIT_COMMIT_PATTERN`, required trailers in `GIT_COMMIT_TRAILERS`.
 - **Commit templates.** A project can define the whole message in one file (`GIT_COMMIT_TEMPLATE`, or the repo's own `commit.template`): subject, sections like `Why:` and `Testing:`, and trailers. Sections are required unless marked `(optional)`. Humans get the editor prefilled (ticket and trailers already in), agents fill sections with `gitflow commit --section Why=...`, `gitflow template` shows what's expected, and the `commit-msg` hook checks everyone's messages against it.
-- **The steps:** `start`, `commit`, `update` (merge or rebase the base in), `check`, `push` (runs a verify tier first), `pr` (gh, glab, or printed text; base forced to `GIT_BASE`; body from `.agents/git/pr.md`), `review`, `merge`.
+- **The steps:** `start`, `commit`, `update` (merge or rebase the base in), `check`, `push` (runs a verify tier first), `pr` (gh, glab, or printed text; base forced to `GIT_BASE`; body from `.agents/git/pr.md`), `review`, `merge`. `gitflow <step> --help` (or `-h`) prints that step's usage and does nothing else. An unknown option (`gitflow push --force`, `gitflow commit -m x`), an argument a step doesn't take, or `--help` among other words (`gitflow commit fix -h parsing`) is refused with the usage and exit 3, before anything changes. Summary words that start with `-` go after `--`: `gitflow commit Handle -- -v`. The policy hook lets an agent run exactly `gitflow <step> --help` even for a step that's yours; native deny rules, where they're rendered, still block it.
 - **Who does what:** `GIT_AGENT_MAY` lists the steps agents may take (default `branch commit`); the rest are yours.
 - **Protected branches are the project's call.** Nothing is protected by default, which suits solo and trunk-based repos. Set any names or globs, such as `GIT_PROTECTED="dev/main release/*"`; `{base}` stands for whatever `GIT_BASE` is.
 - **Plans link to branches only if you want.** `tasks link <slug>` records a plan's branch so `gitflow pr` can include it. Plans work without branches, and branches without plans.
@@ -154,7 +154,7 @@ The `git-workflow` skill covers the judgment: commit granularity, PR description
 
 ## Plans that survive sessions and tools
 
-`plan-task` keeps a ledger per piece of work in `.agents/plans/<slug>/`: `plan.md` for intent, questions, and decisions, `tasks.json` for steps, `progress.log` for session notes. Agents edit it only through `.agents/bin/tasks` (`new`, `add`, `next`, `set`, `ask`, `answer`, `log`), so it stays valid JSON. Any agent in any tool resumes with `tasks next <slug>` and `git log`.
+`plan-task` keeps a ledger per piece of work in `.agents/plans/<slug>/`: `plan.md` for intent, questions, and decisions, `tasks.json` for steps, `progress.log` for session notes. Agents edit it only through `.agents/bin/tasks` (`new`, `add`, `next`, `set`, `ask`, `answer`, `log`), so it stays valid JSON. Any agent in any tool resumes with `tasks next <slug>` and `git log`. Like `gitflow`, `tasks <command> --help` prints that command's usage and writes nothing, and an unknown option or `--help` among other words is refused (exit 3) instead of being recorded as text; text that starts with `-` goes after `--`.
 
 ## Evals
 
@@ -241,7 +241,7 @@ Pack scripts run from wherever the pack lives. Find the pack's own files from th
 
 `install.sh --stack <name>` adds the stack to `STACKS` and seeds the tier scripts if they're still stubs. Tailored tier scripts are never replaced. The pack runs from its library (shipped ones from `.agents/builtin/stacks/<name>`); `.agents/stacks/<name>/lib.sh` is a small harness-owned shim that tier scripts source, which loads the pack from wherever it resolves.
 
-- **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only, affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. See `stacks/cpp-cmake/README.md`.
+- **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only, affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. When CTest has no tests registered, the test steps print `no tests ran` and exit 3 (`INFRA verify turn`), never a quiet `ok`; set `CPP_NO_TESTS=ok` for a project with no tests, or one whose tier scripts run its test binaries themselves. See `stacks/cpp-cmake/README.md`.
 
 ## Workflow packs
 
