@@ -3,7 +3,10 @@
 
 Classic Feature-Driven Development with local artifacts that are never committed. They live in
 FDD_DIR: model.md, features.md, designs/<ID>.md, and approvals (written only by `fdd approve`).
-Settings come from .agents/harness.conf (environment variables override):
+`fdd approve` also records each line it writes in the git dir (ai-harness/fdd-approvals); a line in
+approvals without that record doesn't count and is a finding. It refuses in a shell an agent tool
+started (CLAUDECODE, GEMINI_CLI, CURSOR_AGENT). Settings come from .agents/harness.conf
+(environment variables override):
 
   FDD_DIR           where the artifacts live, repo-relative or absolute (default .agents/fdd)
   FDD_ID_PATTERN    what a private feature ID looks like, as a Python regex (default F-[0-9]+)
@@ -11,11 +14,16 @@ Settings come from .agents/harness.conf (environment variables override):
   FDD_NAME_PATTERN  what a feature name looks like, as a Python regex; empty skips the check
   FDD_ASK           gates that need a human approval: any of list, design, inspect
 
-  fdd_tools.py check <edit|turn|full> <root> [files...]   the verify checks (full also writes the report)
+  fdd_tools.py check <edit|turn|full> <root> [files...]   the verify checks (full also writes the report);
+                                                          with AGENTS_SINCE (verify --since), turn and
+                                                          full also judge what was committed since then
   fdd_tools.py msg <root> <message-file>                  commit messages carry no private feature IDs
   fdd_tools.py approve <root> list | design <ID> | inspect <ID>   record a human approval
   fdd_tools.py status <root> [ID]                         approvals and milestones, no dates
-Exit: 0 clean, 1 findings, 2 usage, 3 tooling problem (e.g. a pattern that isn't a valid regex).
+  fdd_tools.py adopt <root>                               install.sh: record the approvals already in
+                                                          FDD_DIR while the git dir has none for it
+Exit: 0 clean, 1 findings, 2 usage or an approval fdd approve didn't record, 3 tooling problem (e.g.
+a pattern that isn't a valid regex).
 """
 import datetime
 import fnmatch
@@ -112,10 +120,11 @@ def finding(path, line, kind, msg, fix):
     return "%s:%d: error: [%s] %s\n  fix: %s" % (path, line, kind, msg, fix)
 
 
-def emit(found):
+def emit(found, blocked=()):
+    """Print findings; exit 2 (a policy block) when any is a forged approval, else 1 or 0."""
     for f in found:
         print(f)
-    return 1 if found else 0
+    return 2 if blocked else 1 if found else 0
 
 
 class Ids:
@@ -162,9 +171,63 @@ def in_repo(root, path):
     return not os.path.relpath(os.path.join(root, path), root).startswith("..")
 
 
-def added_lines(root, files):
-    """{path: {line_no: text}} for lines added in the working tree vs HEAD, untracked included."""
+def since_commits(root):
+    """Commits made since AGENTS_SINCE (verify --since; the stop gate passes HEAD and the branch
+    tips its turn started from): what HEAD or a local branch has now that none of those had,
+    leaving out merges, anything a remote has (a pull of the base), and copies with the same patch
+    as a commit they had (a rebase, or an amend of the message only). Empty without any."""
+    since = os.environ.get("AGENTS_SINCE", "").split()
+    if not since:
+        return []
+    new = git(root, "rev-list", "--no-merges", "HEAD", "--branches", "--not", *since, "--remotes", "--").split()
+    gone = git(root, "rev-list", "--no-merges", *since, "--not", "HEAD", "--branches", "--").split() if new else []
+    if gone:
+        old = set(patch_ids(root, gone).values())
+        ids = patch_ids(root, new)
+        new = [c for c in new if ids.get(c) not in old]
+    return new
+
+
+def patch_ids(root, commits):
+    """{commit: stable patch id} (git patch-id), for telling a rebased copy from new work."""
+    try:
+        show = subprocess.run(["git", "-C", root, "show", "--no-color", "--no-ext-diff"] + list(commits),
+                              capture_output=True).stdout
+        out = subprocess.run(["git", "-C", root, "patch-id", "--stable"], input=show,
+                             capture_output=True).stdout.decode(errors="replace")
+    except OSError:
+        return {}
+    return {c: p for p, c in (l.split()[:2] for l in out.splitlines() if len(l.split()) >= 2)}
+
+
+def parse_patch(text, out):
+    """Add the '+' lines of a unified diff (-U0) to out, {path: {line_no: text}}. Lines two patches
+    add at the same number are joined, so neither is lost."""
+    path, ln, header = None, 0, False
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            path, header = None, True
+        elif header and line.startswith("+++ "):
+            p = line[4:]
+            p = p[:-1] if p.endswith("\t") else p
+            path = p[2:] if p.startswith("b/") else None
+        elif line.startswith("@@"):
+            header = False
+            m = re.match(r"@@ -\S+ \+(\d+)", line)
+            ln = int(m.group(1)) if m else 0
+        elif line.startswith("+") and path and not header:
+            lines = out.setdefault(path, {})
+            lines[ln] = line[1:] if ln not in lines else lines[ln] + "\n" + line[1:]
+            ln += 1
+
+
+def added_lines(root, files, commits=()):
+    """{path: {line_no: text}} for lines added in the working tree vs HEAD, untracked included,
+    plus every line the given commits added (whole commits, whatever the file list), so committing
+    doesn't hide a change. A committed line's number is the one in its commit."""
     out = {}
+    if commits:
+        parse_patch(git(root, "show", "-U0", "--no-color", "--no-ext-diff", "--format=", *commits), out)
     if files:
         files = [f for f in files if in_repo(root, f)]  # git rejects the whole call for one outside path
         if not files:
@@ -172,21 +235,7 @@ def added_lines(root, files):
     has_head = subprocess.run(["git", "-C", root, "rev-parse", "-q", "--verify", "HEAD"],
                               capture_output=True).returncode == 0
     if has_head:
-        path, ln, header = None, 0, False
-        for line in git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", *files).splitlines():
-            if line.startswith("diff --git "):
-                path, header = None, True
-            elif header and line.startswith("+++ "):
-                p = line[4:]
-                p = p[:-1] if p.endswith("\t") else p
-                path = p[2:] if p.startswith("b/") else None
-            elif line.startswith("@@"):
-                header = False
-                m = re.match(r"@@ -\S+ \+(\d+)", line)
-                ln = int(m.group(1)) if m else 0
-            elif line.startswith("+") and path and not header:
-                out.setdefault(path, {})[ln] = line[1:]
-                ln += 1
+        parse_patch(git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", *files), out)
     for f in git(root, "ls-files", "-o", "--exclude-standard", "--", *files).splitlines():
         try:
             with open(os.path.join(root, f), encoding="utf-8") as fh:
@@ -253,14 +302,62 @@ def parse_features(root, conf, path):
 
 # ------------------------------------------------------------------ approvals, ledger, milestones
 
-def read_approvals(d):
-    """{(kind, id): value}; the latest line for each wins."""
-    out = {}
-    for line in read_lines(os.path.join(d, "approvals")):
+# Shells an agent tool starts carry a marker its docs name: Claude Code sets CLAUDECODE=1 for its
+# Bash tool, Gemini CLI sets GEMINI_CLI=1 for run_shell_command, Cursor sets CURSOR_AGENT. Codex
+# and Copilot document none (README, Known gaps).
+AGENT_SHELLS = (("CLAUDECODE", "Claude Code"), ("GEMINI_CLI", "Gemini CLI"), ("CURSOR_AGENT", "Cursor"))
+
+
+def agent_shell():
+    """(variable, tool) when this runs in a shell an agent tool started, else None."""
+    for var, name in AGENT_SHELLS:
+        if os.environ.get(var):
+            return var, name
+    return None
+
+
+def record_file(root):
+    """Where fdd approve records the lines it writes: the git dir every worktree shares, outside
+    the working tree and FDD_DIR. None outside git: nothing to record in, so every line counts.
+    Not keyed by FDD_DIR: a line binds a hash of what was approved, so the same line in a moved or
+    copied FDD_DIR approves the same thing."""
+    gd = git(root, "rev-parse", "--git-common-dir").strip()
+    if not gd:
+        return None
+    gd = gd if os.path.isabs(gd) else os.path.join(root, gd)
+    return os.path.join(os.path.normpath(gd), "ai-harness", "fdd-approvals")
+
+
+def recorded(root):
+    """The approvals lines fdd approve recorded, or None outside git."""
+    path = record_file(root)
+    return None if path is None else set(read_lines(path))
+
+
+def read_approvals(root, d):
+    """({(kind, id): value}, [(line no, kind, id)]): the latest recorded line for each wins; lines
+    fdd approve didn't record (written by hand or by an agent) don't count and come back second."""
+    rec = recorded(root)
+    out, unrecorded = {}, []
+    for n, line in enumerate(read_lines(os.path.join(d, "approvals")), 1):
         parts = line.split("\t")
-        if len(parts) == 5:
-            out[(parts[0], parts[1])] = parts[4]
-    return out
+        if len(parts) != 5:
+            continue
+        if rec is not None and line not in rec:
+            unrecorded.append((n, parts[0], parts[1]))
+            continue
+        out[(parts[0], parts[1])] = parts[4]
+    return out, unrecorded
+
+
+def unrecorded_findings(root, d, unrecorded):
+    path = shown(root, os.path.join(d, "approvals"))
+    return [finding(path, n, "fdd-approval-unrecorded",
+                    "this %s approval wasn't written by fdd approve, so it doesn't count"
+                    % (kind if fid == "-" else "%s %s" % (kind, fid)),
+                    "only the human approves: ask them to run %s %s, and delete this line if they didn't write it"
+                    % (approve_cmd(root), kind if fid == "-" else "%s %s" % (kind, fid)))
+            for n, kind, fid in unrecorded]
 
 
 def sha(*paths):
@@ -358,22 +455,26 @@ def cmd_check(tier, root, files):
     conf = load_conf(root)
     d = fdd_dir(root, conf)
     fpath = os.path.join(d, "features.md")
-    approvals = read_approvals(d)
+    approvals, unrecorded = read_approvals(root, d)
     ask = conf["FDD_ASK"].split()
+    edited = {os.path.normpath(os.path.join(root, f)) for f in files}
+    # Forged approvals first, on every tier that looks: the edit tier when approvals itself was edited.
+    blocked = unrecorded_findings(root, d, unrecorded) \
+        if tier != "edit" or os.path.join(d, "approvals") in edited else []
     out = []
     if not os.path.isfile(fpath):
         if tier != "edit" and ("list", "-") in approvals:
             out.append(finding(shown(root, fpath), 1, "fdd-list-missing", "the feature list was approved but is gone",
                                "restore it; to stop using the workflow, remove feature-driven from WORKFLOWS instead"))
-        return emit(out)
+        return emit(blocked + out, blocked)
     feats, fmt = parse_features(root, conf, fpath)
     if tier != "edit":
         out += not_local(root, d, fpath)
-    edited = {os.path.normpath(os.path.join(root, f)) for f in files}
     if tier == "full" or (tier == "edit" and fpath in edited):
         out += fmt
     inside = d + os.sep
-    added = added_lines(root, files)
+    commits = since_commits(root) if tier != "edit" else []
+    added = added_lines(root, files, commits)
     ids = Ids(conf["FDD_ID_PATTERN"])
     for path in sorted(added):
         if os.path.join(root, path).startswith(inside):
@@ -386,7 +487,7 @@ def cmd_check(tier, root, files):
                                        "remove it; use the ticket key %s instead" % tk if tk else
                                        "remove it; shared code, tests, and docs don't mention local feature IDs"))
     if tier == "edit":
-        return emit(out)
+        return emit(blocked + out, blocked)
     rows = ledger(root, conf)
     doing = [r for r in rows if r[2] == "doing"]
     for rel, n, _, _, fid in doing:
@@ -403,10 +504,25 @@ def cmd_check(tier, root, files):
                                    % ("not approved" if state == "missing" else "changed since it was approved"),
                                    "validate the model and list, then ask the human to run %s list" % approve_cmd(root)))
         first = min(added[scoped[0]] or [1])  # point at the first changed line, not the top of the file
-        active = sorted({r[4] for r in doing if r[4] in feats})
-        if not active:
-            out.append(finding(scoped[0], first, "fdd-untraced",
-                               "this change touches %s but no plan task in progress names a feature" % conf["FDD_SCOPE"],
+        # A feature is in progress while its task is doing. Commits made since AGENTS_SINCE can also
+        # belong to a feature whose task is done with that commit recorded: that traces the files
+        # those commits touched, nothing else.
+        built, traced = set(), set()
+        for r in rows:
+            mine = [c for c in commits if len(r[3]) >= 7 and c.startswith(r[3])] if r[2] == "done" else []
+            if mine and r[4] in feats:
+                built.add(r[4])
+                traced |= {p for p in git(root, "show", "--format=", "--name-only", "--no-renames", *mine).splitlines() if p}
+        doing_feats = {r[4] for r in doing if r[4] in feats}
+        active = sorted(doing_feats | built)
+        untraced = [] if doing_feats else [p for p in scoped if p not in traced]
+        if untraced:
+            first_u = min(added[untraced[0]] or [1])
+            since = (" (counting %d commit%s since %s)" % (len(commits), "" if len(commits) == 1 else "s",
+                                                           os.environ["AGENTS_SINCE"][:7]) if commits else "")
+            out.append(finding(untraced[0], first_u, "fdd-untraced",
+                               "this change%s touches %s but no plan task in progress names a feature"
+                               % (since, conf["FDD_SCOPE"]),
                                "set the feature's task to doing (tasks set <slug> <T-id> doing), its description "
                                "starting with the feature ID; if no feature fits, stop and ask"))
         for fid in active:
@@ -426,7 +542,7 @@ def cmd_check(tier, root, files):
                                    "no code in %s until then" % (approve_cmd(root), fid, conf["FDD_SCOPE"])))
     if tier == "full":
         write_report(root, d, conf, feats, approvals, rows)
-    return emit(out)
+    return emit(blocked + out, blocked)
 
 
 def not_local(root, d, fpath):
@@ -489,10 +605,14 @@ def cmd_status(root, only):
     if only and only not in feats:
         print("fdd: %s is not in %s" % (only, shown(root, fpath)), file=sys.stderr)
         return 1
-    approvals = read_approvals(d)
+    approvals, unrecorded = read_approvals(root, d)
     print("list: %s" % list_state(d, approvals))
     for line in progress_lines(d, conf, feats, approvals, ledger(root, conf), only):
         print(line)
+    if unrecorded:
+        print("not counted, not written by fdd approve: %s" % ", ".join(
+            "%s:%d %s" % (shown(root, os.path.join(d, "approvals")), n, kind if fid == "-" else kind + " " + fid)
+            for n, kind, fid in unrecorded))
     return 0
 
 
@@ -500,6 +620,11 @@ def cmd_approve(root, args):
     kinds = {"list": 0, "design": 1, "inspect": 1}
     if not args or args[0] not in kinds or len(args) != 1 + kinds[args[0]]:
         print("usage: fdd approve list | design <ID> | inspect <ID>", file=sys.stderr)
+        return 2
+    shell = agent_shell()
+    if shell:
+        print("fdd: approving is the human's step, and this shell was started by %s (%s is set). "
+              "Run it in your own terminal." % (shell[1], shell[0]), file=sys.stderr)
         return 2
     conf = load_conf(root)
     d = fdd_dir(root, conf)
@@ -531,9 +656,74 @@ def cmd_approve(root, args):
             return 1
     who = (git(root, "config", "user.name").strip() or os.environ.get("USER", "unknown"))
     who = who.replace("\t", " ").replace("\n", " ")
+    line = "\t".join((kind, fid, who, datetime.date.today().isoformat(), value))
+    earlier = adopt(root, d)  # an upgrade's approvals, if install.sh couldn't take them in
+    record(root, [line])   # first, so a line in approvals is never left without its record
     with open(os.path.join(d, "approvals"), "a", encoding="utf-8") as fh:
-        fh.write("\t".join((kind, fid, who, datetime.date.today().isoformat(), value)) + "\n")
+        fh.write(line + "\n")
     print("approved %s" % (kind if fid == "-" else "%s %s" % (kind, fid)))
+    if earlier:
+        print("also " + earlier)
+    return 0
+
+
+def record(root, lines):
+    """Append approvals lines to the record in the git dir (no-op outside git)."""
+    path = record_file(root)
+    if path is None:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        for l in lines:
+            fh.write(l + "\n")
+
+
+ADOPTED = "#adopted"   # in the record: this clone has taken in its earlier approvals, once
+
+
+def adopt(root, d):
+    """The first time a person runs fdd approve or install.sh in this clone: approvals written
+    before fdd kept a record (an upgrade), or copied in with the directory, are recorded as they
+    are. Never again after that, so a line written later can't be adopted.
+    Returns a sentence listing them for the human, or ''."""
+    path = record_file(root)
+    if path is None:
+        return ""
+    rec = recorded(root)
+    if ADOPTED in rec:
+        return ""
+    lines = [l for l in read_lines(os.path.join(d, "approvals")) if len(l.split("\t")) == 5 and l not in rec]
+    record(root, [ADOPTED] + lines)
+    if not lines:
+        return ""
+    return ("recorded the %d FDD approvals already in %s as yours: %s. Delete any line you didn't approve."
+            % (len(lines), shown(root, os.path.join(d, "approvals")),
+               ", ".join(l.split("\t")[0] + ("" if l.split("\t")[1] == "-" else " " + l.split("\t")[1]) for l in lines)))
+
+
+def cmd_adopt(root):
+    """install.sh: adopt() earlier approvals, never in an agent's shell. With no approvals file yet
+    there's nothing to adopt, so the clone is marked adopted: a line an agent writes before your
+    first fdd approve can't ride along with it."""
+    conf = load_conf(root)
+    d = fdd_dir(root, conf)
+    if not os.path.isfile(os.path.join(d, "approvals")):
+        rec = recorded(root)
+        if rec is not None and ADOPTED not in rec:
+            record(root, [ADOPTED])
+        return 0
+    shell = agent_shell()
+    if shell:
+        path = record_file(root)
+        n = len(read_approvals(root, d)[1])
+        if path is not None and ADOPTED not in read_lines(path) and n:
+            print("the %d FDD approvals in %s aren't recorded yet, so they don't count, and this shell was started "
+                  "by %s; run install.sh again from your own terminal to keep them"
+                  % (n, shown(root, os.path.join(d, "approvals")), shell[1]))
+        return 0
+    msg = adopt(root, d)
+    if msg:
+        print(msg)
     return 0
 
 
@@ -558,6 +748,8 @@ def dispatch(a):
         return cmd_approve(os.path.abspath(a[1]), a[2:])
     if len(a) in (2, 3) and a[0] == "status":
         return cmd_status(os.path.abspath(a[1]), a[2] if len(a) == 3 else None)
+    if len(a) == 2 and a[0] == "adopt":
+        return cmd_adopt(os.path.abspath(a[1]))
     print(__doc__.strip(), file=sys.stderr)
     return 2
 

@@ -39,7 +39,8 @@ Harness-owned files are replaced on upgrade (re-run `install.sh`), so don't cust
 ## Tiers
 - **edit**: `check <files>` after each edit (hook). Seconds. Out of budget = skipped.
 - **turn**: `verify` when the agent finishes a turn that changed files (stop hook). Blocks on
-  failure, up to `TURN_MAX_BLOCKS` times, then hands back.
+  failure, up to `TURN_MAX_BLOCKS` times, then hands back. A turn that committed runs with
+  `--since=<sha>` for `HEAD` and each branch tip it started from; checks read them as `AGENTS_SINCE`.
 - **full**: `verify --tier=full` at commit gates and in CI.
 
 Exit codes everywhere: 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 out of budget.

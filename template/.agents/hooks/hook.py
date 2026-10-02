@@ -547,7 +547,38 @@ def turn_start(tool, data, conf):
     if tool in ("codex", "gemini") and int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0:
         return allow(tool, "turn-start")
     write_file(os.path.join(CACHE, "turn-" + key), tree_state())
+    write_file(os.path.join(CACHE, "head-" + key), refs_state())
     return allow(tool, "turn-start")
+
+
+def refs_state():
+    """HEAD, then every local branch tip: where the turn started. Commits reachable now from HEAD
+    or a branch and from none of these were made during the turn, even on a branch it left."""
+    out = git("rev-parse", "-q", "--verify", "HEAD").decode(errors="replace").split()
+    for sha in sorted(set(git("for-each-ref", "--format=%(objectname)", "refs/heads").decode(errors="replace").split())):
+        if sha not in out:
+            out.append(sha)
+    return " ".join(out)
+
+
+def commits_only(shas):
+    """The ones that name a commit here (a stale snapshot may name what's gone)."""
+    if not shas:
+        return []
+    try:
+        p = subprocess.run(["git", "cat-file", "--batch-check"], cwd=ROOT, input="\n".join(shas) + "\n",
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    ok = {l.split()[0] for l in p.stdout.splitlines() if l.split()[1:2] == ["commit"]}
+    return [s for s in shas if s in ok]
+
+
+def remove_file(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def stop_gate(tool, data, conf):
@@ -555,18 +586,35 @@ def stop_gate(tool, data, conf):
     counter = os.path.join(CACHE, "stop-" + key)
     max_blocks = int(conf.get("TURN_MAX_BLOCKS", "3") or 3)
 
-    # Only gate turns that changed the tree. Without a snapshot, gate any dirty tree.
+    # Commits made during the turn: verify judges them too (--since, once per ref the turn started
+    # from), so committing doesn't hide a change from checks that diff (the feature-driven gates).
+    # A range left by a pause or a verify that couldn't run stays pending, from its old start,
+    # until a stop passes; a give-up hands it to the human instead.
+    pending_file = os.path.join(CACHE, "pending-" + key)
+    pending = read_file(pending_file)
     before = read_file(os.path.join(CACHE, "turn-" + key))
+    start = (pending or read_file(os.path.join(CACHE, "head-" + key))).split()
+    since = []
+    if (pending or before) and start and start != refs_state().split():
+        since = commits_only(start)
+
+    # Only gate turns that changed the tree or the branches. Without a snapshot, gate any dirty tree.
     now = tree_state()
     dirty = bool(git("status", "--porcelain").strip())
-    if (before and before == now) or (not before and not dirty):
+    if not since and ((before and before == now) or (not before and not dirty)):
         write_file(counter, "0")
+        remove_file(pending_file)
         return finish_allow(tool)
 
+    def keep_range():
+        if since:
+            write_file(pending_file, " ".join(since))
+
     # A task paused for the human (tasks ask) is a legitimate place to stop, even mid red phase.
-    waiting = paused_for_human()
+    waiting = paused_for_human(committed=bool(since))
     if waiting:
         write_file(counter, "0")
+        keep_range()
         log_event(tool, "stop-gate", "paused", waiting)
         return finish_allow(tool, "Paused for your input: open questions in %s" % waiting)
 
@@ -575,19 +623,24 @@ def stop_gate(tool, data, conf):
         blocks = max(blocks, data["loop_count"])
     if blocks >= max_blocks:
         write_file(counter, "0")
+        remove_file(pending_file)   # committed lines can't be fixed by more turns; the human decides
         log_event(tool, "stop-gate", "give-up")
         return finish_allow(tool, "Stop gate: verify still failing after %d attempts. Handing back; "
-                                  "run .agents/bin/verify to see what is left." % blocks)
+                                  "run .agents/bin/verify%s to see what is left."
+                                  % (blocks, " --since=" + since[0][:12] if since else ""))
 
     budget = int(conf.get("TURN_BUDGET", "300") or 300) + 30
-    rc, out = run_tool(harness_cmd("verify", "--tier=turn"), budget)
+    rc, out = run_tool(harness_cmd("verify", "--tier=turn", *["--since=" + s for s in since]), budget)
     log_event(tool, "stop-gate", str(rc))
     if rc == 0:
         write_file(counter, "0")
+        remove_file(pending_file)
         write_file(os.path.join(CACHE, "turn-" + key), tree_state())
+        write_file(os.path.join(CACHE, "head-" + key), refs_state())
         return finish_allow(tool)
     if rc not in (1, 2):
         write_file(counter, "0")
+        keep_range()
         return finish_allow(tool, "Stop gate could not verify (exit %d): %s" % (rc, out.splitlines()[-1] if out else ""))
 
     write_file(counter, str(blocks + 1))
@@ -631,16 +684,16 @@ def open_questions():
     return out
 
 
-def paused_for_human():
+def paused_for_human(committed=False):
     """A plan whose blocked (or done, awaiting sign-off) task has an open question (tasks ask):
     a legitimate place to stop."""
     clean = None
     for slug, q in open_questions():
         tasks = load_json(os.path.join(ROOT, ".agents", "plans", slug, "tasks.json")) or []
         # A done task awaiting sign-off pauses only while nothing is uncommitted (new files included,
-        # the ledgers aside); new edits get checked.
+        # the ledgers aside) and nothing was committed this turn; new edits and commits get checked.
         if clean is None and any(isinstance(t, dict) and t.get("status") == "done" for t in tasks):
-            clean = not git("status", "--porcelain", "--", ".", ":(exclude).agents/plans").strip()
+            clean = not committed and not git("status", "--porcelain", "--", ".", ":(exclude).agents/plans").strip()
         if any(isinstance(t, dict) and t.get("id") == q.get("task") and (
                 t.get("status") == "blocked" or (t.get("status") == "done" and clean)) for t in tasks):
             return ".agents/plans/%s/questions.json" % slug
