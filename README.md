@@ -22,12 +22,13 @@ The design follows what the evidence says actually moves agent results:
 | Claude Code | `CLAUDE.md` with `@AGENTS.md` | `.claude/skills` mirror | all three, plus questions, `.claude/settings.json` | yes, `permissions.deny` |
 | GitHub Copilot (CLI, cloud agent, VS Code) | native | native | all three, plus questions, `.github/hooks/harness.json` | no, the hook enforces |
 | Cursor | native | native | policy and turn; edit findings arrive at the stop gate; no question tool to hook | no, the hook enforces |
-| OpenAI Codex | native | native | not yet | `.codex/rules/harness.rules` (opt in) |
-| Gemini CLI | `.gemini/settings.json` (opt in) | native | not yet | no |
+| OpenAI Codex | native | native | all three (edits through `apply_patch`), `.codex/hooks.json` (opt in); no question tool to hook | `.codex/rules/harness.rules` (opt in) |
+| Gemini CLI | `.gemini/settings.json` (opt in) | native | all three (shell, `read_file`, `write_file`, `replace`), `hooks` in `.gemini/settings.json` (opt in); no question tool to hook | no, the hook enforces |
 
 Notes:
 - **Why keep CLAUDE.md?** Claude Code reads AGENTS.md on its own only when no CLAUDE.md exists, and not on Bedrock, Vertex, or Foundry. The one-line import works everywhere.
 - **Copilot CLI also reads `.claude/settings.json` hooks**, so with both adapters on, some hooks fire twice there. `verify` caches by tree state, so the second run costs nothing.
+- **Codex and Gemini CLI hooks are opt in.** Add `codex` or `gemini` to `ADAPTERS` in `.agents/harness.conf` and run `sync`. Both tools load project hooks only in a trusted project or folder, and have you review them first (Codex: `/hooks`). Codex blocks through its JSON deny form, gets edit findings back after `apply_patch`, and is told to keep working by the stop gate; Gemini gets the same through `decision` and `additionalContext`. `HOOKS` picks which ones render, as for the other tools.
 - **Cursor ignores `afterFileEdit` output.** The edit check still runs (and warms the cache), but Cursor sees findings when the stop gate sends them back as a follow-up.
 - **Hooks are guardrails, not a sandbox.** Timeouts fail open, some tool versions don't run hooks for subagents, and a determined agent can write a script that does what a blocked command would. For unattended runs, use a sandboxed devcontainer with an egress allowlist as well.
 
@@ -267,6 +268,8 @@ my-project/
 ├── .claude/skills/*             mirrors of .agents/skills/*              (claude)
 ├── .github/hooks/harness.json   hooks                                    (copilot)
 ├── .cursor/hooks.json           hooks merged in                          (cursor)
+├── .codex/hooks.json            hooks merged in                          (codex)
+├── .gemini/settings.json        context file, hooks merged in            (gemini)
 └── .agents/
     ├── core/                    harness: core rules, guard patterns
     ├── bin/                     harness: sync, verify, check, guard, policy, tasks, eval, gitflow
@@ -325,13 +328,16 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 
 ## Known gaps
 
-- Codex and Gemini CLI hooks aren't rendered yet; their formats need verifying first. Codex execpolicy rule syntax is also unverified against a live Codex.
-- Copilot and Cursor have no documented personal hook location, so a tracked `.github/hooks/harness.json` or `.cursor/hooks.json` turns that adapter off in local mode (sync warns and leaves the tracked file alone); the Copilot cloud agent, which works from the remote repo, gets nothing in local mode either.
+- Codex and Gemini CLI hooks follow the vendor docs (Oct 2026) and were tested with recorded payload shapes, not inside live sessions. Codex execpolicy rule syntax is also unverified against a live Codex.
+- Codex loads project hooks only in a trusted project, after you review them once (`/hooks`). Open Codex issues report `apply_patch` not firing hooks and exit-2 blocks not enforced on some versions; the harness uses the JSON deny form. Codex runs hooks in the session's directory, so the hook command starts from the repo top (`git rev-parse --show-toplevel`).
+- Gemini CLI turns hooks off in untrusted folders and fingerprints project hooks: a changed hook command asks for trust again, so an upgrade that changes the command line asks once. The policy hook covers `run_shell_command` and `read_file`, not `read_many_files`, `glob`, or `search_file_content`.
+- No question-ledger hooks for Codex or Gemini CLI: neither has an ask-the-human tool a hook can see. Session start still reminds them of open questions.
+- Copilot, Cursor, Codex, and Gemini CLI have no documented personal hook location in the project, so a tracked `.github/hooks/harness.json`, `.cursor/hooks.json`, `.codex/hooks.json`, or `.gemini/settings.json` turns that adapter's hooks off in local mode (sync warns and leaves the tracked file alone); the Copilot cloud agent, which works from the remote repo, gets nothing in local mode either.
 - Local mode's files are ignored by git in the clone, so `git clean -fdX` / `-fdx` and `git stash -a` take them away (`git stash -u` is fine), and a checkout that brings a tracked file at one of those paths overwrites the local copy. The backup in the git dir is refreshed on every `sync` and whenever `verify` runs on the turn or full tier; edits since then aren't in it. See [Local mode](#local-mode).
 - Two installs in one repo (two subdirectories, local or team with personal skills) share one exclude block, and each `sync` rewrites it with only its own paths. The cpp-cmake stack's `/build-agent*/` lines are anchored at the repo top, not at a subdirectory install.
 - Worktrees of one repo share that exclude block too: git reads only the common `info/exclude` (`git rev-parse --git-path info/exclude` names the same file from every worktree) and has no per-worktree exclude file. The only per-worktree route, `core.excludesFile` under `extensions.worktreeConfig`, changes the repo's config and replaces your global excludes file, so the harness doesn't use it. Each worktree's `sync` rewrites the block with its own entries: with the same mode and personal library everywhere they match; otherwise a local-mode worktree's `/.agents/` line also hides new harness files in a team-mode one, a team-mode `sync` drops a local worktree's lines until that worktree syncs again, and `sync --check` in one worktree can report the block another one wrote. Keep a repo's worktrees in one mode. The cpp-cmake stack's `/build-agent*/` lines are anchored at the repo top, not at a subdirectory install.
-- Switching to local doesn't strip the harness context entries from a tracked `.gemini/settings.json` (it's untracked only when those and sync's MCP servers are all it holds); local mode then leaves that tracked file alone.
-- Without python3, `install.sh --local` can't strip or untrack tracked JSON configs (`.claude/settings.json`, `.cursor/hooks.json`, `.github/hooks/harness.json`, `.codex/rules/harness.rules`); only `AGENTS.md` and `CLAUDE.md` are handled without it.
+- Switching to local strips the harness hooks from a tracked `.gemini/settings.json` but not its context entries (it's untracked only when those and sync's MCP servers are all it holds); local mode then leaves that tracked file alone, so Gemini gets no harness hooks in that clone.
+- Without python3, `install.sh --local` can't strip or untrack tracked JSON configs (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json`, `.gemini/settings.json`, `.github/hooks/harness.json`, `.codex/rules/harness.rules`); only `AGENTS.md` and `CLAUDE.md` are handled without it.
 - Hooks were tested with recorded payload shapes, not yet inside live Claude Code, Copilot, and Cursor sessions. Watch `.agents/cache/hook-events.log` on first use. The question-tool payloads (AskUserQuestion input and answers, Copilot ask_user) are the least certain; the capture falls back to recording the raw answer text.
 - `gitflow` was tested against a local bare remote and a stand-in `gh`, not live GitHub, GitLab, or Jira. `gitflow review` lists all PR comments (inline ones as `path:line`), not only unresolved threads.
 - Duplicate-question detection is word overlap with light stemming, not semantics. It catches rewordings of the same question; it can miss a paraphrase and, rarely, flag two different questions that share most words (`--force` overrides).
@@ -362,6 +368,6 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 
 ## Roadmap
 
-- **0.3** Workflow packs (req-driven first, in progress), Codex and Gemini hooks once verified, more stack packs (Python, TypeScript).
+- **0.3** Workflow packs (req-driven first, in progress), more stack packs (Python, TypeScript).
 - **0.4** Roles: planner, tester, implementer, and validator (plus a read-only explorer), defined once and rendered per tool, with one writer at a time and the validator gating each phase.
 - **0.5** More MCP: Copilot's cloud agent and VS Code's `.vscode/mcp.json`, once their formats and variable expansion are verified (library MCP servers already render, see Libraries).
