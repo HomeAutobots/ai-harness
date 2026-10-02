@@ -2798,6 +2798,100 @@ fi
 }
 group grp_agentmodes
 
+grp_symlinks() {   # a project reached through a symlinked path (macOS /tmp, a linked home or checkout)
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "hooks through symlinked paths"
+  SR=$(repo symreal)
+  "$HARNESS/install.sh" --team "$SR" >/dev/null 2>&1
+  SRP="$(cd "$SR" && pwd -P)"              # the physical path
+  SL="$WORK/symlink"; ln -s "$SRP" "$SL"   # a link to it
+  mkdir -p "$SRP/config" "$SRP/docs" "$SRP/src"
+  for f in .env config/.env.local .env.example docs/guide.md; do echo x > "$SRP/$f"; done
+  ln -s ../config/.env.local "$SRP/docs/settings"   # a link inside the repo to a protected file
+  nm(){ case "$1" in "$SL") echo link ;; *) echo real ;; esac; }   # which spelling, for test names
+  # Every payload shape the pre-tool hook reads, as <tool>|<payload>: @F@ is the file, @C@ the cwd.
+  shapes='claude|{"tool_name":"Read","tool_input":{"file_path":"@F@"},"cwd":"@C@"}
+claude|{"tool_name":"Bash","tool_input":{"command":"cat @F@"},"cwd":"@C@"}
+copilot|{"toolName":"view","toolArgs":"{\"path\":\"@F@\"}","cwd":"@C@"}
+copilot|{"toolName":"bash","toolArgs":"{\"command\":\"cat @F@\"}","cwd":"@C@"}
+cursor|{"hook_event_name":"beforeReadFile","file_path":"@F@","cwd":"@C@"}
+cursor|{"hook_event_name":"beforeShellExecution","command":"cat @F@","cwd":"@C@"}'
+  symrc() {  # symrc <repo-relative file> <rc>: every shape, run from either spelling, file and cwd in either
+    local rel="$1" want="$2" miss="" root cwd sp f tool payload rc line
+    for root in "$SL" "$SRP"; do for sp in "$SL" "$SRP" "rel $SL" "rel $SRP"; do
+      case "$sp" in "rel "*) f="$rel"; cwd="${sp#rel }" ;; *) f="$sp/$rel"; cwd="$root" ;; esac
+      while IFS= read -r line; do
+        tool="${line%%|*}"; payload="${line#*|}"
+        payload="$(printf '%s' "$payload" | sed -e "s|@F@|$f|g" -e "s|@C@|$cwd|g")"
+        rc=0; hook "$root" pre-tool "$tool" "$payload" >/dev/null 2>&1 || rc=$?
+        [ "$rc" = "$want" ] || miss="$miss
+        rc=$rc: $tool from <$(nm "$root")>: $payload"
+      done <<SHAPES
+$shapes
+SHAPES
+    done; done
+    if [ -z "$miss" ]; then ok "$rel: rc $want in every spelling and shape"; else bad "$rel: rc $want in every spelling and shape$miss"; fi
+  }
+  symrc .env 2
+  symrc docs/settings 2
+  symrc .env.example 0
+  # policy test gives the hook's answer, whichever spelling it runs from or names.
+  for root in "$SL" "$SRP"; do for sp in "$SL" "$SRP"; do
+    trc "policy test --read <$(nm "$sp")>/config/.env.local from <$(nm "$root")>" 2 policy "$root" test --read "$sp/config/.env.local"
+    trc "policy test 'cat <$(nm "$sp")>/.env' from <$(nm "$root")>" 2 policy "$root" test "cat $sp/.env"
+    trc "policy test '<$(nm "$sp")>/.agents/bin/guard allow' from <$(nm "$root")>" 2 policy "$root" test "$sp/.agents/bin/guard allow a b c"
+  done; done
+  trc  "policy test: allow-read holds through a link" 0 policy "$SL" test --read "$SRP/.env.example"
+  trc  "policy test: an ordinary file through a link is allowed" 0 policy "$SL" test --read "$SRP/docs/guide.md"
+  trc  "policy test: a relative read from a subdirectory of the link" 2 bash -c "cd '$SL/config' && ../.agents/bin/policy test --read .env.local"
+  # A symlinked home: ~/ rules hold for the link and the real spelling.
+  mkdir -p "$WORK/homereal/.ssh"; echo k > "$WORK/homereal/.ssh/id_rsa"; ln -s "$WORK/homereal" "$WORK/homelink"
+  for h in "$WORK/homelink" "$WORK/homereal"; do for sp in "$WORK/homelink" "$WORK/homereal"; do
+    trc "home .ssh with HOME=${h##*/}, read as ${sp##*/}" 2 env HOME="$h" bash -c "printf '%s' '{\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"$sp/.ssh/id_rsa\"}}' | (cd '$SRP' && .agents/hooks/run pre-tool --tool=claude)"
+  done; done
+  # An absolute rule naming a link covers the real path.
+  mkdir -p "$WORK/absreal/vault"; ln -s "$WORK/absreal" "$WORK/abslink"
+  printf 'deny-read %s/vault/**   # vault\n' "$WORK/abslink" >> "$SRP/.agents/policy.conf"
+  trc  "absolute rule via a link covers the real path" 2 policy "$SL" test --read "$WORK/absreal/vault/a"
+  hpol(){ local h="$1"; shift; env HOME="$h" bash -c 'cd "$1" && shift && .agents/bin/policy "$@"' _ "$@"; }   # hpol <home> <dir> <policy args...>
+  echo n > "$WORK/homereal/.netrc"
+  trc  "home .netrc (a literal rule) with a linked home, read as the real path" 2 hpol "$WORK/homelink" "$SL" test --read "$WORK/homereal/.netrc"
+  # An allow-read can't be borrowed through a link the agent makes at an allowed path.
+  printf 'allow-read ./fixtures/**\n' >> "$SRP/.agents/policy.conf"
+  ln -s "$WORK/homereal" "$SRP/fixtures"
+  trc  "a link at an allow-read path doesn't except what it points at" 2 hpol "$WORK/homereal" "$SL" test --read "$WORK/homereal/.ssh/id_rsa"
+  trc  "...read through the link either" 2 hpol "$WORK/homereal" "$SL" test --read fixtures/.ssh/id_rsa
+  # .. after a link goes up from where the link points, not from the link.
+  mkdir -p "$WORK/homereal/.cache"; ln -s "$WORK/homereal/.cache" "$SRP/c"
+  trc  "link/../secret is the secret" 2 hpol "$WORK/homereal" "$SL" test --read c/../.ssh/id_rsa
+  trc  "...in a shell command too" 2 hpol "$WORK/homereal" "$SRP" test "cat c/../.ssh/id_rsa"
+  ln -s "$WORK/homereal/.ssh/id_rsa" "$SRP/docs/k"
+  trc  "a link in the repo to a secret outside it" 2 hpol "$WORK/homereal" "$SL" test --read docs/k
+  mkdir -p "$SRP/my dir"; echo x > "$SRP/my dir/.env"
+  trc  "a path with a space, through a link" 2 policy "$SL" test --read "$SRP/my dir/.env"
+  # post-edit and check: an edited file named by either spelling gets checked, repo-relative.
+  printf '#!/usr/bin/env bash\nrc=0\nfor f in "$@"; do grep -q BAD "$f" && { echo "$f:1:1: error: bad token [demo]"; rc=1; }; done\nexit $rc\n' > "$SRP/.agents/checks/edit.sh"
+  echo BAD > "$SRP/src/bad.c"
+  for root in "$SL" "$SRP"; do for sp in "$SL" "$SRP"; do
+    trc "post-edit checks <$(nm "$sp")>/src/bad.c from <$(nm "$root")>" 2 hook "$root" post-edit claude "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$sp/src/bad.c\"},\"cwd\":\"$root\"}"
+    out="$(cd "$root" && .agents/bin/check "$sp/src/bad.c" 2>&1 || true)"
+    t    "check <$(nm "$sp")>/src/bad.c from <$(nm "$root")> names it repo-relative" hasl "$out" "src/bad.c:1:1: error"
+    tnot "...not by its absolute path" hasl "$out" "/src/bad.c:1:1"
+  done; done
+  echo BAD > "$SRP/my dir/bad c.c"
+  out="$(cd "$SL" && .agents/bin/check "$SRP/my dir/bad c.c" 2>&1 || true)"
+  t    "check names a spaced path through a link repo-relative" hasl "$out" "my dir/bad c.c:1:1: error"
+  tnot "...not by its absolute path" hasl "$out" "/my dir/bad c.c:1:1"
+  : > "$SRP/.agents/cache/hook-events.log"
+  hook "$SL" post-edit cursor "{\"hook_event_name\":\"afterFileEdit\",\"file_path\":\"$SRP/src/bad.c\"}" >/dev/null 2>&1 || true
+  t    "cursor post-edit checks the real spelling" grep -q "post-edit$(printf '\t')1$(printf '\t')src/bad.c" "$SRP/.agents/cache/hook-events.log"
+  # Outside the repo is still outside.
+  mkdir -p "$WORK/outside"; echo x > "$WORK/outside/.env"
+  trc  "a .env outside the repo isn't a repo-relative match" 0 policy "$SRP" test --read "$WORK/outside/.env"
+fi
+}
+group grp_symlinks
+
 # The sections from here on run in the foreground while the groups above finish.
 # A new section can go anywhere below as is; wrap it in a group (see "groups" at the top) to run it in parallel.
 exec 3>&1 4>&2 >"$SMOKE_GD/tail.out" 2>&1; SMOKE_TAIL=1

@@ -164,16 +164,46 @@ def write_file(path, text):
         pass
 
 
-def rel_to_root(path, cwd=None):
-    if not path:
-        return None
+# A project can be reached through a symlink (macOS /tmp is /private/tmp; a linked home or
+# checkout), and a tool may send either spelling, for cwd or for the file. Paths are compared as
+# written and with symlinks resolved; when nothing is a symlink the two are the same.
+
+def full_path(path, cwd=None):
+    """Absolute, but not normalized: in link/../x the .. applies to where link points, which only
+    realpath (in spellings) gets right."""
     p = os.path.expanduser(str(path))
     if not os.path.isabs(p):
         p = os.path.join(cwd or ROOT, p)
-    p = os.path.abspath(p)
-    if p != ROOT and not p.startswith(ROOT + os.sep):
+    return p
+
+
+def spellings(p):
+    """p (absolute) as written, then with symlinks resolved (realpath resolves the part that
+    exists and keeps the rest, so a file about to be written works too)."""
+    out = [os.path.abspath(p)]
+    real = os.path.realpath(p)
+    if real not in out:
+        out.append(real)
+    return out
+
+
+def rel_under(p, base):
+    """p relative to base, or None when p is outside it."""
+    rel = os.path.relpath(p, base)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
         return None
-    return os.path.relpath(p, ROOT)
+    return rel
+
+
+def rel_to_root(path, cwd=None):
+    if not path:
+        return None
+    for p in spellings(full_path(path, cwd)):
+        for base in spellings(ROOT):
+            rel = rel_under(p, base)
+            if rel is not None:
+                return rel
+    return None
 
 
 # ---------------------------------------------------------------- policy
@@ -188,47 +218,78 @@ def glob_match(rel, pat):
     return False
 
 
-def path_matches(path, pattern, cwd=None):
-    """Patterns: ./x is repo-relative, ~/x is home-relative, /x absolute, bare x matches a basename."""
-    p = os.path.expanduser(str(path))
-    if not os.path.isabs(p):
-        p = os.path.join(cwd or ROOT, p)
-    p = os.path.abspath(p)
+def path_matches(p, pattern, resolve_lead=False):
+    """Does p (one absolute spelling) match pattern? ./x is repo-relative, ~/x is home-relative,
+    /x absolute, bare x matches a basename. The repo and home match in either spelling. With
+    resolve_lead (deny-read only) the pattern's literal start is resolved too, so a deny naming a
+    link covers the real path; an allow-read never is, or a link the agent makes at an allowed
+    path (fixtures -> ~) would carry the exception to whatever it points at."""
     if pattern.startswith("./"):
-        base, pat = ROOT, pattern[2:]
+        anchor, pat = ROOT, pattern[2:]
     elif pattern.startswith("~/"):
-        base, pat = os.path.expanduser("~"), pattern[2:]
+        anchor, pat = os.path.expanduser("~"), pattern[2:]
     elif pattern.startswith("/"):
-        base, pat = "/", pattern[1:]
+        anchor, pat = "/", pattern[1:]
     else:
         return fnmatch.fnmatchcase(os.path.basename(p), pattern)
-    rel = os.path.relpath(p, base)
-    if rel.startswith(".."):
-        return False
-    return glob_match(rel, pat)
+    parts = pat.split("/")
+    n = 0
+    while n < len(parts) and parts[n] and not any(c in parts[n] for c in "*?["):
+        n += 1
+    lead = "/".join(parts[:n])  # the literal start, e.g. .ssh in ~/.ssh/**, or all of ~/.netrc
+    if resolve_lead:
+        bases = spellings(os.path.join(anchor, lead))
+    else:
+        bases = [os.path.join(b, lead) for b in spellings(anchor)]
+    for base in bases:
+        rel = rel_under(p, base)
+        if rel is None:
+            continue
+        if lead:
+            rel = lead if rel == os.curdir else lead + "/" + rel
+        if glob_match(rel, pat):
+            return True
+    return False
 
 
 def read_match(path, rules, cwd=None):
     """(message, rule): the deny-read rule a read of path hits, or (None, the allow-read exception
-    that let it through), or (None, None)."""
+    that let it through), or (None, None). Each spelling of the path (as written, symlinks
+    resolved) is checked on its own: a read is blocked when any spelling hits a deny-read that no
+    allow-read excepts for that same spelling, so a link to a secret doesn't borrow an exception."""
     if not path:
         return None, None
-    deny = None
-    for rule in rules:
-        if rule[0] == "deny-read" and path_matches(path, rule[1], cwd):
-            deny = rule
-            break
-    if deny is None:
-        return None, None
-    for rule in rules:
-        if rule[0] == "allow-read" and path_matches(path, rule[1], cwd):
-            return None, rule
-    pat, reason = deny[1], deny[2]
-    return "reading %s is blocked by policy (%s)%s" % (path, pat, ": " + reason if reason else ""), deny
+    excepted = None
+    for p in spellings(full_path(path, cwd)):
+        deny = next((r for r in rules if r[0] == "deny-read" and path_matches(p, r[1], True)), None)
+        if deny is None:
+            continue
+        allow = next((r for r in rules if r[0] == "allow-read" and path_matches(p, r[1])), None)
+        if allow is not None:
+            excepted = excepted or allow
+            continue
+        pat, reason = deny[1], deny[2]
+        return "reading %s is blocked by policy (%s)%s" % (path, pat, ": " + reason if reason else ""), deny
+    return None, excepted
 
 
 def read_denied(path, rules, cwd=None):
     return read_match(path, rules, cwd)[0]
+
+
+def repo_command(seg):
+    """A segment run by absolute path from inside the repo, made repo-relative: /repo/.agents/bin/x
+    becomes .agents/bin/x, whichever spelling of the repo the path uses."""
+    for root in spellings(ROOT):
+        if seg.startswith(root + "/"):
+            return seg[len(root) + 1:]
+    if not seg.startswith("/"):
+        return seg
+    first, sep, rest = seg.partition(" ")
+    rel = rel_to_root(first)  # as written first, then resolved (a link to a repo command counts too)
+    if rel and rel != os.curdir:
+        return rel + sep + rest
+    return seg
 
 
 def segments(cmd):
@@ -241,8 +302,7 @@ def segments(cmd):
                 break
             seg = seg[m.end():]
         seg = re.sub(r"^(?:bash|sh|zsh)\s+(?=[^-\s])", "", seg.strip("() "))
-        if seg.startswith(ROOT + "/"):
-            seg = seg[len(ROOT) + 1:]
+        seg = repo_command(seg)
         while seg.startswith("./"):
             seg = seg[2:]
         if seg:
@@ -320,10 +380,7 @@ def policy_test(argv):
         sys.stderr.write(usage)
         return 3
     rules = load_policy()
-    cwd = os.getcwd()
-    real_root = os.path.realpath(ROOT)
-    if cwd == real_root or cwd.startswith(real_root + os.sep):  # a symlinked path to the repo (/tmp on macOS)
-        cwd = os.path.join(ROOT, os.path.relpath(cwd, real_root))
+    cwd = os.getcwd()  # the physical path; matching takes either spelling, as for a hook payload
     if argv[1] == "--read":
         msg, rule = read_match(argv[2], rules, cwd)
     else:
