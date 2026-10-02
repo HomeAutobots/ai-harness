@@ -198,6 +198,18 @@ Search order; the first library with a name wins:
   ```
 
   Model tiers and effort map per tool through `MODEL_<TIER>_<TOOL>` / `EFFORT_<TIER>_<TOOL>` in `.agents/harness.conf` (missing: inherit). Personal agents never land in a shared repo, same as personal skills. See `.agents/library/README.md` for the full format, including `native:` lines for a tool's own fields and the escalation warning.
+- **MCP servers render per tool.** `mcp/<name>.json` in a library (or an active workflow pack's own `mcp/`) is one MCP server, written once. `sync` merges it into each enabled adapter's config beside the servers you added by hand: `.mcp.json` (claude and copilot share it), `.cursor/mcp.json`, `.gemini/settings.json`, and a marked block at the end of `.codex/config.toml`. Secrets are only ever `${VAR}` references; a literal in a secret-looking `env` or header value is an error and that server isn't rendered.
+
+  ```json
+  {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" },
+    "tools": ["search_issues", "get_issue"]
+  }
+  ```
+
+  sync owns only the server names it wrote (recorded in `generated.lock`); a hand-added server of the same name wins, with a warning, and every other key in those files stays as it is. Team mode never renders a personal server (add it to your tool's own user config); local mode never touches a tracked config. See `.agents/library/README.md` for the format and what each tool can't express.
 - **Pack commands.** An active workflow pack's `bin/<name>` commands get a stable wrapper at `.agents/commands/<name>` that runs the pack from wherever its library resolves, so the path is the same on every machine (e.g. `.agents/commands/fdd` for feature-driven).
 
 Example: a personal skill and workflow for every project:
@@ -269,11 +281,11 @@ my-project/
     ├── guard.allow, baselines/      project: approved exceptions, known findings
     ├── context/, evals/             project: on-demand docs, eval tasks
     ├── plans/                   project: ledgers (gitignored by default)
-    ├── generated.lock           sync: what it added to shared config files, hashes of agent renders and skill copies
+    ├── generated.lock           sync: what it added to shared config files, hashes of agent renders and skill copies, MCP server names
     └── cache/                   local: logs, verify cache, hook state (gitignored)
 ```
 
-Merged config files keep everything that isn't the harness's. Harness entries are recognized by their `.agents/hooks/` command path, and deny rules by `generated.lock`, so a re-render replaces exactly what the harness added. Agent renders are recognized by their marker line; the lock also keeps their hashes so sync can warn before rewriting one edited by hand. Skill copies (marked by a `.harness-copy` file) get the same: their hashes go under `skill_copies`, shared copies only in team mode, every copy in local mode.
+Merged config files keep everything that isn't the harness's. Harness entries are recognized by their `.agents/hooks/` command path, and deny rules by `generated.lock`, so a re-render replaces exactly what the harness added. Agent renders are recognized by their marker line; the lock also keeps their hashes so sync can warn before rewriting one edited by hand. Skill copies (marked by a `.harness-copy` file) get the same: their hashes go under `skill_copies`, shared copies only in team mode, every copy in local mode. MCP servers are recognized by the names the lock records per file (`.mcp.json`, `.cursor/mcp.json`, `.gemini/settings.json`), and in `.codex/config.toml` by the `# >>> ai-harness mcp` block, which sync keeps at the end of the file.
 
 ## Upgrading projects
 
@@ -316,9 +328,9 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Codex and Gemini CLI hooks aren't rendered yet; their formats need verifying first. Codex execpolicy rule syntax is also unverified against a live Codex.
 - Copilot and Cursor have no documented personal hook location, so a tracked `.github/hooks/harness.json` or `.cursor/hooks.json` turns that adapter off in local mode (sync warns and leaves the tracked file alone); the Copilot cloud agent, which works from the remote repo, gets nothing in local mode either.
 - Local mode's files are ignored by git in the clone, so `git clean -fdX` / `-fdx` and `git stash -a` take them away (`git stash -u` is fine), and a checkout that brings a tracked file at one of those paths overwrites the local copy. The backup in the git dir is refreshed on every `sync` and whenever `verify` runs on the turn or full tier; edits since then aren't in it. See [Local mode](#local-mode).
-- Two installs in one repo (two subdirectories, local or team with personal skills) share one exclude block, and each `sync` rewrites it with only its own paths.
+- Two installs in one repo (two subdirectories, local or team with personal skills) share one exclude block, and each `sync` rewrites it with only its own paths. The cpp-cmake stack's `/build-agent*/` lines are anchored at the repo top, not at a subdirectory install.
 - Worktrees of one repo share that exclude block too: git reads only the common `info/exclude` (`git rev-parse --git-path info/exclude` names the same file from every worktree) and has no per-worktree exclude file. The only per-worktree route, `core.excludesFile` under `extensions.worktreeConfig`, changes the repo's config and replaces your global excludes file, so the harness doesn't use it. Each worktree's `sync` rewrites the block with its own entries: with the same mode and personal library everywhere they match; otherwise a local-mode worktree's `/.agents/` line also hides new harness files in a team-mode one, a team-mode `sync` drops a local worktree's lines until that worktree syncs again, and `sync --check` in one worktree can report the block another one wrote. Keep a repo's worktrees in one mode. The cpp-cmake stack's `/build-agent*/` lines are anchored at the repo top, not at a subdirectory install.
-- Switching to local doesn't unshare a tracked `.gemini/settings.json`; its context entries stay, and local mode then leaves that tracked file alone.
+- Switching to local doesn't strip the harness context entries from a tracked `.gemini/settings.json` (it's untracked only when those and sync's MCP servers are all it holds); local mode then leaves that tracked file alone.
 - Without python3, `install.sh --local` can't strip or untrack tracked JSON configs (`.claude/settings.json`, `.cursor/hooks.json`, `.github/hooks/harness.json`, `.codex/rules/harness.rules`); only `AGENTS.md` and `CLAUDE.md` are handled without it.
 - Hooks were tested with recorded payload shapes, not yet inside live Claude Code, Copilot, and Cursor sessions. Watch `.agents/cache/hook-events.log` on first use. The question-tool payloads (AskUserQuestion input and answers, Copilot ask_user) are the least certain; the capture falls back to recording the raw answer text.
 - `gitflow` was tested against a local bare remote and a stand-in `gh`, not live GitHub, GitLab, or Jira. `gitflow review` lists all PR comments (inline ones as `path:line`), not only unresolved threads.
@@ -338,10 +350,17 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Codex loads project `.codex/` config only in a trusted project, and openai/codex#14579 reports project agents may not be callable by name.
 - Copilot's cloud agent sees only committed agents; personal agents and local mode don't reach it.
 - Cursor and Codex can limit an agent only to read-only; Codex effort values past high and Cursor's `[effort=...]` values beyond high aren't documented.
-- Per-agent MCP servers: Claude takes server names; Codex and Cursor can't limit them (phase 3 renders MCP servers themselves).
+- Per-agent MCP servers: Claude takes server names; Codex and Cursor can't limit an agent to some servers.
+- `${VAR}` expansion in `.mcp.json` isn't documented for Copilot CLI or VS Code (VS Code documents `${env:VAR}` for its own files), and neither is `${VAR:-default}`.
+- Copilot's cloud agent takes MCP servers only from the repo's settings on GitHub; sync can't render them there.
+- Codex loads `.codex/config.toml` only in a trusted project, Gemini CLI connects stdio servers only in a trusted folder, and Claude Code asks before using project servers from `.mcp.json`.
+- Claude Code blanks some credential variables (`ANTHROPIC_API_KEY`, `NPM_TOKEN`, and others) when it expands a remote server's `url` and `headers`; use another variable name there.
+- Personal MCP servers aren't rendered in team mode; add them with your tool's user scope (`claude mcp add --scope local`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `~/.copilot/mcp-config.json`).
+- Codex has no `${VAR}` expansion: an env value it can't pass by name (a renamed variable, text around a reference, a default) or a header other than `Bearer ${VAR}` / `${VAR}` is left out for codex with a warning, and a reference in `command`, `args`, `cwd`, or `url` keeps the server out of codex entirely. An `sse` server gets a plain `url` there.
+- sync rewrites an MCP config it changes with its own JSON formatting (two-space indent); comments aren't JSON, so a config with them is reported as invalid and left alone.
 
 ## Roadmap
 
 - **0.3** Workflow packs (req-driven first, in progress), Codex and Gemini hooks once verified, more stack packs (Python, TypeScript).
 - **0.4** Roles: planner, tester, implementer, and validator (plus a read-only explorer), defined once and rendered per tool, with one writer at a time and the validator gating each phase.
-- **0.5** MCP config rendered from one `.agents/mcp.json`, off by default.
+- **0.5** More MCP: Copilot's cloud agent and VS Code's `.vscode/mcp.json`, once their formats and variable expansion are verified (library MCP servers already render, see Libraries).
