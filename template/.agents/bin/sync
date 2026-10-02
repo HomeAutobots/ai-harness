@@ -1065,6 +1065,10 @@ exclude_block() {
       { [ -e "$p" ] || [ -L "$p" ]; } || continue
       tracked "$p" || echo "/$pre$p" >> "$WORK/exclude.list"
     done
+    # Codex hooks: only a file holding the harness's (one with just the project's isn't sync's).
+    if [ -f .codex/hooks.json ] && ! tracked .codex/hooks.json && grep -qF '.agents/hooks/' .codex/hooks.json; then
+      echo "/$pre.codex/hooks.json" >> "$WORK/exclude.list"
+    fi
     for p in .claude/skills/*; do
       { [ -e "$p" ] || [ -L "$p" ]; } || continue
       if owned "$p" && ! tracked "$p"; then echo "/$pre$p" >> "$WORK/exclude.list"; fi

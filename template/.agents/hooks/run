@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ai-harness hook shim. Harness-owned: replaced on upgrade.
-#   .agents/hooks/run <pre-tool|post-edit|turn-start|stop-gate> --tool=<claude|copilot|cursor>
+#   .agents/hooks/run <pre-tool|post-edit|session-start|turn-start|stop-gate> --tool=<claude|copilot|cursor|codex|gemini>
 # Finds python3 and hands off to hook.py. Without python3 it steps aside (exit 0, with a
 # permissive answer where the tool requires one) so the agent is never wedged.
 d="$(cd "$(dirname "$0")" && pwd)"
@@ -10,6 +10,7 @@ if [ -z "$py" ]; then
   case "$1 $*" in
     pre-tool*--tool=cursor*|turn-start*--tool=cursor*) echo '{"continue":true,"permission":"allow"}' ;;
     stop-gate*--tool=cursor*) echo '{}' ;;
+    *--tool=gemini*) echo '{}' ;;   # Gemini CLI parses stdout as JSON on every event
   esac
   exit 0
 fi

@@ -2798,6 +2798,213 @@ fi
 }
 group grp_agentmodes
 
+grp_codexgemini() {   # Codex and Gemini CLI hooks: rendering, the hook protocol, local mode
+if [ "$HAVE_PY" -eq 1 ]; then
+  jok(){ python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert $2" "$1"; }   # jok <file> <python expr on d>
+  sok(){ python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert $2" "$1"; }        # sok <json text> <expr>
+  cmds(){ python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print('\n'.join(h['command'] for g in d['hooks'].get(sys.argv[2], []) for h in g['hooks']))" "$1" "$2"; }
+
+  echo "codex and gemini hooks: rendering"
+  CG=$(repo codexgemini)
+  "$HARNESS/install.sh" --team "$CG" >/dev/null 2>&1
+  t    "absence: no codex hooks file"     test ! -e "$CG/.codex/hooks.json"
+  t    "absence: no gemini settings"      test ! -e "$CG/.gemini/settings.json"
+  mkdir -p "$CG/.codex" "$CG/.gemini"
+  printf '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "./audit.sh"}]}]}}\n' > "$CG/.codex/hooks.json"
+  printf '{"theme": "dark", "hooks": {"AfterTool": [{"matcher": "write_file", "hooks": [{"type": "command", "command": "./fmt.sh"}]}]}}\n' > "$CG/.gemini/settings.json"
+  cp "$CG/.codex/hooks.json" "$WORK/cg.codex"; cp "$CG/.gemini/settings.json" "$WORK/cg.gemini"
+  "$CG/.agents/bin/sync" >/dev/null 2>&1
+  t    "adapters off: a project's codex hooks untouched" cmp -s "$CG/.codex/hooks.json" "$WORK/cg.codex"
+  t    "adapters off: a project's gemini settings untouched" cmp -s "$CG/.gemini/settings.json" "$WORK/cg.gemini"
+  printf '{ broken\n' > "$CG/.codex/hooks.json"
+  t    "adapters off: a broken codex hooks file isn't sync's business" "$CG/.agents/bin/sync" --check
+  cp "$WORK/cg.codex" "$CG/.codex/hooks.json"
+  edit "$CG/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude codex gemini"/'
+  edit "$CG/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=1/'
+  "$CG/.agents/bin/sync" >/dev/null 2>&1
+  C="$CG/.codex/hooks.json"; G="$CG/.gemini/settings.json"
+  t    "codex: hand-added hook kept"      jok "$C" "d['hooks']['Stop'][0]['hooks'][0]['command'] == './audit.sh'"
+  t    "codex: policy on Bash"            jok "$C" "[g['matcher'] for g in d['hooks']['PreToolUse']] == ['Bash'] and 'pre-tool --tool=codex' in d['hooks']['PreToolUse'][0]['hooks'][0]['command']"
+  t    "codex: edit feedback on apply_patch" jok "$C" "d['hooks']['PostToolUse'][0]['matcher'] == 'apply_patch' and d['hooks']['PostToolUse'][0]['hooks'][0]['timeout'] == 35"
+  t    "codex: stop gate beside the project's, in seconds" jok "$C" "len(d['hooks']['Stop']) == 2 and d['hooks']['Stop'][1]['hooks'][0]['timeout'] == 360 and 'stop-gate' in d['hooks']['Stop'][1]['hooks'][0]['command']"
+  t    "codex: session and turn start"    jok "$C" "'session-start' in d['hooks']['SessionStart'][0]['hooks'][0]['command'] and 'turn-start' in d['hooks']['UserPromptSubmit'][0]['hooks'][0]['command']"
+  t    "codex: command starts at the repo top" grep -qF 'git rev-parse --show-toplevel' "$C"
+  t    "gemini: hand-added hook and keys kept" jok "$G" "d['theme'] == 'dark' and d['hooks']['AfterTool'][0]['hooks'][0]['command'] == './fmt.sh'"
+  t    "gemini: policy on shell and reads" jok "$G" "d['hooks']['BeforeTool'][0]['matcher'] == 'run_shell_command|read_file' and d['hooks']['BeforeTool'][0]['hooks'][0]['timeout'] == 10000"
+  t    "gemini: edit feedback on write_file and replace" jok "$G" "d['hooks']['AfterTool'][1]['matcher'] == 'write_file|replace' and 'post-edit --tool=gemini' in d['hooks']['AfterTool'][1]['hooks'][0]['command']"
+  t    "gemini: stop gate on AfterAgent, in ms" jok "$G" "d['hooks']['AfterAgent'][0]['hooks'][0]['timeout'] == 360000 and 'matcher' not in d['hooks']['AfterAgent'][0]"
+  t    "gemini: session and turn start, named" jok "$G" "d['hooks']['SessionStart'][0]['hooks'][0]['name'] == 'ai-harness session-start' and 'turn-start' in d['hooks']['BeforeAgent'][0]['hooks'][0]['command']"
+  t    "gemini: still loads AGENTS.md"    jok "$G" "'AGENTS.md' in d['context']['fileName']"
+  t    "no question-tool hooks for either" bash -c "! grep -qi 'ask' '$C' '$G'"
+  cp "$C" "$WORK/cg.c1"; cp "$G" "$WORK/cg.g1"
+  "$CG/.agents/bin/sync" >/dev/null 2>&1
+  t    "re-render is idempotent"          bash -c "cmp -s '$C' '$WORK/cg.c1' && cmp -s '$G' '$WORK/cg.g1'"
+  t    "--check clean"                    "$CG/.agents/bin/sync" --check
+  mkdir -p "$CG/sub"
+  pc="$(cmds "$C" PreToolUse)"
+  out="$(cd "$CG/sub" && printf '%s' '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}' | sh -c "$pc" 2>/dev/null || true)"
+  t    "codex: the rendered command runs from a subdirectory" sok "$out" "d['hookSpecificOutput']['permissionDecision'] == 'deny'"
+  pg="$(cmds "$G" BeforeTool)"
+  out="$(cd "$CG/sub" && printf '%s' '{"tool_name":"run_shell_command","tool_input":{"command":"git push"}}' | GEMINI_PROJECT_DIR="$CG" sh -c "$pg" 2>/dev/null || true)"
+  t    "gemini: the rendered command runs with GEMINI_PROJECT_DIR" sok "$out" "d['decision'] == 'deny'"
+  edit "$CG/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy"/'
+  "$CG/.agents/bin/sync" >/dev/null 2>&1
+  t    "HOOKS=policy: codex renders only the policy hook" jok "$C" "sorted(d['hooks']) == ['PreToolUse', 'Stop'] and len(d['hooks']['Stop']) == 1"
+  t    "HOOKS=policy: gemini renders only the policy hook" jok "$G" "sorted(d['hooks']) == ['AfterTool', 'BeforeTool'] and len(d['hooks']['AfterTool']) == 1"
+  edit "$CG/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy edit turn questions"/'
+  "$CG/.agents/bin/sync" >/dev/null 2>&1
+
+  echo "codex and gemini hooks: the hook protocol"
+  cat > "$CG/.agents/checks/edit.sh" <<'EOF'
+#!/usr/bin/env bash
+rc=0
+for f in "$@"; do grep -n BAD "$f" | sed "s|^\([0-9]*\):.*|$f:\1:1: error: bad token [demo]|"; grep -q BAD "$f" && rc=1; done
+exit $rc
+EOF
+  cat > "$CG/.agents/checks/turn.sh" <<'EOF'
+#!/usr/bin/env bash
+grep -rq BAD --include='*.c' . && { echo "src/y.c:1:1: error: bad token [demo]"; exit 1; }
+exit 0
+EOF
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CG/.agents/checks/full.sh"
+  commit "$CG" checks
+  run(){ local ev="$1" tool="$2" payload="$3"; printf '%s' "$payload" | (cd "$CG" && .agents/hooks/run "$ev" --tool="$tool") 2>/dev/null; }
+  out="$(run pre-tool codex "{\"session_id\":\"x\",\"cwd\":\"$CG\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git reset --hard\"}}")" && rc=0 || rc=$?
+  t    "codex: a denied command blocks in JSON" sok "$out" "d['hookSpecificOutput']['hookEventName'] == 'PreToolUse' and d['hookSpecificOutput']['permissionDecision'] == 'deny' and 'blocked by policy' in d['hookSpecificOutput']['permissionDecisionReason']"
+  t    "...with exit 0 (the JSON form)"   test "$rc" = 0
+  out="$(run pre-tool codex '{"tool_name":"Bash","tool_input":{"command":["bash","-lc","git reset --hard"]}}')"
+  t    "codex: an argv-list command is checked too" sok "$out" "d['hookSpecificOutput']['permissionDecision'] == 'deny'"
+  out="$(run pre-tool codex '{"tool_name":"Bash","tool_input":{"command":"ls -la"}}')" && rc=0 || rc=$?
+  t    "codex: an allowed command passes quietly" test "$rc:$out" = "0:"
+  out="$(run pre-tool codex '{"tool_name":"mcp__docs__search","tool_input":{"q":"cat .env"}}')" && rc=0 || rc=$?
+  t    "codex: MCP tools pass"            test "$rc:$out" = "0:"
+  out="$(run pre-tool gemini '{"session_id":"g","cwd":"'"$CG"'","hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"git reset --hard"}}')" && rc=0 || rc=$?
+  t    "gemini: a denied command blocks in JSON" sok "$out" "d['decision'] == 'deny' and 'blocked by policy' in d['reason']"
+  t    "...with exit 0"                   test "$rc" = 0
+  out="$(run pre-tool gemini '{"tool_name":"read_file","tool_input":{"file_path":".env"}}')"
+  t    "gemini: read_file of a secret is denied" sok "$out" "d['decision'] == 'deny' and '.env' in d['reason']"
+  out="$(run pre-tool gemini '{"tool_name":"read_file","tool_input":{"file_path":"README.md"}}')"
+  t    "gemini: an allowed read answers {}" test "$out" = "{}"
+  out="$(run pre-tool gemini '{"tool_name":"mcp_docs_search","tool_input":{}}')"
+  t    "gemini: MCP tools pass"           test "$out" = "{}"
+  out="$(printf '%s' '{"tool_name":"run_shell_command","tool_input":{"command":"git push"}}' | (cd "$CG" && AGENTS_HOOKS=off .agents/hooks/run pre-tool --tool=gemini))"
+  t    "gemini: hooks off still answers {}" test "$out" = "{}"
+  mkdir -p "$CG/src"; echo 'int y = 1;' > "$CG/src/ok.c"; echo 'int y = BAD;' > "$CG/src/bad.c"
+  P1="$(python3 -c 'import json,sys; print(json.dumps({"session_id":"x","cwd":sys.argv[1],"hook_event_name":"PostToolUse","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/bad.c\n@@\n-int y = 1;\n+int y = BAD;\n*** End Patch\n"},"tool_response":"Success"}))' "$CG")"
+  out="$(run post-edit codex "$P1")"
+  t    "codex: an apply_patch edit gets feedback" sok "$out" "d['decision'] == 'block' and 'src/bad.c:1:1: error: bad token' in d['reason']"
+  P2="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** Add File: src/ok.c\n+int y = 1;\n*** Delete File: src/gone.c\n*** End Patch\n"}}))')"
+  out="$(run post-edit codex "$P2")" && rc=0 || rc=$?
+  t    "codex: a clean patch (patch in input) is quiet" test "$rc:$out" = "0:"
+  P3="$(python3 -c 'import json; print(json.dumps({"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: src/old.c\n*** Move to: src/bad.c\n*** End Patch\n"}}))')"
+  out="$(run post-edit codex "$P3")"
+  t    "codex: a moved file is checked at its new path" sok "$out" "'src/bad.c' in d['reason']"
+  out="$(run post-edit gemini "{\"tool_name\":\"write_file\",\"tool_input\":{\"file_path\":\"$CG/src/bad.c\",\"content\":\"int y = BAD;\"}}")"
+  t    "gemini: a write_file edit gets feedback" sok "$out" "d['hookSpecificOutput']['hookEventName'] == 'AfterTool' and 'bad token' in d['hookSpecificOutput']['additionalContext']"
+  out="$(run post-edit gemini '{"tool_name":"replace","tool_input":{"file_path":"src/ok.c","old_string":"1","new_string":"1"}}')"
+  t    "gemini: a clean replace answers {}" test "$out" = "{}"
+  rm -f "$CG/src/bad.c" "$CG/src/ok.c"
+  (cd "$CG" && .agents/bin/tasks new q "Questions" >/dev/null && .agents/bin/tasks add q "t" >/dev/null && .agents/bin/tasks set q T1 doing >/dev/null && .agents/bin/tasks ask q T1 "Which error code for an empty frame?" >/dev/null)
+  out="$(run session-start codex '{"session_id":"x","hook_event_name":"SessionStart","source":"startup"}')"
+  t    "codex: session start gives open questions as context" sok "$out" "d['hookSpecificOutput']['hookEventName'] == 'SessionStart' and 'Which error code' in d['hookSpecificOutput']['additionalContext']"
+  out="$(run session-start gemini '{"session_id":"g","hook_event_name":"SessionStart","source":"startup"}')"
+  t    "gemini: session start gives open questions as context" sok "$out" "'Which error code' in d['hookSpecificOutput']['additionalContext']"
+  rm -rf "$CG/.agents/plans/q"
+  out="$(run session-start codex '{}')"
+  t    "codex: no open questions, no output" test -z "$out"
+  out="$(run session-start gemini '{}')"
+  t    "gemini: no open questions, {}"    test "$out" = "{}"
+  rm -f "$CG"/.agents/cache/turn-*
+  out="$(run turn-start codex '{"session_id":"cx","hook_event_name":"UserPromptSubmit","prompt":"go"}')" && rc=0 || rc=$?
+  t    "codex: turn start is quiet"       test "$rc:$out" = "0:"
+  out="$(run turn-start gemini '{"session_id":"gx","hook_event_name":"BeforeAgent","prompt":"go"}')"
+  t    "gemini: turn start answers {}"    test "$out" = "{}"
+  t    "...and both took a snapshot"      test "$(ls "$CG"/.agents/cache/turn-* | wc -l | tr -d ' ')" = 2
+  out="$(run stop-gate codex '{"session_id":"cx","hook_event_name":"Stop","stop_hook_active":false}')" && rc=0 || rc=$?
+  t    "codex: a no-change turn isn't gated" test "$rc:$out" = "0:"
+  out="$(run stop-gate gemini '{"session_id":"gx","hook_event_name":"AfterAgent","stop_hook_active":false}')"
+  t    "gemini: a no-change turn answers {}" test "$out" = "{}"
+  mkdir -p "$CG/src"; echo 'int y = BAD;' > "$CG/src/y.c"
+  out="$(run stop-gate codex '{"session_id":"cx","hook_event_name":"Stop","stop_hook_active":false}')" && rc=0 || rc=$?
+  t    "codex: a failing turn keeps working" sok "$out" "d['decision'] == 'block' and 'stop gate ran' in d['reason'] and 'src/y.c' in d['reason']"
+  t    "...with exit 0"                   test "$rc" = 0
+  out="$(run stop-gate codex '{"session_id":"cx","hook_event_name":"Stop","stop_hook_active":true}')"
+  t    "codex: giving up says so in JSON" sok "$out" "'still failing' in d['systemMessage']"
+  out="$(run stop-gate gemini '{"session_id":"gx","hook_event_name":"AfterAgent","stop_hook_active":false}')"
+  t    "gemini: a failing turn keeps working" sok "$out" "d['decision'] == 'block' and 'stop gate ran' in d['reason']"
+  out="$(run stop-gate gemini '{"session_id":"gx","hook_event_name":"AfterAgent","stop_hook_active":true}')"
+  t    "gemini: giving up is one JSON object" sok "$out" "'still failing' in d['systemMessage']"
+  rm -rf "$CG/src"
+
+  echo "codex and gemini hooks: adapter off"
+  edit "$CG/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude"/'
+  "$CG/.agents/bin/sync" >/dev/null 2>&1
+  t    "codex off: back to the project's own hooks" jok "$C" "d == {'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': './audit.sh'}]}]}}"
+  t    "gemini off: harness hooks gone, the project's kept" jok "$G" "d['hooks'] == {'AfterTool': [{'matcher': 'write_file', 'hooks': [{'type': 'command', 'command': './fmt.sh'}]}]} and d['theme'] == 'dark'"
+  CO=$(repo codexonly)
+  "$HARNESS/install.sh" --team "$CO" >/dev/null 2>&1
+  edit "$CO/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude codex"/'
+  "$CO/.agents/bin/sync" >/dev/null 2>&1
+  t    "codex on: hooks.json written"     grep -q 'stop-gate --tool=codex' "$CO/.codex/hooks.json"
+  edit "$CO/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude"/'
+  "$CO/.agents/bin/sync" >/dev/null 2>&1
+  t    "codex off: a file of only harness hooks goes" test ! -e "$CO/.codex/hooks.json"
+
+  echo "codex and gemini hooks: local mode"
+  LC=$(repo localcodex)
+  "$HARNESS/install.sh" "$LC" >/dev/null 2>&1
+  edit "$LC/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude codex gemini"/'
+  "$LC/.agents/bin/sync" >/dev/null 2>&1
+  t    "local: codex hooks rendered"      grep -q 'pre-tool --tool=codex' "$LC/.codex/hooks.json"
+  t    "local: block hides .codex/hooks.json" grep -qx '/.codex/hooks.json' "$LC/.git/info/exclude"
+  t    "local: status clean"              test -z "$(git -C "$LC" status --porcelain)"
+  t    "local: --check clean"             "$LC/.agents/bin/sync" --check
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$LC/.agents/checks/$tier.sh"; done
+  git -C "$LC" add -f .codex/hooks.json .gemini/settings.json
+  out="$("$LC/.agents/bin/verify" || true)"
+  t    "local: a tracked codex hooks file is a finding" hasl "$out" ".codex/hooks.json:1: error: [harness-tracked]"
+  t    "local: a tracked gemini settings file with harness hooks too" hasl "$out" ".gemini/settings.json:1: error: [harness-tracked]"
+  git -C "$LC" rm -q --cached .codex/hooks.json .gemini/settings.json
+  LT=$(repo localcodextracked)
+  mkdir -p "$LT/.codex"; printf '{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "./audit.sh"}]}]}}\n' > "$LT/.codex/hooks.json"
+  commit "$LT" "own codex hooks"
+  "$HARNESS/install.sh" "$LT" >/dev/null 2>&1
+  out="$("$LT/.agents/bin/sync" 2>&1)"
+  t    "local, codex off: no warning about a tracked codex hooks file" bash -c "! printf '%s' \"\$1\" | grep -q 'codex/hooks.json'" _ "$out"
+  edit "$LT/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude codex"/'
+  out="$("$LT/.agents/bin/sync" 2>&1)"
+  t    "local: a tracked codex hooks file is left alone" test -z "$(git -C "$LT" status --porcelain)"
+  t    "...and sync says so"              hasl "$out" ".codex/hooks.json is tracked by the project"
+  tnot "...and the block doesn't list it" grep -qx '/.codex/hooks.json' "$LT/.git/info/exclude"
+
+  echo "codex and gemini hooks: team to local"
+  UT=$(repo unsharecg)
+  "$HARNESS/install.sh" --team "$UT" >/dev/null 2>&1
+  edit "$UT/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude codex gemini"/'
+  "$UT/.agents/bin/sync" >/dev/null 2>&1
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["theme"]="dark"; open(p,"w").write(json.dumps(d, indent=2) + "\n")' "$UT/.gemini/settings.json"
+  commit "$UT" harness
+  out="$("$HARNESS/install.sh" --local "$UT" 2>&1)"
+  t    "--local: codex hooks.json of only harness hooks is untracked" test -z "$(git -C "$UT" ls-files .codex/hooks.json)"
+  t    "...kept on disk, still wired"     grep -q 'pre-tool --tool=codex' "$UT/.codex/hooks.json"
+  t    "...and hidden"                    grep -qx '/.codex/hooks.json' "$UT/.git/info/exclude"
+  t    "--local: gemini settings with the project's keys stay tracked" git -C "$UT" ls-files --error-unmatch .gemini/settings.json
+  tnot "...without the harness hooks"     grep -q 'hooks/run' "$UT/.gemini/settings.json"
+  t    "...keeping the project's keys"    grep -q '"theme": "dark"' "$UT/.gemini/settings.json"
+  t    "...and sync says gemini is off here" hasl "$("$UT/.agents/bin/sync" 2>&1)" ".gemini/settings.json is tracked by the project"
+  UH=$(repo unsharecodexhand)
+  "$HARNESS/install.sh" --team "$UH" >/dev/null 2>&1
+  edit "$UH/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude codex"/'
+  mkdir -p "$UH/.codex"; cp "$WORK/cg.codex" "$UH/.codex/hooks.json"
+  "$UH/.agents/bin/sync" >/dev/null 2>&1
+  commit "$UH" harness
+  "$HARNESS/install.sh" --local "$UH" >/dev/null 2>&1
+  t    "--local: codex hooks.json with the project's hooks stays tracked" git -C "$UH" ls-files --error-unmatch .codex/hooks.json
+  t    "...back to the project's own"     cmp -s <(python3 -m json.tool "$UH/.codex/hooks.json") <(python3 -m json.tool "$WORK/cg.codex")
+fi
+}
+group grp_codexgemini
+
 # The sections from here on run in the foreground while the groups above finish.
 # A new section can go anywhere below as is; wrap it in a group (see "groups" at the top) to run it in parallel.
 exec 3>&1 4>&2 >"$SMOKE_GD/tail.out" 2>&1; SMOKE_TAIL=1
