@@ -46,8 +46,14 @@ esac
 # Normalize explicit files to repo-relative paths that exist; default to the changed set.
 if [ ${#FILES[@]} -gt 0 ]; then
   NORM=()
+  PROOT="$(pwd -P)"   # the repo with symlinks resolved: an absolute path may use either spelling
   for f in "${FILES[@]}"; do
-    case "$f" in "$ROOT"/*) f="${f#"$ROOT"/}" ;; ./*) f="${f#./}" ;; esac
+    case "$f" in
+      "$ROOT"/*) f="${f#"$ROOT"/}" ;;
+      ./*) f="${f#./}" ;;
+      /*) d="$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)" \
+            && case "$d/" in "$PROOT"/*) f="${d#"$PROOT"}/${f##*/}"; f="${f#/}" ;; esac ;;
+    esac
     [ -f "$f" ] && NORM+=("$f")
   done
   FILES=()
