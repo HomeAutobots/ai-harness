@@ -56,7 +56,7 @@ It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing
 .agents/bin/sync --check && .agents/bin/verify --tier=full
 ```
 
-Add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
+Add CODEOWNERS for `AGENTS.md CLAUDE.md .mcp.json .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
 
 Team mode commits what `sync` renders into `.agents/skills/` and `.claude/skills/`, except skills from your personal library: those render for your clone only, listed in the same marked block in `.git/info/exclude` that local mode uses (team mode writes it only when you have some, and removes it when you have none left). See [Libraries](#libraries).
 

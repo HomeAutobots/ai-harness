@@ -95,7 +95,7 @@ grep -q "^## $v\( \|$\)" CHANGELOG.md || finding "CHANGELOG.md:1" version "VERSI
 
 # 8b. One CODEOWNERS list everywhere it's suggested. Looks at each line naming CODEOWNERS plus
 # the line after it, with backticks, commas, and a closing period read as separators.
-CODEOWNERS_LIST="AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/"
+CODEOWNERS_LIST="AGENTS.md CLAUDE.md .mcp.json .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/"
 for f in install.sh README.md template/.agents/skills/harness-tailor/SKILL.md; do
   for e in $CODEOWNERS_LIST; do
     awk -v e="$e" '/CODEOWNERS/ { n = 2 } n > 0 { n--; t = " " $0 " "; gsub(/[`,]/, " ", t); gsub(/\. /, " ", t); if (index(t, " " e " ")) found = 1 }
