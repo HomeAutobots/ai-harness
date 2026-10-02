@@ -53,6 +53,18 @@ cmd_new() {
 harness_paths() {  # the harness's files, plus libraries in LIBRARIES that live inside the repo
   local src lib
   printf '%s\n' $HARNESS_PATHS
+  # Local mode: the rule copies sync wrote for other tools (marked, untracked), never a project's own.
+  if [ -f "$ROOT/.agents/lib/rules_copies.sh" ]; then
+    (
+      cd "$ROOT" || exit 0
+      # shellcheck source=../lib/rules_copies.sh
+      . .agents/lib/rules_copies.sh
+      for p in $AGENTS_RULES_COPIES; do
+        case "$p" in .cursor/*) continue ;; esac   # .cursor is in HARNESS_PATHS already
+        if agents_rules_marked "$p" && ! git ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then printf '%s\n' "$p"; fi
+      done
+    )
+  fi
   while IFS="$AGENTS_TAB" read -r src lib; do
     [ "$src" = project-listed ] || continue
     case "$lib" in "$ROOT"/*) printf '%s\n' "${lib#"$ROOT"/}" ;; esac

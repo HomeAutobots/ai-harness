@@ -129,6 +129,8 @@ agents_state_key() {
     agents_libraries 2>/dev/null
     agents_pack_state 2>/dev/null
     cat .agents/plans/*/tasks.json 2>/dev/null
+    # local mode: the instruction copies verify compares (git ignores them), and their source
+    cat .agents/AGENTS.local.md AGENTS.override.md GEMINI.md .cursor/rules/ai-harness.mdc .github/instructions/ai-harness.instructions.md 2>/dev/null
     for w in $(agents_conf_get .agents/harness.conf WORKFLOWS 2>/dev/null); do
       d="$(agents_resolve workflows "$w" 2>/dev/null)" || continue
       if [ -f "$d/checks/state.sh" ]; then bash "$d/checks/state.sh" 2>/dev/null; fi
