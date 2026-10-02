@@ -11,7 +11,7 @@ trap 'rm -f "$OUT" "$OUT".*' EXIT
 finding() { printf '%s: error: [%s] %s\n' "$1" "$2" "$3" >> "$OUT"; }
 
 files() {  # every file in the repo that we own, minus build output and vcs
-  find . \( -path ./.git -o -path ./dist -o -name __pycache__ \) -prune -o -type f -print | sed 's|^\./||' | sort
+  find . \( -path ./.git -o -path ./dist -o -path ./.claude/worktrees -o -name __pycache__ \) -prune -o -type f -print | sed 's|^\./||' | sort
 }
 files > "$OUT.all"
 
