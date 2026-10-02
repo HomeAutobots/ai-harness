@@ -276,16 +276,19 @@ stack_refs() {
   local s=".agents/stacks/$1/"
   {
     if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
-      git -C "$DEST" grep -nIF --untracked -e "$s" -- . 2>/dev/null || true
+      # the whole repo (:/), so a subdirectory install sees the CI configs at the top too
+      git -C "$DEST" grep -nIF --untracked -e "$s" -- ':/' 2>/dev/null || true
     else
       (cd "$DEST" && grep -rnIF --exclude-dir=.git -e "$s" . 2>/dev/null | sed 's|^\./||') || true
     fi
     # local mode hides .agents/ from git, so its project-owned files are read directly
     (cd "$DEST" && grep -nIF -e "$s" .agents/checks/*.sh .agents/*.conf /dev/null 2>/dev/null) || true
+    (cd "$DEST" && grep -rnIF -e "$s" .agents/library .agents/context 2>/dev/null) || true
   } | awk -v s="$s" '{
       p = index($0, ":"); path = substr($0, 1, p - 1); rest = substr($0, p + 1)
       q = index(rest, ":"); num = substr(rest, 1, q - 1); c = substr(rest, q + 1)
-      if (path ~ /^\.agents\/(builtin|stacks|cache)\// || path ~ /^\.agents\/library\/\.migrated\//) next
+      t = "/" path   # a sibling install in another subdirectory counts the same as this one
+      if (t ~ /\/\.agents\/(builtin|stacks|cache)\// || t ~ /\/\.agents\/library\/\.migrated\//) next
       while ((i = index(c, s)) > 0) {
         c = substr(c, i + length(s))
         if (!(substr(c, 1, 6) == "lib.sh" && substr(c, 7, 1) !~ /[A-Za-z0-9._-]/)) { print path ":" num; next }

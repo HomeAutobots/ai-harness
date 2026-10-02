@@ -345,8 +345,14 @@ adopt_skills() {
     [ "$LOCAL" -eq 1 ] && tracked "$d" && continue   # the project's own; compute_skill_set lists it
     if [ -e ".agents/library/skills/$n" ] || [ -L ".agents/library/skills/$n" ]; then
       # A link move (this one, or install.sh's migration) that stopped after making the library
-      # link: both point at the same skill, so the old link is the one left to remove.
-      if [ -L "$d" ] && [ -L ".agents/library/skills/$n" ] && t="$(cd "$d" 2>/dev/null && pwd -P)" \
+      # link: both point at the same skill, so the old link is the one left to remove. Not when
+      # the library link goes through this one (removing it would leave that one dangling).
+      t="$(readlink ".agents/library/skills/$n" 2>/dev/null || true)"
+      case "$t" in /*) ;; *) t="$ROOT/.agents/library/skills/$t" ;; esac
+      t="$(norm_path "$t")"
+      if [ -L "$d" ] && [ -L ".agents/library/skills/$n" ] \
+         && case "$t/" in "$ROOT/$d/"*) false ;; *) true ;; esac \
+         && t="$(cd "$d" 2>/dev/null && pwd -P)" \
          && [ "$t" = "$(cd ".agents/library/skills/$n" 2>/dev/null && pwd -P)" ]; then
         if [ "$CHECK" -eq 1 ]; then drift "$d (a move to .agents/library/skills/$n that didn't finish)"; continue; fi
         rm -f "$d"
@@ -525,7 +531,7 @@ render_skills() {
     if [ "$copy" -eq 1 ]; then
       copy_row "$target" "$src" "$lib"
       if [ ! -L "$target" ] && [ -d "$target" ] \
-         && diff -rq -x .harness-copy "$src" "$target" >/dev/null 2>&1; then continue; fi
+         && diff -rq -x .harness-copy -x __pycache__ -x .DS_Store "$src" "$target" >/dev/null 2>&1; then continue; fi
     else
       if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then printf '%s\t%s\n' "$name" "$rel" >> "$RENDERED_NEW"; continue; fi
     fi
@@ -811,14 +817,14 @@ mirror_skills() {
     if [ "$LINK_MODE" = copy ]; then
       copy_row "$target" "$src" "$lib"
       if [ ! -L "$target" ] && [ -d "$target" ] \
-         && diff -rq -x .harness-copy "$src" "$target" >/dev/null 2>&1; then continue; fi
+         && diff -rq -x .harness-copy -x __pycache__ -x .DS_Store "$src" "$target" >/dev/null 2>&1; then continue; fi
     else
       if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then continue; fi
     fi
 
     if [ "$CHECK" -eq 1 ]; then drift "$target"; continue; fi
     mkdir -p "$dest"
-    replacing "$target" "$src"
+    if [ "$LINK_MODE" = copy ]; then replacing "$target" "$src"; else replacing "$target" "$ROOT/$SKILLS_DIR/$name"; fi
     rm -rf "$target"
     if [ "$LINK_MODE" = copy ]; then
       mkdir -p "$target"

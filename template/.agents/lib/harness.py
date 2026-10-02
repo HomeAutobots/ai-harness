@@ -552,11 +552,12 @@ def dir_hash(path):
 
 def tree_hash(path):
     """sha256 of a skill directory as a copy render holds it: names, file contents, and link targets
-    (cp -R copies a link inside it as a link). .harness-copy, sync's marker, is left out."""
+    (cp -R copies a link inside it as a link). Left out: .harness-copy (sync's marker) and what running
+    or browsing a skill leaves behind (__pycache__/, .DS_Store), as sync's diff leaves them out."""
     h = hashlib.sha256()
     for base, dirs, files in os.walk(path):
-        dirs.sort()
-        names = sorted(files + [d for d in dirs if os.path.islink(os.path.join(base, d))])
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        names = sorted([f for f in files if f != ".DS_Store"] + [d for d in dirs if os.path.islink(os.path.join(base, d))])
         for name in names:
             full = os.path.join(base, name)
             rel = os.path.relpath(full, path).replace(os.sep, "/")
