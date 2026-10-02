@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Smoke test: installs into scratch repos and checks the harness invariants.
 #   tests/smoke.sh          (C++ stack tests run when cmake and a compiler are present)
+#   SMOKE_JOBS=1 tests/smoke.sh   one group of sections at a time (default: one per CPU)
 set -euo pipefail
 
 HARNESS="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 
@@ -33,7 +34,133 @@ FAKE_SLACK="xo""xb-""2048193746-5839201746381-Qm8xK2pL9vR4tY7wZ1nB"
 FAKE_PEM="-----BEGIN RSA PRI""VATE KEY-----"
 guard_rc(){ local rc=0; (cd "$1" && .agents/bin/guard) >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }   # guard_rc <repo>
 policy(){ local p="$1"; shift; (cd "$p" && .agents/bin/policy "$@"); }   # policy <repo> <args...>
+# Setup helpers that sections in more than one group use.
+oldlayout() {  # oldlayout <project>: make an install look like one from before libraries
+  local p="$1"
+  rm -rf "$p/.agents/builtin" "$p/.agents/library" "$p/.agents/skills" "$p/.agents/workflows"
+  mkdir -p "$p/.agents/skills" "$p/.agents/workflows" "$p/.agents/stacks"
+  cp -R "$HARNESS/template/.agents/skills/." "$p/.agents/skills/"
+  cp -R "$HARNESS/workflows/req-driven" "$p/.agents/workflows/"
+  mv "$p/.agents/workflows/req-driven/skill" "$p/.agents/skills/req-driven"
+  rm -rf "$p/.agents/stacks/cpp-cmake"; cp -R "$HARNESS/stacks/cpp-cmake" "$p/.agents/stacks/"
+  printf 'deny-cmd .agents/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision\n' >> "$p/.agents/policy.conf"
+  echo 0.2.0 > "$p/.agents/HARNESS_VERSION"
+}
+handmade() {  # handmade <project>: a pack and its skill someone made by hand in the old layout
+  local p="$1"
+  mkdir -p "$p/.agents/workflows/handmade/checks" "$p/.agents/skills/handmade"
+  printf '#!/usr/bin/env bash\nbash "$AGENTS_ROOT/.agents/workflows/handmade/rule.sh"\n' > "$p/.agents/workflows/handmade/checks/turn.sh"
+  printf '#!/usr/bin/env bash\ngrep -q HANDMADE-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [handmade] bad notes"; exit 1; }\nexit 0\n' > "$p/.agents/workflows/handmade/rule.sh"
+  printf -- '---\nname: handmade\ndescription: Our process.\n---\nRun .agents/workflows/handmade/rule.sh first.\n' > "$p/.agents/skills/handmade/SKILL.md"
+  edit "$p/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="handmade"/'
+}
+mkagent(){ mkdir -p "$1/agents"; printf -- '---\ndescription: %s\n%s---\nYou review diffs.\n' "${3:-An agent.}" "${4:-}" > "$1/agents/$2.md"; }
 
+# --- groups: sections run in parallel -----------------------------------------------------------
+# A group is a function holding one or more whole sections. `group <fn>` right after it starts it
+# in the background: its output is buffered and printed in file order, its counts added up by
+# finish. A group sees only what's set above this point, so sections that share a repo variable,
+# a helper one of them defines, or a file in $WORK go in one group, or the later group starts with
+# `wait_group <fn>` and sets what it needs. The sections after the last group run in the
+# foreground meanwhile. SMOKE_JOBS caps how many groups run at once; SMOKE_TIMES=1 prints how
+# long each group took, to find the one that sets the wall time.
+SMOKE_GD="$WORK/.groups"; mkdir -p "$SMOKE_GD"
+SMOKE_NG=0; SMOKE_TAIL=0; SMOKE_DONE=0
+SMOKE_MAX="${SMOKE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+case "$SMOKE_MAX" in ''|*[!0-9]*|0) SMOKE_MAX=4 ;; esac
+group() {  # group <fn>: run a group of sections in the background
+  local n=$((SMOKE_NG + 1)) fin
+  while :; do
+    fin="$(find "$SMOKE_GD" -name '*.rc' | wc -l | tr -d ' ')"
+    [ $((SMOKE_NG - fin)) -lt "$SMOKE_MAX" ] && break
+    sleep 0.2
+  done
+  SMOKE_NG=$n
+  printf '%s\n' "$1" > "$SMOKE_GD/$n.name"
+  set -m   # its own process group, so a run that stops early can stop all of it (on_exit)
+  ( set +e
+    t0=$SECONDS
+    ( readonly SMOKE_COUNT="$SMOKE_GD/$n.count"   # a section can't move where the counts go
+      set -e; PASS=0; FAIL=0; SKIP=0
+      "$1"
+      printf '%s %s %s\n' "$PASS" "$FAIL" "$SKIP" > "$SMOKE_COUNT" ) > "$SMOKE_GD/$n.out" 2>&1
+    rc=$?
+    echo "$((SECONDS - t0))" > "$SMOKE_GD/$n.secs"
+    echo "$rc" > "$SMOKE_GD/$n.rc.tmp"; mv "$SMOKE_GD/$n.rc.tmp" "$SMOKE_GD/$n.rc" ) < /dev/null &
+  echo "$!" > "$SMOKE_GD/$n.pid"
+  set +m
+}
+wait_group() {  # wait_group <fn>: wait for a group started earlier to finish
+  local f
+  f="$(grep -lx -- "$1" "$SMOKE_GD"/*.name 2>/dev/null | head -n 1 || true)"
+  [ -n "$f" ] || { echo "smoke: wait_group: no group $1 started before this" >&2; return 1; }
+  while [ ! -f "${f%.name}.rc" ]; do sleep 0.2; done
+}
+printer() {  # print each group's output in order, once it and the ones before it are done
+  local i=1
+  while :; do
+    if [ -f "$SMOKE_GD/$i.rc" ]; then
+      cat "$SMOKE_GD/$i.out"
+      if [ ! -f "$SMOKE_GD/$i.count" ]; then
+        printf '  FAIL  %s stopped early (exit %s); checks after the line above did not run\n' \
+          "$(cat "$SMOKE_GD/$i.name")" "$(cat "$SMOKE_GD/$i.rc")"
+      fi
+      echo "$i" > "$SMOKE_GD/printed"
+      i=$((i + 1))
+    elif [ -f "$SMOKE_GD/all" ] && [ "$i" -gt "$(cat "$SMOKE_GD/all")" ]; then
+      return 0
+    else
+      sleep 0.2
+    fi
+  done
+}
+printer & SMOKE_PRINTER=$!
+trap 'exit 130' INT; trap 'exit 143' TERM   # so on_exit runs and stops the groups
+finish() {  # wait for every group, print the foreground's output, add up the counts
+  local i=1 a b c
+  echo "$SMOKE_NG" > "$SMOKE_GD/all"
+  wait "$SMOKE_PRINTER" || true
+  exec 1>&3 2>&4; SMOKE_TAIL=0
+  cat "$SMOKE_GD/tail.out"
+  while [ "$i" -le "$SMOKE_NG" ]; do
+    if [ -f "$SMOKE_GD/$i.count" ]; then
+      read -r a b c < "$SMOKE_GD/$i.count"
+      PASS=$((PASS + a)); FAIL=$((FAIL + b)); SKIP=$((SKIP + c))
+    else   # stopped early (the printer said so): what it got through, plus one failure for that
+      a="$(grep -c '^  ok  ' "$SMOKE_GD/$i.out" || true)"; b="$(grep -c '^  FAIL  ' "$SMOKE_GD/$i.out" || true)"
+      PASS=$((PASS + a)); FAIL=$((FAIL + b + 1))
+    fi
+    if [ -n "${SMOKE_TIMES:-}" ]; then
+      printf 'smoke: %5ss  %s\n' "$(cat "$SMOKE_GD/$i.secs")" "$(cat "$SMOKE_GD/$i.name")" >&2
+    fi
+    i=$((i + 1))
+  done
+  if [ -n "${SMOKE_TIMES:-}" ]; then printf 'smoke: %5ss  total\n' "$SECONDS" >&2; fi
+  wait   # reap the group jobs, all done by now
+  SMOKE_DONE=1
+}
+on_exit() {  # a run that stops early still shows what it has, and exits non-zero
+  local rc=$? i
+  if [ "${SMOKE_DONE:-0}" -eq 0 ] && [ -n "${SMOKE_GD:-}" ]; then
+    if [ -n "${SMOKE_PRINTER:-}" ]; then kill "$SMOKE_PRINTER" 2>/dev/null || true; fi
+    for i in "$SMOKE_GD"/*.pid; do
+      if [ -f "$i" ]; then kill -TERM -- "-$(cat "$i")" 2>/dev/null || true; fi   # the group and all it started
+    done
+    if [ "${SMOKE_TAIL:-0}" -eq 1 ]; then exec 1>&3 2>&4; fi
+    i=$(( $(cat "$SMOKE_GD/printed" 2>/dev/null || echo 0) + 1 ))
+    while [ "$i" -le "${SMOKE_NG:-0}" ]; do
+      if [ -f "$SMOKE_GD/$i.out" ]; then cat "$SMOKE_GD/$i.out"; fi
+      i=$((i + 1))
+    done
+    if [ -f "$SMOKE_GD/tail.out" ]; then cat "$SMOKE_GD/tail.out"; fi
+    echo "smoke: stopped early (exit $rc)" >&2
+    [ "$rc" -ne 0 ] || rc=1
+  fi
+  rm -rf "$WORK"
+  exit "$rc"
+}
+
+grp_fresh() {   # fresh install and the sections that keep using it ($P)
 echo "fresh install"
 P=$(repo fresh)
 "$HARNESS/install.sh" --team "$P" >/dev/null 2>&1
@@ -116,7 +243,25 @@ printf 'x \363\240\201\201 tag chars\n' > "$P/.agents/context/sneaky.md"
 tnot "tag chars fail --check"          "$P/.agents/bin/sync" --check
 rm "$P/.agents/context/sneaky.md"
 t    "clean again"                     "$P/.agents/bin/sync" --check
+}
+group grp_fresh
 
+grp_reinstall() {
+echo "re-install rewrites only what changed"
+RI=$(repo reinstall)
+"$HARNESS/install.sh" --team "$RI" >/dev/null 2>&1
+touch -t 200001010000 "$RI/.agents/bin/sync" "$RI/.agents/core/AGENTS.core.md"; touch -t 200101010000 "$WORK/reinstall.ref"
+echo '# hand edit' >> "$RI/.agents/bin/guard"; touch "$RI/.agents/lib/stray.sh"; chmod -x "$RI/.agents/hooks/hook.py"
+"$HARNESS/install.sh" --team "$RI" >/dev/null 2>&1
+t    "unchanged harness files stay as they are" test -z "$(find "$RI/.agents/bin/sync" -newer "$WORK/reinstall.ref")"
+t    "...in a directory too"           test -z "$(find "$RI/.agents/core/AGENTS.core.md" -newer "$WORK/reinstall.ref")"
+t    "an edited one is replaced"       cmp -s "$HARNESS/template/.agents/bin/guard" "$RI/.agents/bin/guard"
+t    "a stray file in a harness-owned directory goes" test ! -e "$RI/.agents/lib/stray.sh"
+t    "a lost executable bit comes back" test -x "$RI/.agents/hooks/hook.py"
+}
+group grp_reinstall
+
+grp_merge() {
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "merging into existing tool configs"
   M=$(repo merge)
@@ -152,7 +297,11 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "gemini loads AGENTS.md"          grep -q '"AGENTS.md"' "$M/.gemini/settings.json"
   t  "all clean"                       "$M/.agents/bin/sync" --check
 fi
+}
+group grp_merge
 
+grp_policy() {
+wait_group grp_fresh; P="$WORK/fresh"   # the fresh install
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "policy hook"
   deny(){ local d="$1" tool="$2" payload="$3" rc=0; hook "$P" pre-tool "$tool" "$payload" >/dev/null 2>&1 || rc=$?; if [ "$rc" -eq 2 ]; then ok "$d"; else bad "$d (rc=$rc)"; fi; }
@@ -196,7 +345,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   trc   "hooks off really allows" 0 env AGENTS_HOOKS=off bash -c "printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push\"}}' | '$P/.agents/hooks/run' pre-tool --tool=claude"
   trc   "garbage payload fails open" 0 bash -c "printf 'not json' | '$P/.agents/hooks/run' pre-tool --tool=claude"
 fi
+}
+group grp_policy
 
+grp_guard() {
 echo "guard"
 G=$(repo guard)
 "$HARNESS/install.sh" --team "$G" >/dev/null 2>&1
@@ -222,7 +374,10 @@ trc  "untracked file scanned" 2        "$G/.agents/bin/guard"
 rm "$G/new.py"; printf 'Use NOLINT sparingly.\n' > "$G/NOTES.md"
 t    "docs are not scanned"            "$G/.agents/bin/guard"
 rm "$G/NOTES.md"
+}
+group grp_guard
 
+grp_verify() {   # verify, then the edit and stop hooks on the same repo ($V)
 echo "verify tiers, shaping, cache"
 V=$(repo verify)
 "$HARNESS/install.sh" --team "$V" >/dev/null 2>&1
@@ -330,7 +485,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   rm -rf "$V/.agents/plans/q"
   t   "no open questions, no output"   bash -c "test -z \"\$(printf '{}' | (cd '$V' && .agents/hooks/run session-start --tool=claude))\""
 fi
+}
+group grp_verify
 
+grp_gitflow() {
 echo "git workflow (gitflow)"
 SAVED_PERSONAL_DIR="$AGENTS_PERSONAL_DIR"; unset AGENTS_PERSONAL_DIR   # this section uses the XDG default
 export XDG_CONFIG_HOME="$WORK/xdg"
@@ -407,7 +565,10 @@ t    "respects existing hooksPath"     bash -c "cd '$H' && .agents/bin/gitflow i
 t    "no hooks written there"          test ! -e "$H/.git/hooks/commit-msg"
 unset XDG_CONFIG_HOME
 export AGENTS_PERSONAL_DIR="$SAVED_PERSONAL_DIR"
+}
+group grp_gitflow
 
+grp_noflow() {
 echo "absence: no flow configured"
 git init -q --bare "$WORK/trunk.git"
 Z=$(repo trunk)
@@ -438,7 +599,10 @@ t    "no gaps left by missing data"    bash -c "! awk 'prev == \"\" && \$0 == \"
 t    "linked plan lands in the PR"     grep -q '^Plan: Tidy the logging' "$Z/.agents/cache/pr-body.md"
 t    "link recorded once"              test "$(grep -c '^Branch:' "$Z/.agents/plans/logging/plan.md")" -eq 1
 t    "plan without a workflow"         bash -c "cd '$Z' && .agents/bin/tasks add logging 'do it' >/dev/null && .agents/bin/tasks next logging | grep -q '^T1'"
+}
+group grp_noflow
 
+grp_protected() {
 echo "custom protected branches"
 git init -q --bare "$WORK/devmain.git"
 D=$(repo devmain)
@@ -458,7 +622,10 @@ trc  "main isn't protected here" 0     bash -c "cd '$D' && GIT_AGENT_MAY=x .agen
 echo r > "$D/r.txt"; commit "$D" "retry"
 trc  "human push to dev/main blocked" 1 git -C "$D" push -q origin HEAD:dev/main
 t    "human push to main allowed"      git -C "$D" push -q origin HEAD:main
+}
+group grp_protected
 
+grp_committpl() {
 echo "commit template"
 T=$(repo committpl)
 "$HARNESS/install.sh" --team "$T" >/dev/null 2>&1
@@ -489,7 +656,10 @@ t    "check passes on template commits" bash -c "cd '$T' && .agents/bin/gitflow 
 edit "$T/.agents/git.conf" 's|^GIT_COMMIT_TEMPLATE=.*||'
 cp "$T/.agents/git/commit.md" "$T/.gitmessage"; git -C "$T" config --local commit.template .gitmessage
 t    "repo commit.template picked up"  bash -c "cd '$T' && .agents/bin/gitflow config | grep -q 'commit template in effect: .gitmessage'"
+}
+group grp_committpl
 
+grp_ahead() {
 echo "gitflow start with unpushed base commits"
 G=$(repo ahead); git -C "$G" branch -M main
 git init -q --bare "$WORK/ahead.git"; git -C "$G" remote add origin "$WORK/ahead.git"; git -C "$G" push -q origin main
@@ -513,7 +683,11 @@ git -C "$H" checkout -q -b wip; "$HARNESS/install.sh" --team "$H" >/dev/null 2>&
 trc  "start refuses a base without the harness" 1 bash -c "cd '$H' && .agents/bin/gitflow start 'x'"
 t    "harness still in place"          test -x "$H/.agents/bin/tasks"
 t    "still on wip"                    test "$(git -C "$H" symbolic-ref --short HEAD)" = wip
+}
+group grp_ahead
 
+grp_tasks() {
+wait_group grp_policy; P="$WORK/fresh"   # the fresh install, after the policy hook used it
 echo "tasks ledger"
 (cd "$P" && .agents/bin/tasks new tls-rotation "Rotate TLS certs" >/dev/null)
 t    "plan created"                    test -f "$P/.agents/plans/tls-rotation/plan.md"
@@ -561,7 +735,10 @@ printf '[\n{"id":"Q1","task":"","gate":"","status":"open","source":"hook","asked
 touch -t 203101010000 "$P/.agents/plans/loose"
 t    "a stray open question doesn't hold a plan" bash -c "cd '$P' && .agents/bin/tasks record 'Anything else?' | grep -qx 'recorded Q[0-9]* in _general'"
 rm -rf "$P/.agents/plans/loose"
+}
+group grp_tasks
 
+grp_migrate01() {
 echo "migration from 0.1"
 O=$(repo old)
 "$HARNESS/install.sh" --team "$O" >/dev/null 2>&1
@@ -571,7 +748,10 @@ rm -f "$O/.agents/checks/turn.sh" "$O/.agents/checks/full.sh"
 t    "old verify moved to turn.sh"     grep -q 'make test' "$O/.agents/checks/turn.sh"
 t    "old verify moved to full.sh"     grep -q 'make test' "$O/.agents/checks/full.sh"
 t    "verify is the orchestrator now"  grep -q 'verify (orchestrator)' "$O/.agents/bin/verify"
+}
+group grp_migrate01
 
+grp_legacy() {
 echo "existing repo with legacy instructions"
 L=$(repo legacy)
 printf '# Legacy App\n\nUse tabs.\n' > "$L/AGENTS.md"
@@ -584,13 +764,19 @@ t    "skills block at end"             test "$(line_of "$L/AGENTS.md" 'Use tabs.
 t    "CLAUDE.md not clobbered"         grep -q 'Old Claude rules' "$L/CLAUDE.md"
 t    "warned about CLAUDE.md"          bash -c "printf '%s' \"\$1\" | grep -q \"doesn't import AGENTS.md\"" _ "$out"
 t    "idempotent after insert"         "$L/.agents/bin/sync" --check
+}
+group grp_legacy
 
+grp_broken() {
 echo "broken markers"
 B=$(repo broken)
 "$HARNESS/install.sh" --team "$B" >/dev/null 2>&1
 printf '<!-- harness:core:start -->\n' >> "$B/AGENTS.md"
 trc  "duplicate marker is an error" 2  "$B/.agents/bin/sync"
+}
+group grp_broken
 
+grp_copymode() {
 echo "copy mode"
 C=$(repo copymode)
 "$HARNESS/install.sh" --team "$C" >/dev/null 2>&1
@@ -603,7 +789,10 @@ echo "extra" >> "$C/.agents/skills/plan-task/SKILL.md"
 tnot "copy drift detected"             "$C/.agents/bin/sync" --check
 "$C/.agents/bin/sync" >/dev/null 2>&1
 t    "copy refreshed"                  "$C/.agents/bin/sync" --check
+}
+group grp_copymode
 
+grp_evals() {
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "evals (fake agent)"
   E=$(repo evals)
@@ -630,7 +819,10 @@ EOF
   t  "worktrees cleaned up"            bash -c "test \$(git -C '$E' worktree list | wc -l) -eq 1"
   t  "report runs"                     bash -c "cd '$E' && .agents/bin/eval report | grep -q 'decision (C vs A)'"
 fi
+}
+group grp_evals
 
+grp_reqs() {
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "req-driven workflow"
   W=$(repo reqs)
@@ -682,7 +874,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf '// REQ-2\nint parse(int n) { return n > 0 && n <= 1500; }\n' > "$W/src/frame.cpp"
   t  "markdown source works"           "$W/.agents/bin/verify"
 fi
+}
+group grp_reqs
 
+grp_cpp() {
 if [ "$HAVE_PY" -eq 1 ] && command -v cmake >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
   echo "cpp-cmake stack"
   X=$(repo cpp)
@@ -750,7 +945,10 @@ EOF
 else
   echo "cpp-cmake stack (skipped: needs python3, cmake, c++)"; SKIP=$((SKIP + 1))
 fi
+}
+group grp_cpp
 
+grp_fdd() {
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "feature-driven workflow"
   has(){ printf '%s' "$1" | grep -qF -- "$2"; }
@@ -948,7 +1146,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "upgrade keeps the artifacts"     bash -c "test -f '$FD/features.md' && test -f '$FD/approvals' && test -f '$FD/designs/F-12.md'"
   t  "upgrade keeps the seed"          test -f "$FD/.gitignore"
 fi
+}
+group grp_fdd
 
+grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
 HX="$WORK/hx"; mkdir -p "$HX"   # a copy of the harness plus a test pack
 cp -R "$HARNESS/install.sh" "$HARNESS/VERSION" "$HARNESS/template" "$HARNESS/stacks" "$HARNESS/workflows" "$HX/"
@@ -1021,7 +1222,10 @@ git -C "$D" checkout -q -b topic && git -C "$D" commit -qm 'Leak SECRET-ID' --no
 t    "history check sees pack rules"   bash -c "cd '$D' && .agents/bin/gitflow check 2>&1 | grep -q 'private ID in commit message'"
 edit "$D/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="demo"/'
 t    "pack out of WORKFLOWS stops checking" bash -c "cd '$D' && printf 'x OTHER-ID\n' | .agents/bin/gitflow check-msg"
+}
+group grp_packmech
 
+grp_local() {   # local install mode, in parts that run side by side
 echo "local install mode"
 LM=$(repo local)
 out="$("$HARNESS/install.sh" "$LM" 2>&1)"
@@ -1137,6 +1341,9 @@ t    "switch to team recorded"        grep -qx 'HARNESS_MODE="team"' "$PF/.agent
 tnot "exclude block gone"             grep -q 'ai-harness (local install' "$PF/.git/info/exclude"
 t    "harness shows up to add"        bash -c "git -C '$PF' status --porcelain | grep -q '^?? .agents/'"
 t    "install says to add"            hasl "$out" "git add -A"
+}
+group grp_local
+grp_local2() {
 TT=$(repo tailored)
 "$HARNESS/install.sh" --team "$TT" >/dev/null 2>&1
 edit "$TT/AGENTS.md" 's/^> \*\*Not tailored yet.*$/This parser is safety critical./'
@@ -1199,10 +1406,17 @@ t    "team stub keeps the project's import" bash -c "grep -qx '@README.md' '$IU/
 commit "$IU" harness
 "$HARNESS/install.sh" --local "$IU" >/dev/null 2>&1
 t    "--local strips only the harness's lines from it" bash -c "git -C '$IU' ls-files --error-unmatch CLAUDE.md && test \"\$(cat '$IU/CLAUDE.md')\" = '@README.md'"
+}
+group grp_local2
+grp_local3() {
+wait_group grp_local; LM="$WORK/local"
 { echo '@docs/style.md'; cat "$LM/CLAUDE.md"; } > "$WORK/stub.md"; cat "$WORK/stub.md" > "$LM/CLAUDE.md"
 "$LM/.agents/bin/sync" >/dev/null 2>&1
 t    "a stub keeps an import someone added" bash -c "grep -qx '@docs/style.md' '$LM/CLAUDE.md' && grep -qx '@AGENTS.md' '$LM/CLAUDE.md'"
 t    "...and is stable"               "$LM/.agents/bin/sync" --check
+}
+group grp_local3
+grp_local4() {
 ST=$(repo stale)
 "$HARNESS/install.sh" "$ST" >/dev/null 2>&1
 for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$ST/.agents/checks/$tier.sh"; done
@@ -1227,6 +1441,10 @@ git -C "$SB" add -f app/.agents/harness.conf
 out="$("$SB/app/.agents/bin/verify" 2>&1 || true)"
 t    "...tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
 git -C "$SB" rm -q --cached app/.agents/harness.conf
+}
+group grp_local4
+grp_local5() {
+wait_group grp_local3; LM="$WORK/local"
 TX=$(repo teamexclude)
 printf '# mine\nbuild-local/' > "$TX/.git/info/exclude"; cp "$TX/.git/info/exclude" "$WORK/exclude.before"
 "$HARNESS/install.sh" --team "$TX" >/dev/null 2>&1; "$TX/.agents/bin/sync" >/dev/null 2>&1
@@ -1284,6 +1502,9 @@ EOF
   rm -rf "$LM/src"
   for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$LM/.agents/checks/$tier.sh"; done
 fi
+}
+group grp_local5
+grp_local6() {
 if [ "$HAVE_PY" -eq 1 ] && command -v cmake >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
   CL=$(repo cpplocal)
   "$HARNESS/install.sh" --stack cpp-cmake "$CL" >/dev/null 2>&1
@@ -1317,6 +1538,11 @@ EOF
   t  "eval copies CLAUDE.local.md into its worktrees" grep -q '^add-fix,C,1,1,' "$R/results.csv"
   t  "...git status still clean"      test -z "$(git -C "$EL" status --porcelain)"
 fi
+}
+group grp_local6
+grp_local7() {
+wait_group grp_local; wait_group grp_local2
+TS="$WORK/tracked"; NI="$WORK/noimport"; WI="$WORK/withimport"
 printf '@~/my-prefs.md\n' | cat - "$TS/CLAUDE.local.md" > "$WORK/cl.md"; cat "$WORK/cl.md" > "$TS/CLAUDE.local.md"
 "$HARNESS/install.sh" --team "$TS" >/dev/null 2>&1
 t    "--team keeps a personal import in CLAUDE.local.md" grep -qx '@~/my-prefs.md' "$TS/CLAUDE.local.md"
@@ -1336,7 +1562,10 @@ for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$SQ/a[1
 git -C "$SQ" add -f 'a[[]1]/.agents/harness.conf'
 out="$("$SQ/a[1]/.agents/bin/verify" 2>&1 || true)"
 t    "...tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
+}
+group grp_local7
 
+grp_backup() {
 echo "local mode backup and recovery"
 BK=$(repo backup)
 BKD="$BK/.git/ai-harness/backup"
@@ -1394,11 +1623,15 @@ out="$("$HARNESS/install.sh" --team "$BK" 2>&1)"
 t    "switching to team removes the backup" test ! -e "$BKD/.agents"
 t    "...but keeps AGENTS.md.before-tracked" grep -q 'safety critical' "$BKD/AGENTS.md.before-tracked"
 t    "...and says so"                  hasl "$out" "team mode keeps no backup, except your last local AGENTS.md"
+wait_group grp_local7; TM="$WORK/teamfresh"; SQ="$WORK/oddsub"   # from local install mode
 t    "team mode keeps no backup"       test ! -e "$TM/.git/ai-harness"
 t    "subdirectory local install backs up per prefix" test -f "$SQ/.git/ai-harness/backup-a[1]/.agents/harness.conf"
 "$HARNESS/install.sh" --team "$SQ/a[1]" >/dev/null 2>&1
 t    "switching to team removes a subdirectory backup" test ! -e "$SQ/.git/ai-harness/backup-a[1]"
+}
+group grp_backup
 
+grp_libs() {
 echo "libraries and the resolver"
 LB=$(repo libs)
 "$HARNESS/install.sh" --team "$LB" >/dev/null 2>&1
@@ -1460,7 +1693,10 @@ fi
 printf 'LIBRARIES="$(touch %s/pwned)"\n' "$WORK" >> "$LP/harness.conf"
 res libraries >/dev/null 2>&1
 t    "the personal harness.conf is parsed, never run" test ! -e "$WORK/pwned"
+}
+group grp_libs
 
+grp_builtin() {
 echo "built-in library"
 BI=$(repo builtin)
 "$HARNESS/install.sh" --team "$BI" >/dev/null 2>&1
@@ -1475,7 +1711,10 @@ mkskill "$BI/.agents/library" keepme
 "$HARNESS/install.sh" --team "$BI" >/dev/null 2>&1
 t    "built-ins replaced wholesale"    test ! -e "$BI/.agents/builtin/skills/review-diff/stray"
 t    "upgrades never touch the project library" test -f "$BI/.agents/library/skills/keepme/SKILL.md"
+}
+group grp_builtin
 
+grp_inplace() {
 echo "packs run in place"
 AW="$WORK/away"; mkdir -p "$AW"   # packs in a library outside any project
 cp -R "$HARNESS/workflows/req-driven" "$HARNESS/workflows/feature-driven" "$HARNESS/stacks/cpp-cmake" "$AW/"
@@ -1487,7 +1726,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t   "fdd finds the project from the working directory" bash -c "cd '$IP' && bash '$AW/feature-driven/bin/fdd' status | grep -q '^list: none yet'"
 fi
 t    "a stack lib finds its own files" env AGENTS_ROOT="$IP" bash -c '. "$1/cpp-cmake/lib.sh" && test "$CPP_PACK" = "$1/cpp-cmake"' _ "$AW"
+}
+group grp_inplace
 
+grp_libpacks() {
 echo "workflows and stacks from libraries"
 PK=$(repo packs)
 "$HARNESS/install.sh" --team "$PK" >/dev/null 2>&1
@@ -1537,26 +1779,10 @@ t    "a library stack works through its shim" env AGENTS_ROOT="$PK" bash -c '. "
 rm -rf "$PK/.agents/library/stacks/tiny"
 trc  "a shim whose stack is gone is a tooling problem" 3 env AGENTS_ROOT="$PK" bash -c '. "$1/.agents/stacks/tiny/lib.sh"; exit 0' _ "$PK"
 edit "$PK/.agents/harness.conf" 's/^STACKS=.*/STACKS="cpp-cmake"/'
+}
+group grp_libpacks
 
-oldlayout() {  # oldlayout <project>: make an install look like one from before libraries
-  local p="$1"
-  rm -rf "$p/.agents/builtin" "$p/.agents/library" "$p/.agents/skills" "$p/.agents/workflows"
-  mkdir -p "$p/.agents/skills" "$p/.agents/workflows" "$p/.agents/stacks"
-  cp -R "$HARNESS/template/.agents/skills/." "$p/.agents/skills/"
-  cp -R "$HARNESS/workflows/req-driven" "$p/.agents/workflows/"
-  mv "$p/.agents/workflows/req-driven/skill" "$p/.agents/skills/req-driven"
-  rm -rf "$p/.agents/stacks/cpp-cmake"; cp -R "$HARNESS/stacks/cpp-cmake" "$p/.agents/stacks/"
-  printf 'deny-cmd .agents/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision\n' >> "$p/.agents/policy.conf"
-  echo 0.2.0 > "$p/.agents/HARNESS_VERSION"
-}
-handmade() {  # handmade <project>: a pack and its skill someone made by hand in the old layout
-  local p="$1"
-  mkdir -p "$p/.agents/workflows/handmade/checks" "$p/.agents/skills/handmade"
-  printf '#!/usr/bin/env bash\nbash "$AGENTS_ROOT/.agents/workflows/handmade/rule.sh"\n' > "$p/.agents/workflows/handmade/checks/turn.sh"
-  printf '#!/usr/bin/env bash\ngrep -q HANDMADE-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [handmade] bad notes"; exit 1; }\nexit 0\n' > "$p/.agents/workflows/handmade/rule.sh"
-  printf -- '---\nname: handmade\ndescription: Our process.\n---\nRun .agents/workflows/handmade/rule.sh first.\n' > "$p/.agents/skills/handmade/SKILL.md"
-  edit "$p/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="handmade"/'
-}
+grp_migpacks() {
 echo "migration to libraries: packs"
 MG=$(repo migrate)
 "$HARNESS/install.sh" --team "$MG" >/dev/null 2>&1
@@ -1639,7 +1865,10 @@ mkdir -p "$MJ/.agents/library/workflows/clash"; mkskill "$MJ/.agents/library/wor
 mkskill "$MJ/.agents" clash "Ours."
 out="$("$HARNESS/install.sh" --workflow clash "$MJ" 2>&1)"
 t    "a pack's skill never replaces a project skill of the same name" bash -c "grep -q 'description: Ours.' '$MJ/.agents/skills/clash/SKILL.md' && printf '%s' \"\$1\" | grep -qF \"skill 'clash' from the project library (.agents/library/skills/clash) shadows the one in project (.agents/library/workflows/clash/skill)\"" _ "$out"
+}
+group grp_migpacks
 
+grp_skilllibs() {
 echo "skills from libraries"
 PS="$WORK/pers-skills"; mkskill "$PS" mine "Mine."; mkskill "$PS" review-diff "My review-diff."
 mkskill "$PS" tool "A tool."; mkdir -p "$PS/skills/tool/scripts"; printf 'echo hi\n' > "$PS/skills/tool/scripts/run.sh"
@@ -1698,7 +1927,10 @@ t    "absence: the project library holds only its README" test "$(ls -A "$AB/.ag
 t    "absence: the index lists exactly the built-in skills" test "$(sed -n '/harness:skills:start/,/harness:skills:end/p' "$AB/AGENTS.md" | grep -c '^- `')" = "$(ls "$HARNESS/template/.agents/skills" | wc -l | tr -d ' ')"
 t    "absence: sync says nothing about libraries" bash -c "! printf '%s' \"\$1\" | grep -qiE 'librar|shadow|lists|personal|moved'" _ "$out"
 t    "absence: .agents/skills holds only renders" test -z "$(find "$AB/.agents/skills" -mindepth 1 -maxdepth 1 ! -type l)"
+}
+group grp_skilllibs
 
+grp_links() {
 echo "links in .agents/skills"
 HL=$(repo handlinks)
 "$HARNESS/install.sh" --team "$HL" >/dev/null 2>&1
@@ -1742,7 +1974,10 @@ ln -s ../../tools/other "$HL/.agents/skills/other"
 "$HL/.agents/bin/sync" >/dev/null 2>&1
 t    "a hand-made link is adopted even when a library holds the whole project" test "$(readlink "$HL/.agents/library/skills/other")" = ../../../tools/other
 edit "$HL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES=""|'
+}
+group grp_links
 
+grp_migskills() {
 echo "migration to libraries: skills"
 MS=$(repo migskills)
 "$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1; commit "$MS" harness
@@ -1822,7 +2057,10 @@ oldlayout "$NG"; printf 'My own step.\n' >> "$NG/.agents/skills/review-diff/SKIL
 out="$("$HARNESS/install.sh" "$NG" 2>&1)"
 t    "outside git, set-asides stay in .agents/library/.migrated" grep -q 'My own step.' "$NG/.agents/library/.migrated/skills/review-diff/SKILL.md"
 t    "...with the summary"             hasl "$out" "install: kept 1 old copy that differs from the shipped version in .agents/library/.migrated; review and delete it when done"
+}
+group grp_migskills
 
+grp_personal() {
 echo "personal libraries in team mode"
 PT=$(repo personalteam)
 printf 'my-own-line\n' >> "$PT/.git/info/exclude"; cp "$PT/.git/info/exclude" "$WORK/pt-exclude.before"
@@ -1905,7 +2143,10 @@ edit "$UL/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
 t    "an in-repo listed library: sync --check clean" "$UL/.agents/bin/sync" --check
 printf 'Sneaky\342\200\213 text.\n' >> "$UL/vendor/lib/skills/libbed/SKILL.md"
 tnot "invisible Unicode in an in-repo listed library fails --check" "$UL/.agents/bin/sync" --check
+}
+group grp_personal
 
+grp_personalwf() {
 echo "a personal workflow over a built-in one"
 PO="$WORK/pers-over"; mkdir -p "$PO/workflows/req-driven/checks"
 printf '#!/usr/bin/env bash\ngrep -q OVER-BAD "$AGENTS_ROOT/notes.txt" 2>/dev/null && { echo "notes.txt:1: error: [over] mine"; exit 1; }\nexit 0\n' > "$PO/workflows/req-driven/checks/turn.sh"
@@ -1932,7 +2173,11 @@ t    "...with the one message"         hasl "$out" "your personal workflow 'req-
 tnot "...not a second one about the skill" hasl "$out" "your personal skill 'req-driven'"
 commit "$OT" harness
 t    "...and git status stays clean"   test -z "$(git -C "$OT" status --porcelain)"
+}
+group grp_personalwf
 
+grp_evallib() {
+wait_group grp_evals   # $WORK/agent.sh, the fake agent
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "evals with a library kept inside the repo"
   EV=$(repo evallib)
@@ -1950,7 +2195,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   R=$(ls -d "$EV"/.agents/evals/results/*/ | tail -1)
   t  "eval copies a project-listed library inside the repo" grep -q '^add-fix,C,1,1,' "$R/results.csv"
 fi
+}
+group grp_evallib
 
+grp_usable() {
 echo "an item only counts when it's usable"
 EU=$(repo emptyitems)
 EP="$WORK/pers-empty"; mkdir -p "$EP"
@@ -1986,7 +2234,10 @@ t    "...a non-empty one does"         eres resolve agents helper
 rm -rf "$EP/workflows" "$EU/.agents/library/skills/review-diff" "$EU/.agents/library/stacks" "$EU/.agents/library/agents" "$EU/.agents/library/mcp"
 out="$(esync 2>&1)"
 tnot "...and the warnings go with them" hasl "$out" "isn't a usable"
+}
+group grp_usable
 
+grp_missinglib() {
 echo "a project-listed library that isn't here"
 TL=$(repo teamlib)
 "$HARNESS/install.sh" --team "$TL" >/dev/null 2>&1
@@ -2056,7 +2307,10 @@ t    "a missing personal-listed library only warns" hasl "$out" "LIBRARIES (pers
 t    "...verify still skips a name no library has" env AGENTS_PERSONAL_DIR="$TP" "$TL/.agents/bin/verify"
 t    "...and so does gitflow"          bash -c "cd '$TL' && printf 'fix: x\n' | AGENTS_PERSONAL_DIR='$TP' .agents/bin/gitflow check-msg"
 edit "$TL/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="teamflow"/'
+}
+group grp_missinglib
 
+grp_policyonly() {
 echo "a policy-only workflow pack"
 PO=$(repo policyonly); POL="$WORK/polib"; mkdir -p "$POL/workflows/house-rules"
 printf '# house-rules workflow\ndeny-cmd make release   # releases are a human decision\n' > "$POL/workflows/house-rules/policy.conf.snippet"
@@ -2064,9 +2318,11 @@ out="$(AGENTS_PERSONAL_DIR="$POL" "$HARNESS/install.sh" --team --workflow house-
 t    "a snippet-only pack installs"    test "$rc" = 0
 t    "...and its rule lands"           grep -q '^deny-cmd make release' "$PO/.agents/policy.conf"
 tnot "...without an unusable warning"  hasl "$out" "isn't a usable workflow"
+}
+group grp_policyonly
 
+grp_agents() {
 echo "agents from libraries"
-mkagent(){ mkdir -p "$1/agents"; printf -- '---\ndescription: %s\n%s---\nYou review diffs.\n' "${3:-An agent.}" "${4:-}" > "$1/agents/$2.md"; }
 AG=$(repo agents)
 "$HARNESS/install.sh" --team "$AG" >/dev/null 2>&1
 mkagent "$AG/.agents/library" reviewer "Reviews diffs."
@@ -2429,7 +2685,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   tnot "...and no agents key in the lock" grep -q '"agents"' "$AB/.agents/generated.lock"
   t    "...and --check is clean"       "$AB/.agents/bin/sync" --check
 fi
+}
+group grp_agents
 
+grp_agentmodes() {   # team and local mode, then rendering that stops, which reuses $PL
 echo "agents in team and local mode"
 if [ "$HAVE_PY" -eq 1 ]; then
   PL="$WORK/agpersonal"; mkagent "$PL" helper "My helper."; mkagent "$PL" shared-name "Personal copy."
@@ -2467,6 +2726,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 
 echo "agents: when rendering can't finish"
+wait_group grp_agents; AB="$WORK/agentsabsent"   # the agents: absence repo, used below
 if [ "$HAVE_PY" -eq 1 ]; then
   AX=$(repo agentsnopy)
   AGENTS_PERSONAL_DIR="$PL" "$HARNESS/install.sh" --team "$AX" >/dev/null 2>&1
@@ -2535,7 +2795,12 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$AV/.agents/bin/verify" 2>&1 || true)"
   tnot "...the project's own agent file there isn't" hasl "$out" ".claude/agents/vx.md:1: error"
 fi
+}
+group grp_agentmodes
 
+# The sections from here on run in the foreground while the groups above finish.
+# A new section can go anywhere below as is; wrap it in a group (see "groups" at the top) to run it in parallel.
+exec 3>&1 4>&2 >"$SMOKE_GD/tail.out" 2>&1; SMOKE_TAIL=1
 echo "pack commands"
 PC=$(repo packcmds)
 "$HARNESS/install.sh" --team --workflow feature-driven "$PC" >/dev/null 2>&1
@@ -2745,11 +3010,13 @@ else
 fi
 
 echo "guards"
+wait_group grp_tasks; P="$WORK/fresh"   # the fresh install, once the last group using it is done
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
 tnot "refuses unknown stack"           "$HARNESS/install.sh" --team --stack nope "$P"
 tnot "refuses unknown workflow"        "$HARNESS/install.sh" --team --workflow nope "$P"
 
+finish   # wait for the groups; print their output, then this part's, and add up the counts
 echo
 echo "passed: $PASS  failed: $FAIL  skipped sections: $SKIP"
 [ "$FAIL" -eq 0 ]

@@ -298,12 +298,16 @@ Never install the harness into this repo; try changes in a scratch repo under /t
 
 ```sh
 bash tests/lint.sh       # seconds: syntax, shellcheck, portability, ownership lists, budgets, CODEOWNERS list, docs voice
-bash tests/smoke.sh      # a few minutes, ~800 checks; the C++ section runs when cmake and a compiler exist
+bash tests/smoke.sh      # ~1,100 checks in parallel groups; the C++ section runs when cmake and a compiler exist
 bash tests/all.sh        # lint, then smoke under every awk on the machine (the release gate)
 bash scripts/package.sh  # dist/ai-harness-<version>.zip plus its SHA-256
 ```
 
 CI (`.github/workflows/ci.yml`) runs lint and `tests/all.sh` on Ubuntu and on macOS with Apple's bash 3.2.
+
+The smoke suite runs its sections in groups, one per CPU at a time, and prints them in file order. `SMOKE_JOBS=1` runs one group at a time; `SMOKE_TIMES=1` prints how long each group took. On a Mac, most of its time can go to macOS assessing each newly installed script on its first run (a second or more each, a few hundred per run). Listing the app you run it from (your terminal) under System Settings, Privacy & Security, Developer Tools should skip that check for what it starts.
+
+To add a section, append it right before `echo "guards"` near the end: it runs in the foreground alongside the groups, as is. To run it in parallel instead, wrap it as a group (`grp_name() { ... }` then `group grp_name`) next to the others. A group sees what's set above it but nothing another group sets, so it makes its own repos, or starts with `wait_group <fn>` when it needs one from another group.
 
 Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in every session of every project, and lint fails past 25 lines.
 

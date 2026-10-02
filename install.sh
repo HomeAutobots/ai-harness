@@ -94,8 +94,23 @@ done
 
 PREV="$(cat "$DEST/.agents/HARNESS_VERSION" 2>/dev/null || true)"
 
-# Harness-owned: replaced every run.
+# same_copy <shipped> <installed>: the same files, contents, and executable bits, and no links. A
+# Python cache from running the harness doesn't count (Python checks it against the source).
+same_copy() {
+  if [ -f "$1" ]; then
+    [ -f "$2" ] && [ ! -L "$2" ] && cmp -s "$1" "$2" || return 1
+    if [ -x "$1" ]; then [ -x "$2" ]; else [ ! -x "$2" ]; fi
+    return
+  fi
+  [ -d "$2" ] && [ ! -L "$2" ] && [ -z "$(find "$2" -type l | head -n 1)" ] || return 1
+  diff -r -x __pycache__ "$1" "$2" >/dev/null 2>&1 || return 1
+  [ "$(cd "$1" && find . -type f -perm -u+x | sort)" = "$(cd "$2" && find . -type f -perm -u+x | sort)" ]
+}
+
+# Harness-owned: replaced every run. One that already matches what ships stays as it is, so a
+# re-run rewrites only what changed (and macOS doesn't assess the unchanged scripts again).
 replace() {
+  same_copy "$SRC/$1" "$DEST/$1" && return 0
   rm -rf "${DEST:?}/$1"
   mkdir -p "$(dirname "$DEST/$1")"
   cp -R "$SRC/$1" "$DEST/$1"
@@ -485,7 +500,7 @@ chmod +x "$DEST"/.agents/bin/* "$DEST"/.agents/hooks/run "$DEST"/.agents/checks/
 # the Claude settings back.
 IN_GIT=0; git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 && IN_GIT=1
 if [ "$SWITCH" = local ] && [ "$IN_GIT" -eq 1 ]; then
-  unshare_out="$(cd "$DEST" && .agents/bin/sync --unshare)" \
+  unshare_out="$(cd "$DEST" && bash .agents/bin/sync --unshare)" \
     || { say "error: couldn't take the harness out of shared files; fix the error above and re-run with --local"; exit 3; }
   untrack=".agents"
   for p in "$DEST"/.claude/skills/*; do
@@ -505,10 +520,12 @@ EOF
   for p in $untrack; do git -C "$DEST" rm -r -q -f --cached --ignore-unmatch -- "$p"; done
 fi
 
-"$DEST/.agents/bin/sync"
+# The scripts just copied run through bash, not exec'd: macOS assesses a newly written executable
+# on its first exec, which can take seconds. Same interpreter their shebang picks.
+bash "$DEST/.agents/bin/sync"
 # Local git hooks (commit-msg, pre-push) so the git workflow holds for humans and every tool.
 if [ "$IN_GIT" -eq 1 ]; then
-  (cd "$DEST" && .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
+  (cd "$DEST" && bash .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
 fi
 
 if { [ -n "$MIGRATED" ] || [ "$SET_ASIDE" -gt 0 ]; } && [ "$MODE" = team ]; then

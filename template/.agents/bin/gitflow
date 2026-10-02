@@ -607,7 +607,7 @@ cmd_check() {
   fi
   if [ "$GIT_PUSH_REQUIRES" != off ] && [ -x "$ROOT/.agents/bin/verify" ]; then
     local vrc=0
-    out="$("$ROOT/.agents/bin/verify" --tier="$GIT_PUSH_REQUIRES" 2>&1)" || vrc=$?
+    out="$(bash "$ROOT/.agents/bin/verify" --tier="$GIT_PUSH_REQUIRES" 2>&1)" || vrc=$?   # bash: no first-exec assessment on macOS
     case "$vrc" in
       0) ;;
       1|2) echo "$out"; [ "$rc" -eq 3 ] || rc=1 ;;
