@@ -13,6 +13,8 @@ re-render replaces exactly what the harness added and never touches anything els
   harness.py unshare                                 strip harness entries from tracked configs
   harness.py agents [--check] <agent-set> <renders-out>     render library agents for each tool
                                                      (0 ok, 1 drift, 5 agent-file errors, 3 failed)
+  harness.py mcp [--check] <mcp-set> <files-out> [<agent-set>]   merge library MCP servers into each tool's config
+                                                     (0 ok, 1 drift, 5 server-file or config errors, 3 failed)
 """
 import fnmatch
 import hashlib
@@ -531,6 +533,74 @@ def agents(check, set_path, out_path):
     return 1 if res["drift"] else 0
 
 
+def read_rows(path):
+    """name<TAB>path<TAB>library rows from one of sync's set files."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [tuple(l.rstrip("\n").split("\t")) for l in fh if l.count("\t") == 2]
+    except OSError:
+        return []
+
+
+def mcp_lock(lock):
+    """The lock's mcp key, {file: [names]}, with anything malformed left out."""
+    old = (lock or {}).get("mcp")
+    if not isinstance(old, dict):
+        return {}
+    return dict((k, [n for n in v if isinstance(n, str)]) for k, v in old.items() if isinstance(v, list))
+
+
+def mcp(check, set_path, out_path, agent_set=None):
+    """Library MCP servers, merged into each tool's config (.agents/lib/mcp_render.py). Writes the
+    files that hold sync's entries to out_path, one per line, for sync's exclude block. With the
+    agent set, warns about an agent's mcp: naming a server no library or config here has."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import mcp_render
+    conf = load_conf()
+    rows = read_rows(set_path)
+    lock, _ = read_json(LOCK)
+    lock = lock or {}
+    team = conf.get("HARNESS_MODE", "team") != "local"
+    missing = os.environ.get("AGENTS_LIBRARY_MISSING", "0") == "1"
+    res = mcp_render.sync_mcp(ROOT, conf, rows, check, tracked, mcp_lock(lock), team, missing)
+    if agent_set and not missing:
+        import agents_render
+        known = set(r[0] for r in rows) | res["seen"]
+        for name, path, _ in read_rows(agent_set):
+            agent = agents_render.Agent(name, path, agents_render.in_repo(ROOT, path) or path)
+            for s in [] if agent.errors else (agent.mcp or []):
+                if s not in known:
+                    res["warnings"].append("%s: mcp: no library has a server named '%s', and no MCP config here "
+                                           "lists it (add mcp/%s.json to a library, or ignore this if it's in "
+                                           "your own tool config)" % (agent.shown, s, s))
+    with open(out_path, "w", encoding="utf-8") as fh:
+        for rel in res["files"]:
+            fh.write(rel + "\n")
+    new_lock = dict(lock)
+    if res["lock"]:
+        new_lock["mcp"] = res["lock"]
+    else:
+        new_lock.pop("mcp", None)
+    if new_lock != lock:
+        if check:
+            res["drift"].append(os.path.relpath(LOCK, ROOT))
+        else:
+            with open(LOCK, "w", encoding="utf-8") as fh:
+                fh.write(dump_json(new_lock))
+            res["wrote"].append("wrote " + os.path.relpath(LOCK, ROOT))
+    for w in res["wrote"]:
+        print("sync: " + w)
+    for d in res["drift"]:
+        print("sync: out of date: " + d)
+    for w in res["warnings"]:
+        print("sync: warning: " + w, file=sys.stderr)
+    for e in res["errors"]:
+        print("sync: error: " + e, file=sys.stderr)
+    if res["errors"]:
+        return 5   # a broken server file or config sync can't fix; drift lines above still count
+    return 1 if res["drift"] else 0
+
+
 # ------------------------------------------------------------------ skills lock
 
 def dir_hash(path):
@@ -643,6 +713,17 @@ def main(argv):
         if len(a) == 2:
             try:
                 return agents(chk, a[0], a[1])
+            except Exception:   # sync keeps the old exclude entries when this didn't finish
+                import traceback
+                traceback.print_exc()
+                return 3
+    if cmd == "mcp" and len(argv) in (4, 5, 6):
+        a = argv[2:]
+        chk = a[0] == "--check"
+        a = a[1:] if chk else a
+        if len(a) in (2, 3):
+            try:
+                return mcp(chk, *a)
             except Exception:   # sync keeps the old exclude entries when this didn't finish
                 import traceback
                 traceback.print_exc()

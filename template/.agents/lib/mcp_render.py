@@ -362,6 +362,279 @@ def tool_messages(srv, missing_by_field):
             for m, ts in sorted(missing_by_field.items())]
 
 
+# ------------------------------------------------------------------ merging into the tools' files
+
+BEGIN = "# >>> ai-harness mcp (managed by .agents/bin/sync)"
+END = "# <<< ai-harness mcp"
+PERSONAL = ("personal", "personal-listed")
+USER_SCOPE = {"claude": "claude: claude mcp add --scope local", "copilot": "copilot: ~/.copilot/mcp-config.json",
+              "cursor": "cursor: ~/.cursor/mcp.json", "codex": "codex: ~/.codex/config.toml",
+              "gemini": "gemini: ~/.gemini/settings.json"}
+# A [mcp_servers.<name>] table (or a subtable of one); the name bare or quoted.
+TABLE = re.compile(r"""^\s*\[\s*mcp_servers\s*\.\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))""")
+JSON_FILES = (".mcp.json", FILES["cursor"], FILES["gemini"])
+
+
+def in_repo(root, path):
+    """path relative to the repo, or None if it's outside (real paths on both sides)."""
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    return os.path.relpath(rp, rr) if rp.startswith(rr + os.sep) else None
+
+
+def dump_json(obj):
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
+def _table_name(line):
+    m = TABLE.match(line)
+    if not m:
+        return None
+    if m.group(1) is not None:
+        try:
+            return json.loads('"%s"' % m.group(1))
+        except ValueError:
+            return m.group(1)
+    return m.group(2) if m.group(2) is not None else m.group(3)
+
+
+def file_tools(rel, adapters):
+    return [t for t in adapters if FILES[t] == rel]
+
+
+def toml_block(text):
+    """(outside lines, {name: table text} inside the block, has block) for a config.toml's text.
+    Raises ValueError when the markers are broken."""
+    lines = text.split("\n")
+    begins = [i for i, ln in enumerate(lines) if ln.rstrip("\r") == BEGIN]
+    ends = [i for i, ln in enumerate(lines) if ln.rstrip("\r") == END]
+    if not begins and not ends:
+        return lines, {}, False
+    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+        raise ValueError("its ai-harness mcp block markers are broken (one '%s' line, then one '%s' line)"
+                         % (BEGIN, END))
+    b, e = begins[0], ends[0]
+    chunks, name = {}, None
+    for ln in lines[b + 1:e]:
+        n = _table_name(ln) if ln.startswith("[") else None
+        if n is not None and not ln.lstrip().startswith("[[") and ln.rstrip().endswith("]") \
+                and ln.count("[") == 1:
+            name = n
+            chunks[name] = [ln]
+        elif name is not None:
+            chunks[name].append(ln)
+    sep = 1 if b > 0 and not lines[b - 1].strip() else 0   # the blank line sync puts before the block
+    return lines[:b - sep] + lines[e + 1:], dict((k, "\n".join(v).rstrip("\n").rstrip()) for k, v in chunks.items()), True
+
+
+def sync_mcp(root, conf, rows, check, tracked, old_lock, team, library_missing=False):
+    """Renders every server into each enabled tool's config, merged beside what's there.
+    rows: (name, path, library) from sync, winners only. old_lock: {file: [names sync owns]}.
+    Returns dict: wrote, drift, warnings, errors (lists of str), lock ({file: [names]}), files
+    (files holding entries sync owns), seen (every server name the files hold)."""
+    adapters = [a for a in TOOLS if a in (conf.get("ADAPTERS") or "").split()]
+    res = {"wrote": [], "drift": [], "warnings": [], "errors": [], "lock": {}, "files": [], "seen": set()}
+    want = {}   # file -> {name: (entry, shown)}
+    held = set()   # names of servers with errors: whatever sync wrote for them last stays
+    for name, path, lib in rows:
+        shown = in_repo(root, path) or path
+        srv = Server(name, path, shown)
+        errs, warns = srv.messages()
+        res["warnings"] += warns
+        if errs:
+            res["errors"] += [e + "; server not rendered" for e in errs]
+            held.add(name)
+            continue
+        tools = [t for t in adapters if srv.wants(t)]
+        if team and lib in PERSONAL:
+            if tools:
+                res["warnings"].append("%s: your personal server '%s' isn't rendered in team mode (the repo commits "
+                                       "these configs); add it to your own instead: %s"
+                                       % (shown, name, "; ".join(USER_SCOPE[t] for t in tools)))
+            continue
+        if srv.targets is not None and "claude" in adapters and "claude" not in tools and "copilot" in tools:
+            res["warnings"].append("%s: claude reads .mcp.json too, so it gets this server along with copilot" % shown)
+        missing = {}
+        for tool in tools:
+            entry, miss, notes = render(srv, tool, adapters)
+            for m in miss:
+                missing.setdefault(m, []).append(tool)
+            for n in notes:
+                res["warnings"].append("%s: %s" % (shown, n))
+            if entry is not None:
+                want.setdefault(FILES[tool], {})[name] = (entry, shown)
+        res["warnings"] += tool_messages(srv, missing)
+    for rel in sorted(set(want) | set(old_lock)):
+        if rel == FILES["codex"]:
+            _settle_toml(root, rel, want.get(rel, {}), set(old_lock.get(rel, [])), held, check, tracked, team,
+                         library_missing, adapters, res)
+        elif rel in JSON_FILES:
+            _settle_json(root, rel, want.get(rel, {}), set(old_lock.get(rel, [])), held, check, tracked, team,
+                         library_missing, adapters, res)
+    for rel in JSON_FILES + (FILES["codex"],):   # names other agents' mcp: may point at
+        if rel in res["lock"] or not os.path.isfile(os.path.join(root, rel)):
+            continue
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as fh:
+                text = fh.read()
+            if rel == FILES["codex"]:
+                res["seen"].update(n for n in (_table_name(ln) for ln in toml_block(text)[0]) if n)
+            else:
+                res["seen"].update(((json.loads(text) or {}).get("mcpServers") or {}).keys())
+        except (OSError, ValueError, AttributeError, UnicodeDecodeError):
+            pass
+    return res
+
+
+def _skip(root, rel, ws, old, tracked, team, adapters, res):
+    """True (with a warning) when sync mustn't touch the file: a link, or tracked in local mode.
+    What sync recorded for it stays recorded."""
+    full = os.path.join(root, rel)
+    why = None
+    if os.path.islink(full):
+        why = "%s is a link; sync leaves it alone" % rel
+    elif not team and tracked(rel):
+        why = ("the project tracks %s; local mode leaves it alone, so these servers aren't rendered for %s"
+               % (rel, ", ".join(file_tools(rel, adapters)) or "it"))
+    if why is None:
+        return False
+    if ws or old:
+        res["warnings"].append(why)
+    if old:
+        res["lock"][rel] = sorted(old)
+    return True
+
+
+def _settle(root, rel, old_text, new_text, check, res):
+    """Writes (or, for --check, reports) the new text; None removes the file."""
+    if new_text == old_text:
+        return
+    full = os.path.join(root, rel)
+    if check:
+        res["drift"].append(rel + (" (remove)" if new_text is None else ""))
+        return
+    if new_text is None:
+        os.remove(full)
+        res["wrote"].append("removed " + rel)
+        return
+    d = os.path.dirname(full)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(full, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
+    res["wrote"].append("wrote " + rel)
+
+
+def _settle_json(root, rel, ws, old, held, check, tracked, team, library_missing, adapters, res):
+    if _skip(root, rel, ws, old, tracked, team, adapters, res):
+        return
+    full = os.path.join(root, rel)
+    text = obj = None
+    if os.path.exists(full):
+        try:
+            with open(full, encoding="utf-8") as fh:
+                text = fh.read()
+            obj = json.loads(text) if text.strip() else {}
+            if not isinstance(obj, dict) or not isinstance(obj.get("mcpServers", {}), dict):
+                raise ValueError("expected an object, with mcpServers an object")
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            res["errors"].append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, e))
+            if old:
+                res["lock"][rel] = sorted(old)
+            return
+    servers = (obj or {}).get("mcpServers") or {}
+    res["seen"].update(servers)
+    new, owned = {}, set()
+    for n, v in servers.items():
+        if n in old and n not in ws:
+            if n in held:
+                owned.add(n)
+            elif library_missing:
+                res["warnings"].append("%s: server '%s' stays as it is: a library LIBRARIES lists isn't here, and it "
+                                       "may come from there" % (rel, n))
+                owned.add(n)
+            else:
+                continue   # its server is gone
+        new[n] = v
+    for n in sorted(ws):
+        entry, shown = ws[n]
+        if n in servers and n not in old:
+            res["warnings"].append("%s: server '%s' was added by hand; it stays, and the one from %s isn't rendered "
+                                   "for %s" % (rel, n, shown, ", ".join(file_tools(rel, adapters))))
+            continue
+        new[n] = entry
+        owned.add(n)
+    if obj is None:
+        new_obj = {"mcpServers": new} if new else None
+    else:
+        new_obj = dict(obj)
+        if new:
+            new_obj["mcpServers"] = new
+        elif servers:
+            new_obj.pop("mcpServers", None)   # it held only sync's entries
+    if owned:
+        res["lock"][rel] = sorted(owned)
+        res["files"].append(rel)
+    if new_obj == obj:
+        return
+    _settle(root, rel, text, dump_json(new_obj) if new_obj else None, check, res)
+
+
+def _settle_toml(root, rel, ws, old, held, check, tracked, team, library_missing, adapters, res):
+    """.codex/config.toml: sync's tables live in a marked block at the end; the rest is the project's."""
+    if _skip(root, rel, ws, old, tracked, team, adapters, res):
+        return
+    full = os.path.join(root, rel)
+    text = None
+    if os.path.exists(full):
+        try:
+            with open(full, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError) as e:
+            res["errors"].append("%s can't be read (%s); fix or remove it, then re-run sync" % (rel, e))
+            if old:
+                res["lock"][rel] = sorted(old)
+            return
+    try:
+        outside, chunks, has_block = toml_block(text or "")
+    except ValueError as e:
+        res["errors"].append("%s: %s; fix them, then re-run sync" % (rel, e))
+        if old:
+            res["lock"][rel] = sorted(old)
+        return
+    if not has_block and not ws:
+        return   # nothing of sync's there, and nothing to add: untouched
+    project = set(n for n in (_table_name(ln) for ln in outside) if n)
+    res["seen"].update(project)
+    final = {}
+    for n, chunk in chunks.items():   # the block is sync's: what's in it is sync's, recorded or not
+        if n in ws or n in project:
+            continue
+        if n in held:
+            final[n] = chunk
+        elif library_missing:
+            res["warnings"].append("%s: server '%s' stays as it is: a library LIBRARIES lists isn't here, and it "
+                                   "may come from there" % (rel, n))
+            final[n] = chunk
+    for n in sorted(ws):
+        entry, shown = ws[n]
+        if n in project:
+            res["warnings"].append("%s: server '%s' was added by hand; it stays, and the one from %s isn't rendered "
+                                   "for codex" % (rel, n, shown))
+            continue
+        final[n] = entry.rstrip("\n")
+    while outside and not outside[-1].strip():
+        outside.pop()
+    body = "\n".join(outside)
+    if final:
+        block = "\n\n".join([BEGIN + "\n" + final[n] if i == 0 else final[n] for i, n in enumerate(sorted(final))])
+        new_text = (body + "\n\n" if body else "") + block + "\n" + END + "\n"
+        res["lock"][rel] = sorted(final)
+        res["files"].append(rel)
+    else:
+        new_text = body + "\n" if body else None
+    _settle(root, rel, text, new_text, check, res)
+
+
 def _main(argv):
     if len(argv) == 3 and argv[1] == "check":
         path = argv[2]
