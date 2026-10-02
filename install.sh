@@ -94,6 +94,39 @@ done
 
 PREV="$(cat "$DEST/.agents/HARNESS_VERSION" 2>/dev/null || true)"
 
+# Without python3, a switch to local can still unshare AGENTS.md, CLAUDE.md, and the files that
+# only leave the index, but it can't strip the harness out of a tracked config the project keeps.
+# So --local on a team install (or one whose harness is still tracked) stops here, before the
+# upgrade changes anything, when such a config holds harness entries: a hook command under
+# .agents/hooks/, servers or deny rules generated.lock records, the Gemini context entry, or the
+# Codex MCP block.
+if [ "$NEW_MODE" = local ] && [ -n "$PREV" ] && ! command -v python3 >/dev/null 2>&1 \
+   && git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 \
+   && { [ "$(sed -n 's/^HARNESS_MODE="\{0,1\}\([a-z]*\).*/\1/p' "$DEST/.agents/harness.conf" 2>/dev/null | head -n 1)" != local ] \
+        || git -C "$DEST" ls-files --error-unmatch -- .agents/harness.conf >/dev/null 2>&1; }; then
+  needs=""; lock="$DEST/.agents/generated.lock"
+  # A tracked AGENTS.md the project tailored stays tracked, and so does its Gemini context entry.
+  keep_agents=0
+  git -C "$DEST" ls-files --error-unmatch -- AGENTS.md >/dev/null 2>&1 && [ -f "$DEST/AGENTS.md" ] \
+    && ! grep -q '^> \*\*Not tailored yet\.\*\*' "$DEST/AGENTS.md" && keep_agents=1
+  for p in .claude/settings.json .cursor/hooks.json .codex/hooks.json .gemini/settings.json .mcp.json .cursor/mcp.json .codex/config.toml; do
+    f="$DEST/$p"
+    { [ -f "$f" ] && [ ! -L "$f" ] && git -C "$DEST" ls-files --error-unmatch -- "$p" >/dev/null 2>&1; } || continue
+    case "$p" in
+      .codex/config.toml) grep -qxF '# >>> ai-harness mcp (managed by .agents/bin/sync)' "$f" || continue ;;
+      *) grep -qF '.agents/hooks/' "$f" || grep -qF "\"$p\": [" "$lock" 2>/dev/null \
+           || { [ "$p" = .claude/settings.json ] && grep -q '"claude_deny": \[ *$' "$lock" 2>/dev/null; } \
+           || { [ "$p" = .gemini/settings.json ] && [ "$keep_agents" -eq 0 ] && grep -qF '"AGENTS.md"' "$f"; } || continue ;;
+    esac
+    needs="$needs $p"
+  done
+  if [ -n "$needs" ]; then
+    say "error: python3 not found. Switching to local needs it to take the harness out of these tracked files:$needs" >&2
+    say "nothing was changed. Install python3 and re-run install.sh --local, or keep team mode." >&2
+    exit 3
+  fi
+fi
+
 # same_copy <shipped> <installed>: the same files, contents, and executable bits, and no links. A
 # Python cache from running the harness doesn't count (Python checks it against the source).
 same_copy() {

@@ -17,7 +17,8 @@ the agent changed keep it from wandering into pre-existing debt.
 ## How it works
 - **Own build trees.** `build-agent/` and `build-agent-asan/` (Ninja and ccache when present,
   compile database exported). Your own build directories are never touched. Both are added to
-  `.git/info/exclude`, and `compile_commands.json` is symlinked at the root for clangd.
+  `.git/info/exclude` (under the install's subdirectory when the harness lives in one), and
+  `compile_commands.json` is symlinked at the install root for clangd.
 - **Changed lines only.** clang-tidy gets a `--line-filter` built from `git diff -U0`, so
   existing findings elsewhere in a file don't show up.
 - **Affected tests.** CMake's file API maps changed sources to targets, then to everything

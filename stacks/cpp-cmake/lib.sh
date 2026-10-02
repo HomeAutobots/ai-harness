@@ -38,13 +38,17 @@ cpp_filter() {
 }
 
 # Keep the agent build trees out of `git status` without touching the project's .gitignore.
+# Patterns there are relative to the repo top, so an install in a subdirectory prefixes them
+# (escaped like the harness block's entries).
 _cpp_exclude() {
-  local ex
+  local ex pre l
   ex="$(git -C "$AGENTS_ROOT" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   case "$ex" in /*) ;; *) ex="$AGENTS_ROOT/$ex" ;; esac
+  pre="$(git -C "$AGENTS_ROOT" rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
   mkdir -p "$(dirname "$ex")"
-  grep -qxF '/build-agent*/' "$ex" 2>/dev/null || printf '%s\n' '/build-agent*/' >> "$ex"
-  grep -qxF '/compile_commands.json' "$ex" 2>/dev/null || printf '%s\n' '/compile_commands.json' >> "$ex"
+  for l in "/${pre}build-agent*/" "/${pre}compile_commands.json"; do
+    grep -qxF -- "$l" "$ex" 2>/dev/null || printf '%s\n' "$l" >> "$ex"
+  done
 }
 
 # cpp_configure <dir> [cmake args...]: configure once; later builds re-run CMake themselves.

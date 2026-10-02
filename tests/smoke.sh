@@ -1248,7 +1248,7 @@ t    "a pre-feature install stays team" grep -qx 'HARNESS_MODE="team"' "$PF/.age
 "$HARNESS/install.sh" "$LM" >/dev/null 2>&1
 t    "an upgrade keeps local"          grep -qx 'HARNESS_MODE="local"' "$LM/.agents/harness.conf"
 t    "git status clean after install"  test -z "$(git -C "$LM" status --porcelain)"
-t    "exclude block written"           grep -qx '# >>> ai-harness (local install; managed by .agents/bin/sync)' "$LM/.git/info/exclude"
+t    "exclude block written, keyed by worktree and prefix" grep -qx '# >>> ai-harness (local install; managed by .agents/bin/sync) \[\.\]\[\]' "$LM/.git/info/exclude"
 t    "block hides .agents"             grep -qx '/.agents/' "$LM/.git/info/exclude"
 t    "block hides AGENTS.md and CLAUDE.md" bash -c "grep -qx '/AGENTS.md' '$LM/.git/info/exclude' && grep -qx '/CLAUDE.md' '$LM/.git/info/exclude'"
 t    "block hides skill mirrors"       grep -qx '/.claude/skills/review-diff' "$LM/.git/info/exclude"
@@ -1564,6 +1564,83 @@ out="$("$SQ/a[1]/.agents/bin/verify" 2>&1 || true)"
 t    "...tracked harness file is a finding" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
 }
 group grp_local7
+
+grp_localblocks() {   # the exclude block per worktree and install prefix
+echo "local mode: worktrees and several installs share one exclude file"
+MARK='# >>> ai-harness (local install; managed by .agents/bin/sync)'
+WT=$(repo wtlocal); EX="$WT/.git/info/exclude"
+"$HARNESS/install.sh" "$WT" >/dev/null 2>&1
+printf '/.wt/\n' >> "$EX"   # worktrees kept inside the repo, hidden by a line of the project's
+git -C "$WT" -c core.hooksPath=/dev/null worktree add -q "$WT/.wt/two" 2>/dev/null; W2="$WT/.wt/two"
+"$HARNESS/install.sh" "$W2" >/dev/null 2>&1
+t    "a worktree's install gets a block of its own" bash -c "grep -qxF '$MARK [.][]' '$EX' && grep -qxF '$MARK [.wt/two][]' '$EX'"
+t    "...both worktrees' status clean" bash -c "test -z \"\$(git -C '$WT' status --porcelain)\" && test -z \"\$(git -C '$W2' status --porcelain)\""
+mkdir -p "$W2/.agents/library/skills/onlytwo"; printf -- '---\nname: onlytwo\ndescription: Two.\n---\n' > "$W2/.agents/library/skills/onlytwo/SKILL.md"
+"$W2/.agents/bin/sync" >/dev/null 2>&1
+"$WT/.agents/bin/sync" >/dev/null 2>&1
+t    "the main worktree's sync keeps the other's entries" grep -qx '/.claude/skills/onlytwo' "$EX"
+t    "...and sync --check holds in both" bash -c "'$WT/.agents/bin/sync' --check && '$W2/.agents/bin/sync' --check"
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$W2/.agents/checks/$tier.sh"; done
+git -C "$W2" add -f .agents/harness.conf
+out="$("$W2/.agents/bin/verify" 2>&1 || true)"
+t    "...verify reads the worktree's own block" hasl "$out" ".agents/harness.conf:1: error: [harness-tracked]"
+git -C "$W2" rm -q --cached .agents/harness.conf
+# A worktree still on an older sync drops every bare end line and appends a bare block of its own.
+printf 'proj-line/\n' >> "$EX"
+awk -v b="$MARK" -v e='# <<< ai-harness' '$0 == b { skip = 1; next } $0 == e { skip = 0; next } !skip' "$EX" > "$EX.old"
+printf '%s\n/.agents/\n/.claude/skills/oldwt\n# <<< ai-harness\n' "$MARK" >> "$EX.old"; mv "$EX.old" "$EX"
+"$WT/.agents/bin/sync" >/dev/null 2>&1
+t    "an older worktree's sync leaves the keyed blocks whole" bash -c "grep -qx 'proj-line/' '$EX' && grep -qxF '$MARK [.wt/two][]' '$EX' && grep -qx '/.claude/skills/onlytwo' '$EX'"
+t    "...its unkeyed block isn't taken over by a keyed install" grep -qx '/.claude/skills/oldwt' "$EX"
+t    "...and --check holds"           "$WT/.agents/bin/sync" --check
+# A block that lost its end line ends at the next start line, not at some later end.
+awk -v d='# <<< ai-harness [.wt/two][]' '$0 != d' "$EX" > "$EX.cut"; mv "$EX.cut" "$EX"
+"$WT/.agents/bin/sync" >/dev/null 2>&1
+t    "a block missing its end line stops at the next block" bash -c "grep -qxF '# <<< ai-harness [.wt/two][]' '$EX' && grep -qxF '$MARK [.][]' '$EX' && grep -qx 'proj-line/' '$EX'"
+rm -rf "$W2"
+t    "a gone worktree's block doesn't fail --check" "$WT/.agents/bin/sync" --check
+"$WT/.agents/bin/sync" >/dev/null 2>&1
+tnot "...and the next sync prunes it" grep -qF '[.wt/two]' "$EX"
+t    "...keeping its own"             grep -qxF "$MARK [.][]" "$EX"
+git -C "$WT" worktree prune
+
+# An unkeyed block from an older version is adopted by the install whose paths it lists.
+LG=$(repo legacyblock); EX="$LG/.git/info/exclude"
+mkdir -p "$LG/app"; printf 'x\n' > "$LG/app/x.c"; commit "$LG" app
+"$HARNESS/install.sh" "$LG" >/dev/null 2>&1
+{ printf 'mine/\n%s\n/app/.agents/\n/app/AGENTS.md\n# <<< ai-harness\n' "$MARK"
+  printf '%s\n/.agents/\n/AGENTS.md\n/.claude/skills/gone\n# <<< ai-harness\nafter/\n' "$MARK"; } > "$EX"
+trc  "an unkeyed block is drift for --check" 1 "$LG/.agents/bin/sync" --check
+"$LG/.agents/bin/sync" >/dev/null 2>&1
+t    "...sync rewrites it keyed, where it was" bash -c "awk -v m='$MARK [.][]' '\$0 == m { k = NR } \$0 == \"after/\" { a = NR } END { exit !(k && a && k < a) }' '$EX'"
+tnot "...without its stale entries"   grep -qx '/.claude/skills/gone' "$EX"
+t    "...leaving another prefix's unkeyed block" bash -c "grep -qxF '$MARK' '$EX' && grep -qx '/app/.agents/' '$EX'"
+t    "...and the lines around them"   bash -c "grep -qx 'mine/' '$EX' && grep -qx 'after/' '$EX'"
+"$HARNESS/install.sh" "$LG/app" >/dev/null 2>&1
+t    "the subdirectory install adopts its own" bash -c "! grep -qxF '$MARK' '$EX' && grep -qxF '$MARK [.][app/]' '$EX'"
+"$LG/.agents/bin/sync" >/dev/null 2>&1
+t    "two installs: each keeps its block" bash -c "grep -qx '/.agents/' '$EX' && grep -qx '/app/.agents/' '$EX'"
+t    "...--check holds for both"      bash -c "'$LG/.agents/bin/sync' --check && '$LG/app/.agents/bin/sync' --check"
+t    "...status clean"                test -z "$(git -C "$LG" status --porcelain)"
+for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$LG/.agents/checks/$tier.sh"; done
+t    "...verify at the top ignores the subdirectory's block" "$LG/.agents/bin/verify"
+t    "stack exclude lines honor the prefix" bash -c "cd '$LG/app' && AGENTS_ROOT='$LG/app' bash -c '. \"\$AGENTS_ROOT/.agents/lib/feedback.sh\" && . \"\$AGENTS_ROOT/.agents/builtin/stacks/cpp-cmake/lib.sh\" && _cpp_exclude' && grep -qx '/app/build-agent\*/' '$EX' && grep -qx '/app/compile_commands.json' '$EX' && ! grep -qx '/build-agent\*/' '$EX'"
+
+# Mixed modes: a team worktree is told once that a local one's entries apply to it too.
+MX=$(repo mixedwt)
+"$HARNESS/install.sh" "$MX" >/dev/null 2>&1
+printf '/.wt/\n' >> "$MX/.git/info/exclude"
+git -C "$MX" -c core.hooksPath=/dev/null worktree add -q "$MX/.wt/team" 2>/dev/null
+out="$("$HARNESS/install.sh" --team "$MX/.wt/team" 2>&1)"
+t    "a team worktree warns about a local one" hasl "$out" "a worktree of this clone keeps the harness local (the main worktree)"
+out="$("$MX/.wt/team/.agents/bin/sync" 2>&1)"
+tnot "...once"                        hasl "$out" "keeps the harness local"
+t    "...and the local block stays"   grep -qxF "$MARK [.][]" "$MX/.git/info/exclude"
+LO=$(repo onlylocal)
+out="$("$HARNESS/install.sh" "$LO" 2>&1)"
+tnot "absence: one worktree, no mixed-mode warning" hasl "$out" "keeps the harness local"
+}
+group grp_localblocks
 
 grp_backup() {
 echo "local mode backup and recovery"
@@ -3142,6 +3219,53 @@ EOF
   "$HARNESS/install.sh" --local "$UG" >/dev/null 2>&1
   t    "--local: gemini settings of only harness entries are untracked" test -z "$(git -C "$UG" ls-files .gemini/settings.json)"
   t    "...and local mode wires the hooks back in" grep -q 'pre-tool --tool=gemini' "$UG/.gemini/settings.json"
+  # The context entries sync adds leave too; a name the project added stays.
+  t    "--local: the harness's gemini context entries leave" bash -c "! grep -qE 'AGENTS\.md|GEMINI\.md|\"context\"' '$UT/.gemini/settings.json'"
+  UN=$(repo unsharegeminictx)
+  "$HARNESS/install.sh" --team "$UN" >/dev/null 2>&1
+  edit "$UN/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude gemini"/'
+  "$UN/.agents/bin/sync" >/dev/null 2>&1
+  python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["context"]["fileName"].insert(1, "NOTES.md"); open(p,"w").write(json.dumps(d, indent=2) + "\n")' "$UN/.gemini/settings.json"
+  edit "$UN/AGENTS.md" 's/^> \*\*Not tailored yet.*$/This parser is safety critical./'
+  commit "$UN" harness
+  "$HARNESS/install.sh" --local "$UN" >/dev/null 2>&1
+  t    "--local: a project's own context name keeps the file tracked" git -C "$UN" ls-files --error-unmatch .gemini/settings.json
+  t    "...with that name and GEMINI.md" python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["context"]["fileName"]; sys.exit(n != ["AGENTS.md", "NOTES.md", "GEMINI.md"])' "$UN/.gemini/settings.json"
+  t    "...AGENTS.md kept while the project tracks its own" git -C "$UN" ls-files --error-unmatch AGENTS.md
+  UK=$(repo unsharegeminikeep)
+  "$HARNESS/install.sh" --team "$UK" >/dev/null 2>&1
+  edit "$UK/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude gemini"/'
+  "$UK/.agents/bin/sync" >/dev/null 2>&1
+  edit "$UK/AGENTS.md" 's/^> \*\*Not tailored yet.*$/This parser is safety critical./'
+  commit "$UK" harness
+  "$HARNESS/install.sh" --local "$UK" >/dev/null 2>&1
+  t    "--local, tracked AGENTS.md kept: gemini settings left with the context entries stay tracked" git -C "$UK" ls-files --error-unmatch .gemini/settings.json
+  t    "...without the hooks, listing AGENTS.md" bash -c "! grep -q '.agents/hooks/' '$UK/.gemini/settings.json' && python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])) != {\"context\": {\"fileName\": [\"AGENTS.md\", \"GEMINI.md\"]}})' '$UK/.gemini/settings.json'"
+  # Without python3, a switch that would have to strip a tracked config stops before changing anything.
+  if ! PATH="$NP" bash -c 'command -v python3' >/dev/null 2>&1; then
+    NS=$(repo nopyswitch)
+    "$HARNESS/install.sh" --team "$NS" >/dev/null 2>&1; commit "$NS" harness
+    out="$(PATH="$NP" "$HARNESS/install.sh" --local "$NS" 2>&1)" && rc=0 || rc=$?
+    t  "no python3: --local refuses with exit 3" test "$rc" = 3
+    t  "...naming the files"            hasl "$out" "Switching to local needs it to take the harness out of these tracked files: .claude/settings.json"
+    t  "...changing nothing"            bash -c "test -z \"\$(git -C '$NS' status --porcelain)\" && grep -qx 'HARNESS_MODE=\"team\"' '$NS/.agents/harness.conf'"
+    NO=$(repo nopyswitchok)
+    PATH="$NP" "$HARNESS/install.sh" --team "$NO" >/dev/null 2>&1; commit "$NO" harness
+    t  "absence: with nothing to strip, --local works without python3" bash -c "PATH='$NP' '$HARNESS/install.sh' --local '$NO' && test -z \"\$(git -C '$NO' ls-files .agents AGENTS.md CLAUDE.md)\""
+    # Agent renders and the Copilot hooks file only leave the index, so shell handles them.
+    NR=$(repo nopyrenders)
+    "$HARNESS/install.sh" --team "$NR" >/dev/null 2>&1
+    mkagent "$NR/.agents/library" rev "Reviews."
+    "$NR/.agents/bin/sync" >/dev/null 2>&1
+    rm "$NR/.claude/settings.json" "$NR/.cursor/hooks.json"   # configs only python3 can strip
+    mkdir -p "$NR/.claude/agents/sub"; printf -- '---\nname: hand\n---\nMine.\n' > "$NR/.claude/agents/hand.md"
+    cp "$NR/.claude/agents/rev.md" "$NR/.claude/agents/sub/rev.md"
+    git -C "$NR" add -A; git -C "$NR" -c core.hooksPath=/dev/null commit -qm harness
+    t  "no python3, renders set up"     git -C "$NR" ls-files --error-unmatch .claude/agents/rev.md .github/agents/rev.agent.md .cursor/agents/rev.md .github/hooks/harness.json
+    PATH="$NP" "$HARNESS/install.sh" --local "$NR" >/dev/null 2>&1
+    t  "no python3: --local untracks marked agent renders and the Copilot hooks file" test -z "$(git -C "$NR" ls-files .claude/agents/rev.md .github/agents/rev.agent.md .cursor/agents/rev.md .github/hooks/harness.json)"
+    t  "...not a hand-made agent or one in a subdirectory" git -C "$NR" ls-files --error-unmatch .claude/agents/hand.md .claude/agents/sub/rev.md
+  fi
 fi
 }
 group grp_codexgemini

@@ -594,6 +594,46 @@ def render(check):
     return 1 if drift else 0
 
 
+def gemini_unshare(obj):
+    """A tracked .gemini/settings.json leaving the harness (install.sh --local): the harness hooks go,
+    and so do the context entries sync adds. AGENTS.md goes unless the project keeps a tracked
+    AGENTS.md of its own (sync sets AGENTS_KEEP_AGENTS=1), which teammates' Gemini still reads;
+    GEMINI.md goes only when it would be the sole name left, since that's Gemini's default."""
+    new = gemini_render(obj, False)
+    ctx = new.get("context") if isinstance(new, dict) else None
+    if not isinstance(ctx, dict) or "fileName" not in ctx:
+        return new
+    fn = ctx["fileName"]
+    if isinstance(fn, str):
+        names = [fn]
+    elif isinstance(fn, list):
+        names = list(fn)
+    else:
+        return new
+    if os.environ.get("AGENTS_KEEP_AGENTS") != "1":
+        names = [n for n in names if n != "AGENTS.md"]
+    ctx = dict(ctx)
+    if names in ([], ["GEMINI.md"]):
+        ctx.pop("fileName")
+    elif isinstance(fn, str):
+        ctx["fileName"] = names[0]
+    else:
+        ctx["fileName"] = names
+    new = dict(new)
+    if ctx:
+        new["context"] = ctx
+    else:
+        new.pop("context")
+    return new
+
+
+def gemini_bare(obj):
+    """A .gemini/settings.json left with nothing but what sync writes on its own, so untracking it
+    loses nothing. Not while the project keeps a tracked AGENTS.md: teammates' Gemini reads it
+    through the context entry."""
+    return not obj or (obj == gemini_render({}, True) and os.environ.get("AGENTS_KEEP_AGENTS") != "1")
+
+
 def unshare():
     """install.sh --local on a team install: harness entries leave tracked shared configs.
     Prints "untrack <path>" when nothing but harness entries remain, else strips in place."""
@@ -626,16 +666,16 @@ def unshare():
     for rel in (os.path.join(".github", "hooks", "harness.json"), os.path.join(".codex", "rules", "harness.rules")):
         if tracked(rel):
             print("untrack " + rel)
-    # Gemini settings: the harness hooks leave. Untracked when the context entries are all that's
+    # Gemini settings: the harness hooks and context entries leave. Untracked when nothing else is
     # left; sync's MCP servers are unshare_mcp's, below.
     rel = os.path.join(".gemini", "settings.json")
     path = os.path.join(ROOT, rel)
     if tracked(rel) and os.path.isfile(path) and not os.path.islink(path):
         old, err = read_json(path)
         if isinstance(old, dict) and not err:
-            new = gemini_render(old, False)
+            new = gemini_unshare(old)
             if new != old:
-                if not new or new == gemini_render({}, True):
+                if gemini_bare(new):
                     print("untrack " + rel)
                 else:
                     with open(path, "w", encoding="utf-8") as fh:
@@ -670,7 +710,7 @@ def unshare_mcp(lock):
             new["mcpServers"] = left
         else:
             new.pop("mcpServers")
-        if not new or (rel == mcp_render.FILES["gemini"] and new == gemini_render({}, True)):
+        if not new or (rel == mcp_render.FILES["gemini"] and gemini_bare(new)):
             print("untrack " + rel)
         elif new != old:
             with open(path, "w", encoding="utf-8") as fh:
