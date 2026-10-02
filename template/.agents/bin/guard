@@ -137,7 +137,8 @@ awk -F '\t' -v OFS='\t' '
     off = 1; n = 0
     while (off <= length(t) && n++ < 50) {
       s = substr(t, off)
-      if (!match(ci[i] ? tolower(s) : s, re[i]) || RLENGTH < 1) return 0
+      if (ci[i]) s = tolower(s)   # into a variable first: awk 20231127 gets RSTART wrong for match() on a temporary
+      if (!match(s, re[i]) || RLENGTH < 1) return 0
       MS = off + RSTART - 1
       if (plausible(t, MS, RLENGTH)) return 1
       off = MS + 1

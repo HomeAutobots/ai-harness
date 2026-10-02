@@ -53,6 +53,11 @@ fi
 grep -v '^tests/lint.sh$' "$OUT.sh" | xargs grep -nE 'declare -A|(^|[^a-zA-Z_])(mapfile|readarray|coproc)[[:space:]]|\$\{[A-Za-z_]+(,,|\^\^)\}|\|&|&>>|local -n |declare -n ' \
   | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" bash32 "bash 4+ construct; keep scripts bash 3.2 compatible"; done
 
+# 3b. awk: match() on a temporary (match(tolower(s), re), match(c ? a : b, re)) gets RSTART wrong in
+# one-true-awk 20231127 (Ubuntu's original-awk); match a variable instead.
+grep -v '^tests/lint.sh$' "$OUT.sh" | xargs grep -nE 'match\((tolower|toupper|substr|sprintf)\(|match\([^,()]*\?' \
+  | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" awk-match "match() on a temporary; put the string in a variable first (one-true-awk 20231127 gets RSTART wrong)"; done
+
 # 4. Python 3.8 portability (common 3.9+ features)
 xargs grep -nE '\.removeprefix\(|\.removesuffix\(|^[[:space:]]*match [^=]*:$|: (list|dict|tuple|set)\[' < "$OUT.py" \
   | while IFS= read -r l; do finding "${l%%:*}:$(echo "$l" | cut -d: -f2)" py38 "Python 3.9+ feature; keep to 3.8"; done
