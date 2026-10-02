@@ -3224,6 +3224,51 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "native gemini trust warns as escalation" hasl "$(mc trust '{"command": "x", "native": {"gemini": {"trust": true}}}')" "native.gemini: trust: true skips gemini's confirmation for every tool this server has"
 fi
 
+echo "mcp: literal secrets in args and url"
+if [ "$HAVE_PY" -eq 1 ]; then
+  S="\${VAR} so the secret stays out of the repo"
+  t    "--flag=value with a credential is refused" hasl "$(mc a1 '{"command": "x", "args": ["-y", "srv", "--token=k8Hq2mZx7Lp4Wd9R"]}')" "mcp-a1.json: args[2] is a literal --token value; use $S"
+  tnot "...and fails check"              mcrc a1 '{"command": "x", "args": ["-y", "srv", "--token=k8Hq2mZx7Lp4Wd9R"]}'
+  t    "--flag then the value as the next item" hasl "$(mc a2 '{"command": "x", "args": ["-y", "srv", "--api-key", "k8Hq2mZx7Lp4Wd9R"]}')" "mcp-a2.json: args[3] is a literal --api-key value"
+  t    "a password counts however short" hasl "$(mc a3 '{"command": "x", "args": ["--password=hunter2"]}')" "args[0] is a literal --password value"
+  t    "a GitHub token anywhere in args" hasl "$(mc a4 "{\"command\": \"x\", \"args\": [\"serve\", \"$FAKE_GH\"]}")" "args[1] holds a literal secret (GitHub token)"
+  t    "an AWS key after a non-secret flag" hasl "$(mc a5 "{\"command\": \"x\", \"args\": [\"--profile=$FAKE_AWS\"]}")" "args[0] holds a literal secret (AWS access key)"
+  t    "a native block's args too"       hasl "$(mc a6 '{"command": "x", "native": {"gemini": {"args": ["--secret", "k8Hq2mZx7Lp4Wd9R"]}}}')" "native.gemini.args[1] is a literal --secret value"
+  t    "a reference is fine"             mcrc a7 '{"command": "x", "args": ["--token=${GH_TOKEN}", "--api-key", "${API_KEY:-none}"]}'
+  t    "a file or mode flag is fine"     mcrc a8 '{"command": "x", "args": ["--key-file", "/home/me/keys/deploy2024.pem", "--key-file", "deploy2024key", "--auth-mode", "oauth", "--token-file=tok3n2024.txt"]}'
+  t    "a short or plain value is fine"  mcrc a9 '{"command": "x", "args": ["--token", "none", "--api-key", "--verbose", "--auth", "github", "--port", "8080"]}'
+  t    "a placeholder is fine"           mcrc a10 '{"command": "x", "args": ["--api-key", "YOUR_API_KEY_123456"]}'
+  t    "user:pass in a url is refused"   hasl "$(mc u1 '{"type": "http", "url": "https://bot:hunter2@x.example/mcp"}')" "mcp-u1.json: url has a password in it (user:pass@host); use $S"
+  t    "...a reference there is fine"    mcrc u2 '{"type": "http", "url": "https://bot:${BOT_PASS}@x.example/mcp"}'
+  t    "a secret query parameter is refused" hasl "$(mc u3 '{"type": "sse", "url": "https://x.example/sse?team=core&api_key=k8Hq2mZx7Lp4Wd9R"}')" "mcp-u3.json: url: query parameter api_key is a literal"
+  t    "...in any case"                  hasl "$(mc u4 '{"type": "http", "url": "https://x.example/mcp?Access_Token=k8Hq2mZx7Lp4Wd9R"}')" "url: query parameter Access_Token is a literal"
+  t    "a key shape anywhere in a url"   hasl "$(mc u5 "{\"type\": \"http\", \"url\": \"https://$FAKE_GH@x.example/mcp\"}")" "url holds a literal secret (GitHub token)"
+  t    "a native url too"                hasl "$(mc u6 '{"command": "x", "native": {"gemini": {"httpUrl": "https://x.example/mcp?token=k8Hq2mZx7Lp4Wd9R"}}}')" "native.gemini.httpUrl: query parameter token is a literal"
+  t    "query references and plain parameters are fine" mcrc u7 '{"type": "http", "url": "https://x.example/mcp?token=${MCP_TOKEN}&version=2025-06-18&keyword=abc123def456ghi&user=bot@x.example"}'
+  t    "a credential as a reference's default is refused" hasl "$(mc r1 '{"command": "x", "args": ["--token=${T:-k8Hq2mZx7Lp4Wd9R}"]}')" "args[0] is a literal --token value"
+  t    "...or as fixed text beside one"  hasl "$(mc r2 '{"command": "x", "args": ["--api-key", "${P}k8Hq2mZx7Lp4Wd9R"]}')" "args[1] is a literal --api-key value"
+  t    "...or in a url"                  hasl "$(mc r3 '{"type": "http", "url": "https://x.example/mcp?token=${T:-k8Hq2mZx7Lp4Wd9R}"}')" "url: query parameter token is a literal"
+  t    "...or in env"                    hasl "$(mc r4 '{"command": "x", "env": {"API_KEY": "${K:-k8Hq2mZx7Lp4Wd9R}"}}')" "env.API_KEY has a literal secret as its \${VAR:-default}"
+  t    "a secret header given to --header is refused" hasl "$(mc h1 '{"command": "npx", "args": ["mcp-remote", "https://x.example/mcp", "--header", "Authorization: Bearer abc"]}')" "args[3] is a literal Authorization header"
+  t    "...as --header=... too"          hasl "$(mc h2 '{"command": "npx", "args": ["--header=X-Api-Key: k8Hq2mZx7Lp4Wd9R"]}')" "args[0] is a literal X-Api-Key header"
+  t    "...a reference or a plain header is fine" mcrc h3 '{"command": "npx", "args": ["--header", "Authorization: Bearer ${TOK}", "--header", "Accept: application/json"]}'
+  t    "camelCase names count"           hasl "$(mc c1 '{"command": "x", "args": ["--githubToken", "k8Hq2mZx7Lp4Wd9R"]}')" "args[1] is a literal --githubToken value"
+  t    "...in a url too"                 hasl "$(mc c2 '{"type": "http", "url": "https://x.example/mcp?myApiKey=k8Hq2mZx7Lp4Wd9R"}')" "query parameter myApiKey is a literal"
+  t    "a value with a / that isn't a path counts" hasl "$(mc s1 '{"command": "x", "args": ["--aws-secret-access-key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYzz"]}')" "args[0] is a literal --aws-secret-access-key value"
+  t    "a + in a query value stays a +"  hasl "$(mc s2 '{"type": "http", "url": "https://x.example/mcp?token=abc+def123456789xyz"}')" "query parameter token is a literal"
+  t    "a fragment parameter counts"     hasl "$(mc s3 '{"type": "http", "url": "https://x.example/cb#access_token=k8Hq2mZx7Lp4Wd9R"}')" "url: fragment parameter access_token is a literal"
+  t    "a key shape in command or any env value" hasl "$(mc s4 "{\"command\": \"srv --x $FAKE_GH\", \"env\": {\"GH\": \"$FAKE_AWS\"}}")" "env.GH holds a literal secret (AWS access key)"
+  t    "...command too"                  hasl "$(mc s4 "{\"command\": \"srv --x $FAKE_GH\", \"env\": {\"GH\": \"$FAKE_AWS\"}}")" "command holds a literal secret (GitHub token)"
+  t    "an env-style credential in args (a POSIX-class guard rule)" hasl "$(mc s5 '{"command": "x", "args": ["API_TOKEN=9f8e7d6c5b4a39281706"]}')" "args[0] holds a literal secret (credential in an env-style line)"
+  t    "a single-dash flag is named as written" hasl "$(mc s6 '{"command": "x", "args": ["-token=k8Hq2mZx7Lp4Wd9R"]}')" "args[0] is a literal -token value"
+  t    "file names, --pwd, and non-secret keys are fine" mcrc f1 '{"command": "x", "args": ["--pwd", "/srv/app", "--credentials=creds2024.json", "--key", "server2024.pem", "--cache-key=v2_build_123456"]}'
+  t    "a broken url doesn't crash and is still checked" hasl "$(mc f2 '{"type": "http", "url": "https://[x/mcp?token=k8Hq2mZx7Lp4Wd9R"}')" "url: query parameter token is a literal"
+  printf 'secret\tacme_[a-z0-9]{16}\tAcme key: remove it\n' > "$MR/.agents/guard.patterns"
+  t    "a project secret rule counts too" hasl "$(mc p1 '{"command": "x", "args": ["acme_k8hq2mzx7lp4wd9r"]}')" "args[0] holds a literal secret (Acme key)"
+  rm -f "$MR/.agents/guard.patterns"
+  t    "...and only while it's there"    mcrc p1 '{"command": "x", "args": ["acme_k8hq2mzx7lp4wd9r"]}'
+fi
+
 echo "mcp: what each tool gets"
 if [ "$HAVE_PY" -eq 1 ]; then
   jeq(){ python3 -c 'import json, sys; sys.exit(json.loads(sys.argv[1]) != json.loads(sys.argv[2]))' "$1" "$2"; }   # same JSON, structurally
@@ -3385,6 +3430,11 @@ print(json.dumps(d, sort_keys=True))' "$1" "$2" 2>/dev/null; }   # jget <file> <
   t    "...reported with its path"       hasl "$out" ".agents/library/mcp/github.json: env.API_TOKEN is a literal"
   t    "...its last good entry stays"    test "$(jget "$MM/.mcp.json" mcpServers.github.command)" = '"npx"'
   t    "...and in the codex block"       grep -qx '\[mcp_servers.github\]' "$MM/.codex/config.toml"
+  printf '{"command": "x", "args": ["-y", "srv", "--api-key", "k8Hq2mZx7Lp4Wd9R"]}\n' > "$MM/.agents/library/mcp/github.json"
+  out="$(mrun "$WORK/mset1" "$WORK/mout" 2>&1)" && rc=0 || rc=$?
+  t    "a literal key in args is a finding (rc 5)" test "$rc" = 5
+  t    "...reported with its json path"  hasl "$out" ".agents/library/mcp/github.json: args[3] is a literal --api-key value; use \${VAR} so the secret stays out of the repo; server not rendered"
+  tnot "...and never written"            grep -q k8Hq2mZx7Lp4Wd9R "$MM/.mcp.json" "$MM/.cursor/mcp.json" "$MM/.codex/config.toml"
   cp "$WORK/github.json" "$MM/.agents/library/mcp/github.json"
   : > "$WORK/mnone"
   out="$(AGENTS_LIBRARY_MISSING=1 mrun "$WORK/mnone" "$WORK/mout" 2>&1)" || true

@@ -8,8 +8,11 @@ headers for http and sse; and optionally tools (an allowlist), targets (which ad
 and native ({<tool>: {...}}, keys merged into that tool's entry as written).
 
 Secrets are only ever ${VAR} references: an env or header value whose name looks like a secret
-must hold a reference (fixed text around it is fine, as in "Bearer ${TOKEN}"). ${VAR:-default}
-gives a default where the tool supports one.
+must hold a reference (fixed text around it is fine, as in "Bearer ${TOKEN}"), and no default may
+look like a credential. No command, cwd, env, header, args, or url value may hold a key shape
+guard knows (its secret rules). args: no literal credential after a secret-looking flag (--token=..., --api-key <value>) or in a
+secret header given to --header. url: no user:pass@, no secret-looking query or fragment
+parameter. ${VAR:-default} gives a default where the tool supports one.
 
   mcp_render.py check <file>     check a server file: errors on stdout, warnings on stderr
   mcp_render.py render <tool> <file> [ADAPTERS="..."]   print one tool's entry (a debugging aid)
@@ -18,6 +21,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import unquote, urlsplit
 
 sys.dont_write_bytecode = True
 
@@ -42,6 +46,146 @@ def secret_name(name, header):
 def refs(value):
     """[(name, default or None)] for each ${VAR} reference in a string."""
     return [(m.group(1), m.group(2)) for m in REF.finditer(value)]
+
+
+# Literal secrets in args and url. A flag or query parameter counts as secret when its name's last
+# word is one of these (so --api-key, --githubToken, and ?access_token do; --key-file and
+# --auth-mode don't). A key whose word before it says it isn't a credential (--cache-key) doesn't.
+SECRET_PARTS = ("token", "key", "secret", "password", "passwd", "auth", "credential", "credentials",
+                "apikey", "accesstoken", "authtoken", "clientsecret", "secretkey", "accesskey", "privatekey")
+NOT_SECRET_KEYS = ("cache", "sort", "public", "partition", "primary", "foreign", "idempotency", "dedup",
+                   "routing", "group", "ssh")
+PASSWORD_PARTS = ("password", "passwd")   # any literal value counts, however short
+HEADER_FLAGS = ("header", "headers", "h")   # --header "Authorization: Bearer ..." (mcp-remote and others)
+FLAG_EQ = re.compile(r"^(--?[A-Za-z][A-Za-z0-9_.-]*)=(.*)$", re.S)
+FLAG = re.compile(r"^--?([A-Za-z][A-Za-z0-9_.-]*)$")
+HEADER_LINE = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*:\s*(.*)$", re.S)
+# A value that names a file rather than holding a secret: an absolute, home, or relative path, a
+# drive letter, or a short file extension at the end.
+PATHLIKE = re.compile(r"^(/|\./|\.\./|~|[A-Za-z]:[\\/])|\.[A-Za-z][A-Za-z0-9]{0,4}$")
+# Guard's filter for references and placeholders (bin/guard, plausible()), mirrored.
+PLACEHOLDER = re.compile(r"\$\{|\$\(|\{\{|%\(|<[A-Za-z0-9_ .-]*>|example|sample|changeme|change_me|replace_?me|"
+                         r"placeholder|your[_-]|dummy|fake|redacted|xxxx|\*\*\*\*|\.\.\.|[sp]k_test_", re.I)
+POSIX_CLASSES = (("[:space:]", r"\s"), ("[:blank:]", r" \t"), ("[:alpha:]", "A-Za-z"), ("[:digit:]", "0-9"),
+                 ("[:alnum:]", "A-Za-z0-9"), ("[:upper:]", "A-Z"), ("[:lower:]", "a-z"),
+                 ("[:xdigit:]", "0-9A-Fa-f"))
+EDGE = "\"'`()[]{}<>,;:=. \t/\\@#?&+!|*$%^~"   # what guard's plausible() trims: not [A-Za-z0-9_-]
+_SHAPES = []
+SECRET_TAIL = "; use ${VAR} so the secret stays out of the repo"
+
+
+def _shapes():
+    """[(regex, what)] for guard's secret rules: .agents/core/guard.patterns, then the project's own
+    .agents/guard.patterns. Read once, each ERE turned into a Python regex; one that doesn't
+    translate is skipped (guard still has it)."""
+    if _SHAPES:
+        return _SHAPES[0]
+    out = []
+    agents = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for path in (os.path.join(agents, "core", "guard.patterns"), os.path.join(agents, "guard.patterns")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in lines:
+            f = line.split("\t")
+            if line.startswith("#") or len(f) < 2 or f[0] != "secret" or not f[1]:
+                continue
+            ere = f[1]
+            for posix, py in POSIX_CLASSES:
+                ere = ere.replace(posix, py)
+            if "[:" in ere:
+                continue
+            try:
+                rx = re.compile(ere)
+            except re.error:
+                continue
+            what = (f[2] if len(f) > 2 else "").split(":")[0].strip() or "secret"
+            out.append((rx, what))
+    _SHAPES.append(out)
+    return out
+
+
+def _plausible(m):
+    """guard's plausible() for one match: not a reference or placeholder, and an assignment's value
+    mixes letters and digits."""
+    m = m.strip(EDGE)
+    if not m:
+        return False
+    op = re.search(r"(:=|=>|=|:)\s*[\"']?", m)
+    raw = m[op.end():] if op else m
+    if PLACEHOLDER.search(raw):
+        return False
+    if op:
+        v = raw.lstrip(EDGE)
+        return bool(re.search("[0-9]", v) and re.search("[A-Za-z]", v))
+    return True
+
+
+def key_shape(value):
+    """What guard calls the first plausible secret in value (an AWS key, a GitHub token, ...), or
+    None. Like guard, a match that's a placeholder doesn't hide one that starts inside it."""
+    for rx, what in _shapes():
+        pos = n = 0
+        while pos <= len(value) and n < 50:
+            n += 1
+            m = rx.search(value, pos)
+            if not m:
+                break
+            if m.end() > m.start() and _plausible(m.group(0)):
+                return what
+            pos = m.start() + 1
+    return None
+
+
+def _secret_word(name):
+    """'password' for a password-like name, True for another secret-looking one, else None."""
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)   # camelCase: githubToken is github_token
+    parts = [p for p in re.split(r"[^a-z0-9]+", name.lower()) if p]
+    if not parts or parts[-1] not in SECRET_PARTS:
+        return None
+    if parts[-1] == "key" and len(parts) > 1 and parts[-2] in NOT_SECRET_KEYS:
+        return None
+    return "password" if parts[-1] in PASSWORD_PARTS else True
+
+
+def credential(value):
+    """True when a literal looks like a real credential: a known key shape, or 12+ characters mixing
+    letters and digits with no space that isn't a path or a placeholder."""
+    if not value or PLACEHOLDER.search(value):
+        return False
+    if key_shape(value):
+        return True
+    return (len(value) >= 12 and bool(re.search("[A-Za-z]", value)) and bool(re.search("[0-9]", value))
+            and not re.search(r"\s", value) and not PATHLIKE.search(value))
+
+
+def _literal_parts(value):
+    """The literal text in value: each ${VAR:-default}'s default, and what's left around the
+    references (with no references, the value itself)."""
+    out = [d for _, d in refs(value) if d]
+    rest = REF.sub(" ", value).strip()
+    return out + ([rest] if rest else [])
+
+
+def literal_secret(name, value):
+    """True when value, given under a secret-looking flag or parameter name, holds a real
+    credential outside its ${VAR} references: any literal for a password, else credential()."""
+    kind = _secret_word(name)
+    if not kind:
+        return False
+    for part in _literal_parts(value):
+        if kind == "password" and not PLACEHOLDER.search(part) and not PATHLIKE.search(part):
+            return True
+        if credential(part):
+            return True
+    return False
+
+
+def hidden_default(value):
+    """True when a ${VAR:-default} in value defaults to something that looks like a credential."""
+    return any(credential(d) for _, d in refs(value) if d)
 
 
 def _no_constant(name):
@@ -127,8 +271,14 @@ class Server(object):
             for name, val in v.items():
                 if not isinstance(val, str):
                     self._err("%s.%s: expected a string" % (k, name))
-                elif secret_name(name, k == "headers") and val != "" and not refs(val):
-                    self._err("%s.%s is a literal; use ${VAR} so the secret stays out of the repo" % (k, name))
+            self._secret_map(k, v, k == "headers")
+        for k in ("command", "cwd"):
+            if k in mine and isinstance(data.get(k), str):
+                self._secret_shape(k, data[k])
+        if "args" in mine and _strings(data.get("args")):
+            self._secret_args("", data["args"])
+        if "url" in mine and isinstance(data.get("url"), str):
+            self._secret_url("url", data["url"])
         for k in mine:
             if k in data:
                 self.data[k] = data[k]
@@ -164,15 +314,86 @@ class Server(object):
                                        "server has; rendered as written")
 
     def _secrets(self, prefix, block):
-        """The secrets rule for a native block's env and header maps, as for the neutral ones."""
+        """The secrets rule for a native block, as for the neutral keys."""
         for k in ("env", "headers", "http_headers"):
-            v = block.get(k)
-            if not isinstance(v, dict):
+            if isinstance(block.get(k), dict):
+                self._secret_map(prefix + k, block[k], k != "env")
+        for k in ("command", "cwd"):
+            if isinstance(block.get(k), str):
+                self._secret_shape(prefix + k, block[k])
+        if _strings(block.get("args")):
+            self._secret_args(prefix, block["args"])
+        for k in ("url", "httpUrl", "serverUrl"):
+            if isinstance(block.get(k), str):
+                self._secret_url(prefix + k, block[k])
+
+    def _secret_map(self, where, v, header):
+        """env or header values: a secret-looking name needs a ${VAR} reference with no credential
+        as its default; any value with a key shape guard knows is an error too."""
+        for name, val in v.items():
+            if not isinstance(val, str):
                 continue
-            for name, val in v.items():
-                if isinstance(val, str) and secret_name(name, k != "env") and val != "" and not refs(val):
-                    self._err("%s%s.%s is a literal; use ${VAR} so the secret stays out of the repo"
-                              % (prefix, k, name))
+            if secret_name(name, header) and val != "" and not refs(val):
+                self._err("%s.%s is a literal%s" % (where, name, SECRET_TAIL))
+            elif hidden_default(val):
+                self._err("%s.%s has a literal secret as its ${VAR:-default}%s" % (where, name, SECRET_TAIL))
+            else:
+                self._secret_shape("%s.%s" % (where, name), val)
+
+    def _secret_shape(self, where, value):
+        """A key shape guard knows anywhere in value. True when it found one."""
+        shape = key_shape(value)
+        if shape:
+            self._err("%s holds a literal secret (%s)%s" % (where, shape, SECRET_TAIL))
+        return bool(shape)
+
+    def _secret_args(self, prefix, args):
+        """A literal credential in args: a key shape anywhere, the value of a secret-looking flag
+        (--token=..., or --api-key then the value as the next item), or a secret header given
+        to a header flag (--header "Authorization: Bearer ...")."""
+        for i, a in enumerate(args):
+            where = "%sargs[%d]" % (prefix, i)
+            if self._secret_shape(where, a):
+                continue
+            m = FLAG_EQ.match(a)
+            prev = FLAG.match(args[i - 1]) if i > 0 and not a.startswith("-") else None
+            if m:
+                flag, val = m.group(1), m.group(2)
+            elif prev:
+                flag, val = args[i - 1], a
+            else:
+                continue
+            name = flag.lstrip("-")
+            if literal_secret(name, val):
+                self._err("%s is a literal %s value%s" % (where, flag, SECRET_TAIL))
+            elif name.lower() in HEADER_FLAGS:
+                h = HEADER_LINE.match(val)
+                if h and secret_name(h.group(1), True) and h.group(2).strip() and not refs(h.group(2)):
+                    self._err("%s is a literal %s header%s" % (where, h.group(1), SECRET_TAIL))
+                elif h and hidden_default(h.group(2)):
+                    self._err("%s has a literal secret as its ${VAR:-default}%s" % (where, SECRET_TAIL))
+
+    def _secret_url(self, where, url):
+        """A literal credential in a url: a password (user:pass@host), a secret-looking query or
+        fragment parameter, or a key shape anywhere in it."""
+        rest, _, fragment = url.partition("#")
+        query = rest.partition("?")[2]
+        try:
+            password = urlsplit(url).password
+        except ValueError:   # a broken [host]: no userinfo to read, the rest still gets checked
+            password = None
+        if password and _literal_parts(password):
+            self._err("%s has a password in it (user:pass@host)%s" % (where, SECRET_TAIL))
+            return
+        if self._secret_shape(where, url):
+            return
+        # By hand, not parse_qsl: a + in a token is a +, not a space.
+        for kind, text in (("query", query), ("fragment", fragment)):
+            for pair in text.split("&"):
+                name, eq, val = pair.partition("=")
+                if eq and literal_secret(unquote(name), unquote(val)):
+                    self._err("%s: %s parameter %s is a literal%s" % (where, kind, unquote(name), SECRET_TAIL))
+                    return
 
     def wants(self, tool):
         return self.targets is None or tool in self.targets

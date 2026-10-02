@@ -141,8 +141,22 @@ Secrets: an `env` or header value whose name looks like a secret (TOKEN, KEY, SE
 PASS, AUTH, CREDENTIAL, COOKIE in any case, plus `Authorization` and `Proxy-Authorization` headers)
 must use `${VAR}` references, with fixed text around them if needed (`Bearer ${X}`). A literal there
 is an error: `mcp/github.json: env.GITHUB_TOKEN is a literal; use ${VAR} so the secret stays out
-of the repo`, and that server isn't rendered. `${VAR:-default}` works in `.mcp.json`; the other
-tools get `${VAR}` without the default, with a warning. Check a file with
+of the repo`, and that server isn't rendered. A `${VAR:-default}` whose default looks like a
+credential is an error too.
+
+`args` and `url` follow the same rule. In `args`: a literal credential after a secret-looking flag
+(`--token=...`, or `--api-key` then the value as the next item; the flag's last word decides, so
+`--githubToken` counts and `--key-file` and `--auth-mode` don't), or a secret header given to a
+header flag (`--header "Authorization: Bearer ..."`). In `url`: a `user:pass@`, or a
+secret-looking query or fragment parameter (`?api_key=...`). A value counts when it's 12 or more
+characters mixing letters and digits that isn't a path or a file name (`/srv/app`, `creds.json`);
+a password counts however short. Anywhere in `command`, `cwd`, `env`, headers, `args`, or `url`, a
+key shape guard's `secret` rules know (AWS, GitHub, Slack, Stripe, Google, plus your own in
+`.agents/guard.patterns`) is an error. Errors name the spot: `args[3] is a literal --api-key
+value`, `url has a password in it`.
+
+`${VAR:-default}` works in `.mcp.json`; the other tools get `${VAR}` without the default, with a
+warning. Check a file with
 `python3 .agents/lib/mcp_render.py check <file>`; see one tool's entry with
 `python3 .agents/lib/mcp_render.py render <tool> <file>`.
 
@@ -165,7 +179,8 @@ sync owns only the names it wrote, recorded per file in `generated.lock`. A re-r
 those, adds new ones, and removes ones whose server is gone; everything else in the file stays. A
 server you added by hand with the same name wins, with a warning. A config that ends up holding
 nothing is removed. A config that isn't valid JSON is an error and is left alone. A `native`
-block's `env` and header values follow the same secrets rule. An agent's
+block's `env` and header values, `command`, `cwd`, `args`, and `url` / `httpUrl` / `serverUrl`
+follow the same secrets rule. An agent's
 `mcp: [x]` naming a server no library or config here has gets a warning.
 
 Team mode commits these configs, so a personal server isn't rendered; sync names your tool's user

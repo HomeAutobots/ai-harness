@@ -58,7 +58,7 @@ Replace every `TODO(harness-tailor)` and remove the "Not tailored yet" note. Fil
 ### 6. Review hardening (recommend, don't apply)
 In local mode (`HARNESS_MODE="local"` in harness.conf), skip this: nothing the harness added is tracked, so there's nothing yet for CODEOWNERS to cover.
 Otherwise, recommend the human add CODEOWNERS entries so agent-steering files need review:
-`AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`.
+`AGENTS.md CLAUDE.md .mcp.json .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`.
 Point out anything in `.agents/policy.conf` that looks wrong for this repo.
 
 ### 7. Finish

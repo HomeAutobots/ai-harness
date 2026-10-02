@@ -56,7 +56,7 @@ It proposes: AGENTS.md facts, the three tier scripts, and a baseline of existing
 .agents/bin/sync --check && .agents/bin/verify --tier=full
 ```
 
-Add CODEOWNERS for `AGENTS.md CLAUDE.md .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
+Add CODEOWNERS for `AGENTS.md CLAUDE.md .mcp.json .agents/ .claude/ .cursor/ .github/hooks/ .github/agents/ .codex/ .gemini/`, so changes to what steers agents get reviewed.
 
 Team mode commits what `sync` renders into `.agents/skills/` and `.claude/skills/`, except skills from your personal library: those render for your clone only, listed in the same marked block in `.git/info/exclude` that local mode uses (team mode writes it only when you have some, and removes it when you have none left). See [Libraries](#libraries).
 
@@ -198,7 +198,7 @@ Search order; the first library with a name wins:
   ```
 
   Model tiers and effort map per tool through `MODEL_<TIER>_<TOOL>` / `EFFORT_<TIER>_<TOOL>` in `.agents/harness.conf` (missing: inherit). Personal agents never land in a shared repo, same as personal skills. See `.agents/library/README.md` for the full format, including `native:` lines for a tool's own fields and the escalation warning.
-- **MCP servers render per tool.** `mcp/<name>.json` in a library (or an active workflow pack's own `mcp/`) is one MCP server, written once. `sync` merges it into each enabled adapter's config beside the servers you added by hand: `.mcp.json` (claude and copilot share it), `.cursor/mcp.json`, `.gemini/settings.json`, and a marked block at the end of `.codex/config.toml`. Secrets are only ever `${VAR}` references; a literal in a secret-looking `env` or header value is an error and that server isn't rendered.
+- **MCP servers render per tool.** `mcp/<name>.json` in a library (or an active workflow pack's own `mcp/`) is one MCP server, written once. `sync` merges it into each enabled adapter's config beside the servers you added by hand: `.mcp.json` (claude and copilot share it), `.cursor/mcp.json`, `.gemini/settings.json`, and a marked block at the end of `.codex/config.toml`. Secrets are only ever `${VAR}` references; a literal in a secret-looking `env` or header value, a key shape or a secret flag's literal value in `args` (`--api-key k8Hq...`), or a password or secret query parameter in `url` is an error and that server isn't rendered.
 
   ```json
   {
@@ -357,6 +357,7 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Claude Code blanks some credential variables (`ANTHROPIC_API_KEY`, `NPM_TOKEN`, and others) when it expands a remote server's `url` and `headers`; use another variable name there.
 - Personal MCP servers aren't rendered in team mode; add them with your tool's user scope (`claude mcp add --scope local`, `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.gemini/settings.json`, `~/.copilot/mcp-config.json`).
 - Codex has no `${VAR}` expansion: an env value it can't pass by name (a renamed variable, text around a reference, a default) or a header other than `Bearer ${VAR}` / `${VAR}` is left out for codex with a warning, and a reference in `command`, `args`, `cwd`, or `url` keeps the server out of codex entirely. An `sse` server gets a plain `url` there.
+- The MCP secrets check for `args` and `url` is a heuristic. These get through: a literal secret after a flag whose name doesn't end in a secret word (`--creds-value abc...`), a short non-password value, a value that looks like a path or file name, a bare positional value or a url username (`https://<token>@host`) that isn't a key shape guard knows, and a secret inside `command` that isn't one either. Review server files like any other code that runs commands.
 - sync rewrites an MCP config it changes with its own JSON formatting (two-space indent); comments aren't JSON, so a config with them is reported as invalid and left alone.
 
 ## Roadmap
