@@ -4,9 +4,10 @@ This project's own skills, workflows, and stacks. Project-owned: upgrades never 
 
     skills/<name>/SKILL.md     a skill (Agent Skills format)
     agents/<name>.md           an agent, in the neutral format (see Agents below)
+    mcp/<name>.json            an MCP server, rendered into each tool's config (see MCP servers)
     workflows/<name>/          a workflow pack: checks/<tier>.sh, skill/SKILL.md, and optionally
                                checks/commit-msg.sh, checks/state.sh, harness.conf.snippet,
-                               policy.conf.snippet, seed/, agents/, bin/
+                               policy.conf.snippet, seed/, agents/, mcp/, bin/
     stacks/<name>/             a stack pack: lib.sh, checks/<tier>.sh
 
 After adding or changing something, run `.agents/bin/sync`. Skills are always on: they show up
@@ -78,7 +79,7 @@ Where each render lands and what it drops:
 - **codex** `.codex/agents/<name>.toml`: the same readonly-or-everything limit as Cursor
   (`sandbox_mode = "read-only"` or omitted, meaning inherit). `effort: max` becomes `high`
   (Codex's documented ceiling), noted every sync. Drops skills, max turns, and MCP server limits
-  (phase 3 renders those).
+  (the servers themselves render from `mcp/`, see MCP servers below).
 - **gemini** `.gemini/agents/<name>.md`: drops skills and effort; max turns is supported.
 
 A field a tool can't express gets one warning naming the field and the tools that drop it; the
@@ -112,3 +113,60 @@ it hides the rest of the harness. A personal agent never lands in a shared repo.
 A pack's `bin/<name>` commands (not agents) get their own stable path: `.agents/commands/<name>`,
 written by `sync` for every command of each active workflow pack, execing the pack's `bin/<name>`
 from wherever its library resolves (e.g. `.agents/commands/fdd` for feature-driven).
+
+## MCP servers
+
+`mcp/<name>.json` is one MCP server, written once: `sync` merges it into each enabled adapter's
+config, beside servers added by hand. An active workflow pack's `mcp/*.json` join after every
+library's own, as its agents do.
+
+```json
+{
+  "type": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}", "LOG_LEVEL": "debug" },
+  "tools": ["search_issues", "get_issue"],
+  "targets": ["claude", "copilot", "cursor"]
+}
+```
+
+A remote server is `"type": "http"` (streamable HTTP) or `"sse"`, with `url` and `headers`
+(`"Authorization": "Bearer ${LINEAR_TOKEN}"`). `type` defaults to stdio when there's a `command`.
+Optional: `cwd` (stdio), `tools` (an allowlist), `targets` (default: every enabled adapter), and
+`native: {"<tool>": {...}}`, keys merged into that tool's entry as written (for codex, a value of
+`null` takes sync's key out). The file name is the server name.
+
+Secrets: an `env` or header value whose name looks like a secret (TOKEN, KEY, SECRET, PASSWORD,
+PASS, AUTH, CREDENTIAL, COOKIE in any case, plus `Authorization` and `Proxy-Authorization` headers)
+must use `${VAR}` references, with fixed text around them if needed (`Bearer ${X}`). A literal there
+is an error: `mcp/github.json: env.GITHUB_TOKEN is a literal; use ${VAR} so the secret stays out
+of the repo`, and that server isn't rendered. `${VAR:-default}` works in `.mcp.json`; the other
+tools get `${VAR}` without the default, with a warning. Check a file with
+`python3 .agents/lib/mcp_render.py check <file>`; see one tool's entry with
+`python3 .agents/lib/mcp_render.py render <tool> <file>`.
+
+Where each server lands:
+- **claude, copilot** `.mcp.json` (one file for both): `type`, `command`, `args`, `env`, `cwd`,
+  `url`, `headers` as written, plus `tools` when copilot is on (Copilot CLI reads it; Claude has
+  no per-server allowlist, so with copilot off `tools` warns).
+- **cursor** `.cursor/mcp.json`: references become `${env:VAR}`; a remote server has no `type`.
+  Drops `cwd` and `tools`.
+- **gemini** `.gemini/settings.json`: `url` for sse, `httpUrl` for http, `tools` as `includeTools`.
+- **codex** a `[mcp_servers.<name>]` table in a block at the end of `.codex/config.toml`, between
+  `# >>> ai-harness mcp (managed by .agents/bin/sync)` and `# <<< ai-harness mcp`. Codex has no
+  `${VAR}` expansion, so `"K": "${K}"` becomes `env_vars = ["K"]`, `Authorization: Bearer ${X}`
+  becomes `bearer_token_env_var = "X"`, a header `"H": "${X}"` becomes `env_http_headers`, plain
+  values go in `env` / `http_headers`, and `tools` becomes `enabled_tools`. Anything else (a
+  renamed variable, a default) is left out for codex with a warning. Keep your own codex settings
+  above the block; sync moves the block back to the end if lines follow it.
+
+sync owns only the names it wrote, recorded per file in `generated.lock`. A re-render replaces
+those, adds new ones, and removes ones whose server is gone; everything else in the file stays. A
+server you added by hand with the same name wins, with a warning. A config that ends up holding
+nothing is removed. A config that isn't valid JSON is an error and is left alone. An agent's
+`mcp: [x]` naming a server no library or config here has gets a warning.
+
+Team mode commits these configs, so a personal server isn't rendered; sync names your tool's user
+scope instead (`claude mcp add --scope local`, `~/.cursor/mcp.json`, and so on). Local mode never
+touches a config the project tracks, and hides the ones it writes in the clone's exclude block.
