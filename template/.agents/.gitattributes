@@ -6,3 +6,4 @@ stacks/** text eol=lf
 builtin/** text eol=lf
 *.conf text eol=lf
 *.patterns text eol=lf
+skills/** text=auto eol=lf

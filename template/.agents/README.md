@@ -31,7 +31,7 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `guard.allow`, `baselines/` | project | Approved exceptions; pre-existing findings |
 | `skills.lock` | project | Third-party skills pinned by content hash (`sync --lock-skill`) |
 | `context/`, `plans/`, `evals/` | project | On-demand docs, plan ledgers (gitignored), eval tasks |
-| `generated.lock` | sync | Tracks what sync added to shared config files, and hashes of agent renders |
+| `generated.lock` | sync | Tracks what sync added to shared config files, and hashes of agent renders and skill copies |
 | `cache/` | local | Logs, verify cache, hook state (gitignored) |
 
 Harness-owned files are replaced on upgrade (re-run `install.sh`), so don't customize them.

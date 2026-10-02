@@ -314,6 +314,24 @@ AGENT_RENDERS="$WORK/agents.renders"   # from harness.py agents: shared|personal
 AGENTS_DONE=0      # harness.py agents finished, so AGENT_RENDERS is complete
 AGENT_FINDINGS=0   # --check: an agent file has errors (sync can't fix those)
 AGENT_FAILED=0     # --check: rendering agents didn't finish
+# Copy renders (render_skills, mirror_skills) to record in generated.lock: path<TAB>source<TAB>
+# record|keep. A recorded hash is how sync tells a copy edited by hand from one whose source moved on.
+COPY_ROWS="$WORK/copies.rows"
+: > "$COPY_ROWS"
+# copy_row <path> <source> <library>: list a copy render. Team mode commits the lock, so a personal
+# one stays out of it, as personal agent renders do.
+copy_row() {
+  if [ "$TEAM" -eq 1 ] && personal "$3"; then return 0; fi
+  printf '%s\t%s\t%s\n' "$1" "$2" record >> "$COPY_ROWS"
+}
+# replacing <path> <source>: sync is about to replace a render. A marked copy whose content isn't
+# what sync recorded for it was edited by hand, so say so.
+replacing() {
+  { [ -n "$PY" ] && [ ! -L "$1" ] && [ -f "$1/.harness-copy" ]; } || return 0
+  if "$PY" .agents/lib/harness.py copy-edited "$1"; then
+    warn "$1 was edited by hand; sync replaced it from $(shown "$2")"
+  fi
+}
 
 # A skill someone put straight into .agents/skills/ moves to the project library: that dir is
 # rendered now, and sync would otherwise remove what it didn't make.
@@ -326,6 +344,22 @@ adopt_skills() {
     agents_valid_name "$n" || continue
     [ "$LOCAL" -eq 1 ] && tracked "$d" && continue   # the project's own; compute_skill_set lists it
     if [ -e ".agents/library/skills/$n" ] || [ -L ".agents/library/skills/$n" ]; then
+      # A link move (this one, or install.sh's migration) that stopped after making the library
+      # link: both point at the same skill, so the old link is the one left to remove. Not when
+      # the library link goes through this one (removing it would leave that one dangling).
+      t="$(readlink ".agents/library/skills/$n" 2>/dev/null || true)"
+      case "$t" in /*) ;; *) t="$ROOT/.agents/library/skills/$t" ;; esac
+      t="$(norm_path "$t")"
+      if [ -L "$d" ] && [ -L ".agents/library/skills/$n" ] \
+         && case "$t/" in "$ROOT/$d/"*) false ;; *) true ;; esac \
+         && t="$(cd "$d" 2>/dev/null && pwd -P)" \
+         && [ "$t" = "$(cd ".agents/library/skills/$n" 2>/dev/null && pwd -P)" ]; then
+        if [ "$CHECK" -eq 1 ]; then drift "$d (a move to .agents/library/skills/$n that didn't finish)"; continue; fi
+        rm -f "$d"
+        CHANGED=1
+        say "removed the link $d: .agents/library/skills/$n points at the same skill (an earlier move didn't finish)"
+        continue
+      fi
       warn "$d and .agents/library/skills/$n both exist; keep the one you want in .agents/library/skills/ and delete $d (sync renders .agents/skills/)"
       continue
     fi
@@ -473,7 +507,13 @@ render_skills() {
   local name src lib target rel copy how
   while IFS="$TAB" read -r name src lib; do
     target="$SKILLS_DIR/$name"
-    [ "$src" = "$ROOT/$target" ] && continue   # a tracked skill in place (local mode), or kept
+    if [ "$src" = "$ROOT/$target" ]; then   # a tracked skill in place (local mode), or kept
+      # a kept copy holds its record until its library is back
+      if [ "$lib" = kept ] && [ ! -L "$target" ] && [ -f "$target/.harness-copy" ]; then
+        printf '%s\t%s\t%s\n' "$target" "$src" keep >> "$COPY_ROWS"
+      fi
+      continue
+    fi
     copy=0; [ "$LINK_MODE" = copy ] && copy=1
     case "$src" in
       "$ROOT"/*) rel="../../${src#"$ROOT"/}" ;;
@@ -489,13 +529,15 @@ render_skills() {
       continue
     fi
     if [ "$copy" -eq 1 ]; then
+      copy_row "$target" "$src" "$lib"
       if [ ! -L "$target" ] && [ -d "$target" ] \
-         && diff -rq -x .harness-copy "$src" "$target" >/dev/null 2>&1; then continue; fi
+         && diff -rq -x .harness-copy -x __pycache__ -x .DS_Store "$src" "$target" >/dev/null 2>&1; then continue; fi
     else
       if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then printf '%s\t%s\n' "$name" "$rel" >> "$RENDERED_NEW"; continue; fi
     fi
     if [ "$CHECK" -eq 1 ]; then drift "$target"; continue; fi
     mkdir -p "$SKILLS_DIR"
+    replacing "$target" "$src"
     rm -rf "$target"
     if [ "$copy" -eq 1 ]; then
       mkdir -p "$target"
@@ -757,8 +799,8 @@ owned() {
 
 # mirror_skills <tool-skills-dir>: expose each rendered skill in a tool's own skills dir
 mirror_skills() {
-  local dest="$1" name src target rel
-  while IFS="$TAB" read -r name src _; do
+  local dest="$1" name src lib target rel
+  while IFS="$TAB" read -r name src lib; do
     target="$dest/$name"
     rel="../../$SKILLS_DIR/$name"
 
@@ -773,14 +815,16 @@ mirror_skills() {
     fi
 
     if [ "$LINK_MODE" = copy ]; then
+      copy_row "$target" "$src" "$lib"
       if [ ! -L "$target" ] && [ -d "$target" ] \
-         && diff -rq -x .harness-copy "$src" "$target" >/dev/null 2>&1; then continue; fi
+         && diff -rq -x .harness-copy -x __pycache__ -x .DS_Store "$src" "$target" >/dev/null 2>&1; then continue; fi
     else
       if [ -L "$target" ] && [ "$(readlink "$target")" = "$rel" ]; then continue; fi
     fi
 
     if [ "$CHECK" -eq 1 ]; then drift "$target"; continue; fi
     mkdir -p "$dest"
+    if [ "$LINK_MODE" = copy ]; then replacing "$target" "$src"; else replacing "$target" "$ROOT/$SKILLS_DIR/$name"; fi
     rm -rf "$target"
     if [ "$LINK_MODE" = copy ]; then
       mkdir -p "$target"
@@ -907,6 +951,13 @@ if [ -n "$PY" ]; then
   else
     if [ -n "$AOUT" ]; then CHANGED=1; fi
     if [ "$AG_RC" -eq 5 ]; then warn "some library agents weren't rendered (see the errors above)"; fi
+  fi
+  # Copy renders' hashes (skill_copies in generated.lock): 0 ok, 1 out of date (--check).
+  if [ "$CHECK" -eq 1 ]; then
+    "$PY" .agents/lib/harness.py skill-copies --check "$COPY_ROWS" || DRIFT=1
+  else
+    COUT="$("$PY" .agents/lib/harness.py skill-copies "$COPY_ROWS")" || warn "recording skill copy hashes failed (see above)"
+    if [ -n "$COUT" ]; then printf '%s\n' "$COUT"; CHANGED=1; fi
   fi
 else
   warn "python3 not found: hooks, permission rules, and library agents were not rendered. Install python3 and re-run."

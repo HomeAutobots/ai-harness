@@ -13,6 +13,8 @@ re-render replaces exactly what the harness added and never touches anything els
   harness.py unshare                                 strip harness entries from tracked configs
   harness.py agents [--check] <agent-set> <renders-out>     render library agents for each tool
                                                      (0 ok, 1 drift, 5 agent-file errors, 3 failed)
+  harness.py skill-copies [--check] <rows>           record copy-mode skill render hashes in the lock
+  harness.py copy-edited <path>                      exit 0 if that copy render was edited by hand
 """
 import fnmatch
 import hashlib
@@ -548,6 +550,79 @@ def dir_hash(path):
     return h.hexdigest()
 
 
+def tree_hash(path):
+    """sha256 of a skill directory as a copy render holds it: names, file contents, and link targets
+    (cp -R copies a link inside it as a link). Left out: .harness-copy (sync's marker) and what running
+    or browsing a skill leaves behind (__pycache__/, .DS_Store), as sync's diff leaves them out."""
+    h = hashlib.sha256()
+    for base, dirs, files in os.walk(path):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        names = sorted([f for f in files if f != ".DS_Store"] + [d for d in dirs if os.path.islink(os.path.join(base, d))])
+        for name in names:
+            full = os.path.join(base, name)
+            rel = os.path.relpath(full, path).replace(os.sep, "/")
+            if rel == ".harness-copy":
+                continue
+            h.update(rel.encode("utf-8", "surrogateescape") + b"\0")
+            try:
+                if os.path.islink(full):
+                    h.update(b"link\0" + os.readlink(full).encode("utf-8", "surrogateescape"))
+                else:
+                    with open(full, "rb") as fh:
+                        h.update(fh.read())
+            except OSError:
+                h.update(b"unreadable")
+            h.update(b"\0")
+    return h.hexdigest()
+
+
+def skill_copies(check, rows_path):
+    """Records the hash of each copy-mode skill render in generated.lock (skill_copies), so sync can
+    tell a copy edited by hand from one whose source changed. rows: rel<TAB>source<TAB>record|keep;
+    keep (a render whose library isn't here) holds the old record. sync leaves out what it doesn't
+    record (team mode: personal copies, since the lock is committed)."""
+    lock, _ = read_json(LOCK)
+    lock = lock or {}
+    old = lock.get("skill_copies", {})
+    new = {}
+    try:
+        with open(rows_path, encoding="utf-8") as fh:
+            rows = [l.rstrip("\n").split("\t") for l in fh if l.count("\t") == 2]
+    except OSError:
+        rows = []
+    for rel, src, how in rows:
+        if how == "keep":
+            if rel in old:
+                new[rel] = old[rel]
+        elif os.path.isdir(src):
+            new[rel] = tree_hash(src)
+    new_lock = dict(lock)
+    if new:
+        new_lock["skill_copies"] = new
+    else:
+        new_lock.pop("skill_copies", None)
+    if new_lock == lock:
+        return 0
+    rel = os.path.relpath(LOCK, ROOT)
+    if check:
+        print("sync: out of date: " + rel)
+        return 1
+    with open(LOCK, "w", encoding="utf-8") as fh:
+        fh.write(dump_json(new_lock))
+    print("sync: wrote " + rel)
+    return 0
+
+
+def copy_edited(rel):
+    """0 when the copy render at rel differs from the hash sync recorded for it (edited by hand)."""
+    lock, _ = read_json(LOCK)
+    want = ((lock or {}).get("skill_copies") or {}).get(rel)
+    full = os.path.join(ROOT, rel)
+    if not want or not os.path.isdir(full) or os.path.islink(full):
+        return 1
+    return 0 if tree_hash(full) != want else 1
+
+
 def read_skills_lock():
     entries = {}
     if os.path.exists(SKILLS_LOCK):
@@ -636,6 +711,10 @@ def main(argv):
         return check_skills(argv[2] if len(argv) > 2 else None)
     if cmd == "unshare":
         return unshare()
+    if cmd == "skill-copies" and len(argv) in (3, 4):
+        return skill_copies(argv[2] == "--check", argv[-1])
+    if cmd == "copy-edited" and len(argv) == 3:
+        return copy_edited(argv[2])
     if cmd == "agents" and len(argv) in (4, 5):
         a = argv[2:]
         chk = a[0] == "--check"

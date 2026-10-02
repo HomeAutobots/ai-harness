@@ -3009,6 +3009,160 @@ else
   echo "  skip  (python3 not found)"; SKIP=$((SKIP + 1))
 fi
 
+echo "libraries hardening"
+if [ "$HAVE_PY" -eq 1 ]; then
+  HC=$(repo hardcopy)
+  "$HARNESS/install.sh" --team "$HC" >/dev/null 2>&1
+  tnot "symlink mode records no skill copies" grep -q skill_copies "$HC/.agents/generated.lock"
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  "$HC/.agents/bin/sync" >/dev/null 2>&1
+  t  "copy mode records each copy's hash" bash -c "grep -q '\"skill_copies\"' '$HC/.agents/generated.lock' && grep -q '\".agents/skills/plan-task\"' '$HC/.agents/generated.lock' && grep -q '\".claude/skills/plan-task\"' '$HC/.agents/generated.lock'"
+  t  "...and --check is clean"         "$HC/.agents/bin/sync" --check
+  echo "my note" >> "$HC/.agents/skills/plan-task/SKILL.md"
+  echo "my note" >> "$HC/.claude/skills/review-diff/SKILL.md"
+  tnot "a hand-edited copy is drift"   "$HC/.agents/bin/sync" --check
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  t  "sync warns before replacing a hand-edited copy" hasl "$out" "sync: warning: .agents/skills/plan-task was edited by hand; sync replaced it from .agents/builtin/skills/plan-task"
+  t  "...and a hand-edited mirror"     hasl "$out" "sync: warning: .claude/skills/review-diff was edited by hand; sync replaced it from .agents/builtin/skills/review-diff"
+  tnot "...and replaces them"          grep -rq "my note" "$HC/.agents/skills/plan-task" "$HC/.claude/skills/review-diff"
+  t  "...then --check is clean"        "$HC/.agents/bin/sync" --check
+  mkskill "$HC/.agents/library" ours "Ours."
+  "$HC/.agents/bin/sync" >/dev/null 2>&1
+  echo "v2" >> "$HC/.agents/library/skills/ours/SKILL.md"
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  tnot "a source change replaces the copy without a warning" hasl "$out" "edited by hand"
+  t  "...and the copy follows it"      grep -q v2 "$HC/.agents/skills/ours/SKILL.md"
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="symlink"/'
+  echo "my note" >> "$HC/.agents/skills/ours/SKILL.md"
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  t  "back to links: a hand-edited copy still warns" hasl "$out" ".agents/skills/ours was edited by hand; sync replaced it from .agents/library/skills/ours"
+  tnot "...and the records go"         grep -q skill_copies "$HC/.agents/generated.lock"
+  HP="$WORK/hard-pers"; mkskill "$HP" pmine "Mine."
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  AGENTS_PERSONAL_DIR="$HP" "$HC/.agents/bin/sync" >/dev/null 2>&1
+  t  "team mode: a personal copy renders" test -f "$HC/.agents/skills/pmine/.harness-copy"
+  tnot "...but isn't recorded in the committed lock" grep -q pmine "$HC/.agents/generated.lock"
+  HO="$WORK/hard-outside"; mkskill "$HO" farshared "Shared from outside."
+  edit "$HC/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="symlink"/'
+  edit "$HC/.agents/harness.conf" "s|^LIBRARIES=.*|LIBRARIES=\"$HO\"|"
+  "$HC/.agents/bin/sync" >/dev/null 2>&1
+  t  "team mode: a shared skill from outside the repo is a recorded copy" bash -c "test -f '$HC/.agents/skills/farshared/.harness-copy' && grep -q '\".agents/skills/farshared\"' '$HC/.agents/generated.lock'"
+  echo "my note" >> "$HC/.agents/skills/farshared/SKILL.md"
+  out="$("$HC/.agents/bin/sync" 2>&1)"
+  t  "...and warns when its hand edit is replaced" hasl "$out" ".agents/skills/farshared was edited by hand; sync replaced it from $HO/skills/farshared"
+  HL2=$(repo hardcopylocal)
+  "$HARNESS/install.sh" "$HL2" >/dev/null 2>&1
+  edit "$HL2/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  AGENTS_PERSONAL_DIR="$HP" "$HL2/.agents/bin/sync" >/dev/null 2>&1
+  t  "local mode records personal copies too" grep -q '".agents/skills/pmine"' "$HL2/.agents/generated.lock"
+  mkdir -p "$HL2/.agents/skills/pmine/__pycache__"; printf 'x' > "$HL2/.agents/skills/pmine/__pycache__/a.pyc"; : > "$HL2/.agents/skills/pmine/.DS_Store"
+  echo "v2" >> "$HP/skills/pmine/SKILL.md"
+  out="$(AGENTS_PERSONAL_DIR="$HP" "$HL2/.agents/bin/sync" 2>&1)"
+  tnot "a copy with a Python cache or .DS_Store isn't called hand-edited" hasl "$out" "edited by hand"
+  HK=$(repo hardkept)
+  "$HARNESS/install.sh" --team "$HK" >/dev/null 2>&1
+  mkskill "$HK/vendor/lib" libbed "From a library."
+  edit "$HK/.agents/harness.conf" 's|^LIBRARIES=.*|LIBRARIES="vendor/lib"|'
+  edit "$HK/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  "$HK/.agents/bin/sync" >/dev/null 2>&1; commit "$HK" "copies"
+  mv "$HK/vendor/lib" "$WORK/hardkept-away"
+  "$HK/.agents/bin/sync" >/dev/null 2>&1
+  t  "a copy kept while its library is missing keeps its record" grep -q '".agents/skills/libbed"' "$HK/.agents/generated.lock"
+  echo "my note" >> "$HK/.agents/skills/libbed/SKILL.md"
+  mv "$WORK/hardkept-away" "$HK/vendor/lib"
+  out="$("$HK/.agents/bin/sync" 2>&1)"
+  t  "...so a hand edit made meanwhile still warns once it's back" hasl "$out" ".agents/skills/libbed was edited by hand; sync replaced it from vendor/lib/skills/libbed"
+  HN="$WORK/hard-nopy"; mkdir -p "$HN"
+  ( IFS=:; for d in $PATH; do for f in "$d"/*; do n="${f##*/}"
+      case "$n" in python3*) continue ;; esac
+      if [ -x "$f" ] && [ ! -e "$HN/$n" ]; then ln -s "$f" "$HN/$n"; fi
+    done; done ) || true
+  if ! PATH="$HN" bash -c 'command -v python3' >/dev/null 2>&1; then
+    echo "my note" >> "$HK/.agents/skills/libbed/SKILL.md"
+    out="$(PATH="$HN" "$HK/.agents/bin/sync" 2>&1)" || true
+    t  "no python3: a hand-edited copy is still replaced" bash -c "! grep -q 'my note' '$HK/.agents/skills/libbed/SKILL.md'"
+    tnot "...without a warning it can't back up" hasl "$out" "edited by hand"
+  fi
+fi
+HB=$(repo hardboth)
+"$HARNESS/install.sh" --team "$HB" >/dev/null 2>&1
+mkskill "$WORK/hard-far" farl "Far."; mkskill "$HB/tools" near "Near."
+mkdir -p "$HB/.agents/library/skills"
+# a link move that stopped after making the library link, before removing the old one
+ln -s "$WORK/hard-far/skills/farl" "$HB/.agents/library/skills/farl"; ln -s "$WORK/hard-far/skills/farl" "$HB/.agents/skills/farl"
+ln -s ../../../tools/skills/near "$HB/.agents/library/skills/near"; ln -s ../../tools/skills/near "$HB/.agents/skills/near"
+commit "$HB" "an interrupted link move"
+tnot "an interrupted link move is drift" "$HB/.agents/bin/sync" --check
+t    "...and --check changes nothing"  test "$(readlink "$HB/.agents/skills/farl")" = "$WORK/hard-far/skills/farl"
+out="$("$HARNESS/install.sh" "$HB" 2>&1)"
+tnot "...and the next run doesn't call it both existing" hasl "$out" "both exist"
+t    "...it finishes the move"         hasl "$out" "removed the link .agents/skills/farl: .agents/library/skills/farl points at the same skill (an earlier move didn't finish)"
+t    "...and renders from the library" bash -c "test \"\$(readlink '$HB/.agents/skills/farl')\" = ../../.agents/library/skills/farl && test \"\$(readlink '$HB/.agents/skills/near')\" = ../../.agents/library/skills/near"
+t    "...then --check is clean"        "$HB/.agents/bin/sync" --check
+out="$("$HB/.agents/bin/sync" 2>&1)"
+tnot "...and it stays settled"         hasl "$out" "both exist"
+mkskill "$HB/.agents" twice "In the render dir."; mkskill "$HB/.agents/library" twice "In the library."
+out="$("$HB/.agents/bin/sync" 2>&1)"
+t    "two different skills of one name still warn" hasl "$out" ".agents/skills/twice and .agents/library/skills/twice both exist"
+t    "...and both stay"                bash -c "grep -q 'In the render dir' '$HB/.agents/skills/twice/SKILL.md' && grep -q 'In the library' '$HB/.agents/library/skills/twice/SKILL.md'"
+mkskill "$HB/tools" via "Via."
+ln -s ../../tools/skills/via "$HB/.agents/skills/via"; ln -s ../../skills/via "$HB/.agents/library/skills/via"
+out="$("$HB/.agents/bin/sync" 2>&1)"
+t    "a library link that goes through the old link isn't a finished move" hasl "$out" ".agents/skills/via and .agents/library/skills/via both exist"
+t    "...so neither is removed"        bash -c "test -L '$HB/.agents/skills/via' && test -f '$HB/.agents/library/skills/via/SKILL.md'"
+HS=$(repo hardstack)
+"$HARNESS/install.sh" --team "$HS" >/dev/null 2>&1; commit "$HS" harness
+oldlayout "$HS"
+mkdir -p "$HS/.agents/stacks/mine" "$HS/.github/workflows" "$HS/ci"
+printf 'mine_ok() { :; }\n' > "$HS/.agents/stacks/mine/lib.sh"; printf 'print(1)\n' > "$HS/.agents/stacks/mine/tool.py"
+printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/stacks/mine/lib.sh"\npython3 .agents/stacks/mine/tool.py\n' > "$HS/.agents/checks/turn.sh"
+printf 'steps:\n  - run: . .agents/stacks/mine/lib.sh\n  - run: python3 .agents/stacks/cpp-cmake/cpp_tools.py\n' > "$HS/.github/workflows/ci.yml"
+commit "$HS" "old layout"
+printf 'see .agents/stacks/mine/tool.py\n' > "$HS/ci/notes.txt"   # untracked, not ignored
+out="$("$HARNESS/install.sh" --stack mine "$HS" 2>&1)"
+t    "a moved stack: install names each other file pointing into its old dir" hasl "$out" "install: warning: .agents/checks/turn.sh:3: points into .agents/stacks/mine/, which only keeps lib.sh now; the stack's files are in .agents/library/stacks/mine/"
+t    "...CI configs too"               hasl "$out" "install: warning: .github/workflows/ci.yml:3: points into .agents/stacks/cpp-cmake/, which only keeps lib.sh now; the stack's files are in .agents/builtin/stacks/cpp-cmake/"
+t    "...and untracked files"          hasl "$out" "install: warning: ci/notes.txt:1: points into .agents/stacks/mine/"
+tnot "...but not a line that only sources lib.sh" bash -c "printf '%s' \"\$1\" | grep -qE 'turn.sh:2:|ci.yml:2:'" _ "$out"
+commit "$HS" "library layout"
+out="$("$HARNESS/install.sh" "$HS" 2>&1)"
+tnot "...once: a re-run doesn't repeat it" hasl "$out" "points into"
+HSL=$(repo hardstacklocal)
+"$HARNESS/install.sh" "$HSL" >/dev/null 2>&1
+oldlayout "$HSL"
+mkdir -p "$HSL/.agents/stacks/mine"; printf 'mine_ok() { :; }\n' > "$HSL/.agents/stacks/mine/lib.sh"; printf 'print(1)\n' > "$HSL/.agents/stacks/mine/tool.py"
+printf '#!/usr/bin/env bash\npython3 .agents/stacks/mine/tool.py\n' > "$HSL/.agents/checks/turn.sh"
+out="$("$HARNESS/install.sh" "$HSL" 2>&1)"
+t    "local mode: tier scripts hidden from git are read too" hasl "$out" "install: warning: .agents/checks/turn.sh:2: points into .agents/stacks/mine/"
+HSS=$(repo hardstacksub); mkdir -p "$HSS/app"
+"$HARNESS/install.sh" --team "$HSS/app" >/dev/null 2>&1
+oldlayout "$HSS/app"
+mkdir -p "$HSS/app/.agents/stacks/mine" "$HSS/.github/workflows"
+printf 'mine_ok() { :; }\n' > "$HSS/app/.agents/stacks/mine/lib.sh"; printf 'print(1)\n' > "$HSS/app/.agents/stacks/mine/tool.py"
+printf 'steps:\n  - run: python3 app/.agents/stacks/mine/tool.py\n' > "$HSS/.github/workflows/ci.yml"
+commit "$HSS" "old layout in a subdirectory"
+out="$("$HARNESS/install.sh" "$HSS/app" 2>&1)"
+t    "a subdirectory install: CI configs at the repo top count too" hasl "$out" "install: warning: ../.github/workflows/ci.yml:2: points into .agents/stacks/mine/"
+HT=$(repo hardtracked)
+"$HARNESS/install.sh" "$HT" >/dev/null 2>&1
+oldlayout "$HT"; handmade "$HT"
+mkdir -p "$HT/.agents/stacks/mine"; printf 'mine_ok() { :; }\n' > "$HT/.agents/stacks/mine/lib.sh"
+git -C "$HT" add -f .agents/workflows/handmade .agents/stacks/mine .agents/stacks/cpp-cmake; commit "$HT" "tracked packs"
+cp -R "$HT/.agents/workflows/handmade" "$WORK/hardtracked-before"
+out="$("$HARNESS/install.sh" "$HT" 2>&1)"
+t    "local mode leaves a tracked old-layout pack in place, unchanged" diff -r "$WORK/hardtracked-before" "$HT/.agents/workflows/handmade"
+t    "...and says so"                  hasl "$out" "install: warning: the project tracks files in .agents/workflows/handmade; local mode leaves it in place"
+t    "...tracked stacks too"           bash -c "grep -qx 'mine_ok() { :; }' '$HT/.agents/stacks/mine/lib.sh' && test -f '$HT/.agents/stacks/cpp-cmake/cpp_tools.py'"
+t    "...with a warning each"          bash -c "printf '%s' \"\$1\" | grep -qF 'the project tracks files in .agents/stacks/mine;' && printf '%s' \"\$1\" | grep -qF 'the project tracks files in .agents/stacks/cpp-cmake;'" _ "$out"
+t    "...and git status stays clean"   test -z "$(git -C "$HT" status --porcelain)"
+HU=$(repo hardtrackedskill)
+"$HARNESS/install.sh" "$HU" >/dev/null 2>&1
+oldlayout "$HU"; handmade "$HU"
+git -C "$HU" add -f .agents/skills/handmade; commit "$HU" "a tracked pack skill"
+out="$("$HARNESS/install.sh" "$HU" 2>&1)"
+t    "local mode: an untracked pack moves, but its tracked skill stays" bash -c "test -d '$HU/.agents/library/workflows/handmade' && test ! -e '$HU/.agents/library/workflows/handmade/skill' && grep -q 'Run .agents/workflows/handmade/rule.sh first.' '$HU/.agents/skills/handmade/SKILL.md'"
+t    "...and git status stays clean"   test -z "$(git -C "$HU" status --porcelain)"
+
 echo "guards"
 wait_group grp_tasks; P="$WORK/fresh"   # the fresh install, once the last group using it is done
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"

@@ -279,12 +279,48 @@ fi
 EOF
 }
 
+# local_tracked <path>: local mode never moves, rewrites, or deletes what the project tracks, except
+# on a switch from team mode, where it's the harness's own files (untracked below).
+local_tracked() {
+  { [ "$MODE" = local ] && [ "$SWITCH" != local ]; } || return 1
+  [ -n "$(git -C "$DEST" ls-files -- "$1" 2>/dev/null | head -n 1)" ]
+}
+# stack_refs <name> <now-in>: once .agents/stacks/<name>/ keeps only the shim, each line elsewhere in
+# the project that points at another file in it (a tier script, a CI config) gets a path:line warning.
+stack_refs() {
+  local s=".agents/stacks/$1/"
+  {
+    if git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1; then
+      # the whole repo (:/), so a subdirectory install sees the CI configs at the top too
+      git -C "$DEST" grep -nIF --untracked -e "$s" -- ':/' 2>/dev/null || true
+    else
+      (cd "$DEST" && grep -rnIF --exclude-dir=.git -e "$s" . 2>/dev/null | sed 's|^\./||') || true
+    fi
+    # local mode hides .agents/ from git, so its project-owned files are read directly
+    (cd "$DEST" && grep -nIF -e "$s" .agents/checks/*.sh .agents/*.conf /dev/null 2>/dev/null) || true
+    (cd "$DEST" && grep -rnIF -e "$s" .agents/library .agents/context 2>/dev/null) || true
+  } | awk -v s="$s" '{
+      p = index($0, ":"); path = substr($0, 1, p - 1); rest = substr($0, p + 1)
+      q = index(rest, ":"); num = substr(rest, 1, q - 1); c = substr(rest, q + 1)
+      t = "/" path   # a sibling install in another subdirectory counts the same as this one
+      if (t ~ /\/\.agents\/(builtin|stacks|cache)\// || t ~ /\/\.agents\/library\/\.migrated\//) next
+      while ((i = index(c, s)) > 0) {
+        c = substr(c, i + length(s))
+        if (!(substr(c, 1, 6) == "lib.sh" && substr(c, 7, 1) !~ /[A-Za-z0-9._-]/)) { print path ":" num; next }
+      }
+    }' | sort -t: -k1,1 -k2,2n -u | while IFS= read -r ref; do
+    say "warning: $ref: points into .agents/stacks/$1/, which only keeps lib.sh now; the stack's files are in $2/"
+  done
+}
+
 if [ -d "$DEST/.agents/workflows" ]; then
   for d in "$DEST"/.agents/workflows/*/; do
     [ -d "$d" ] || continue
     w="$(basename "$d")"
     if ! agents_valid_name "$w" || [ -L "${d%/}" ]; then
       say "warning: .agents/workflows/$w isn't a plain pack directory with a valid name; left in place, move it into .agents/library/workflows/ yourself"
+    elif local_tracked ".agents/workflows/$w"; then
+      say "warning: the project tracks files in .agents/workflows/$w; local mode leaves it in place (move it into .agents/library/workflows/ yourself, in a commit)"
     elif [ -d "$HARNESS/workflows/$w" ]; then
       # The old layout copied the pack without its skill, seed files, and config snippets.
       if shipped_copy "$HARNESS/workflows/$w" "${d%/}" -x skill -x seed -x harness.conf.snippet -x policy.conf.snippet; then
@@ -316,6 +352,10 @@ for d in "$DEST"/.agents/library/workflows/*/; do
   w="$(basename "$d")"; s="$DEST/.agents/skills/$w"
   case " $(conf_list WORKFLOWS) $NEW_WORKFLOWS " in *" $w "*) ;; *) continue ;; esac
   if [ -f "$s/SKILL.md" ] && [ ! -L "$s" ] && [ ! -f "$s/.harness-copy" ] && [ ! -e "${d}skill" ]; then
+    if local_tracked ".agents/skills/$w"; then
+      say "warning: the project tracks .agents/skills/$w; local mode leaves it in place instead of moving it to .agents/library/workflows/$w/skill"
+      continue
+    fi
     repath "$s" ".agents/workflows/$w" ".agents/library/workflows/$w"
     mv "$s" "${d}skill"
     migrated "moved .agents/skills/$w to .agents/library/workflows/$w/skill"
@@ -328,10 +368,13 @@ if [ -d "$DEST/.agents/stacks" ]; then
     if grep -qF "$STACK_SHIM_MARK" "${d}lib.sh" 2>/dev/null; then continue; fi
     if ! agents_valid_name "$s" || [ -L "${d%/}" ]; then
       say "warning: .agents/stacks/$s isn't a plain pack directory with a valid name; left in place, move it into .agents/library/stacks/ yourself"
+    elif local_tracked ".agents/stacks/$s"; then
+      say "warning: the project tracks files in .agents/stacks/$s; local mode leaves it in place (move it into .agents/library/stacks/ yourself, in a commit)"
     elif [ -d "$HARNESS/stacks/$s" ]; then
       shipped_copy "$HARNESS/stacks/$s" "${d%/}" || set_aside stacks "$DEST/.agents/stacks/$s"
       write_stack_shim "$s"
       migrated "replaced .agents/stacks/$s with a shim (the pack runs from .agents/builtin/stacks/$s)"
+      stack_refs "$s" ".agents/builtin/stacks/$s"
     elif [ -e "$DEST/.agents/library/stacks/$s" ] || [ -L "$DEST/.agents/library/stacks/$s" ]; then
       say "warning: .agents/stacks/$s and .agents/library/stacks/$s both exist; keep the one you want in .agents/library/stacks/ and delete .agents/stacks/$s"
     else
@@ -341,9 +384,7 @@ if [ -d "$DEST/.agents/stacks" ]; then
       mv "$DEST/.agents/stacks/$s" "$DEST/.agents/library/stacks/$s"
       write_stack_shim "$s"
       migrated "moved .agents/stacks/$s to .agents/library/stacks/$s (.agents/stacks/$s/lib.sh forwards to it)"
-      if awk -v s=".agents/stacks/$s/" -v l=".agents/stacks/$s/lib.sh" 'index($0, s) && !index($0, l) { f = 1 } END { exit !f }' "$DEST"/.agents/checks/*.sh 2>/dev/null; then
-        say "warning: .agents/checks/ uses files in .agents/stacks/$s/ besides lib.sh; they're in .agents/library/stacks/$s/ now"
-      fi
+      stack_refs "$s" ".agents/library/stacks/$s"
     fi
   done
 fi
