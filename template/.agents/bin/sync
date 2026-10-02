@@ -142,9 +142,6 @@ if [ "$LOCAL" -eq 1 ] && tracked AGENTS.md; then
       > "$WORK/agents.local.md"
     if [ "$CHECK" -eq 1 ]; then AGENTS_IN="$WORK/agents.local.md"; else cp "$WORK/agents.local.md" "$AGENTS_FILE"; fi
   fi
-  case " $ADAPTERS " in *" copilot "*|*" cursor "*|*" codex "*)
-    [ "$CHECK" -eq 1 ] || warn "the project tracks AGENTS.md, so Copilot, Cursor, and Codex (which read only AGENTS.md) won't see the harness rules in this clone; their hooks still enforce the checks and policy" ;;
-  esac
 fi
 
 [ -n "$AGENTS_IN" ] || AGENTS_IN="$AGENTS_FILE"
@@ -155,6 +152,9 @@ export AGENTS_ROOT="$ROOT"
 # shellcheck source=../lib/libraries.sh
 . .agents/lib/libraries.sh
 TAB="$AGENTS_TAB"
+[ -f .agents/lib/rules_copies.sh ] || die "missing .agents/lib/rules_copies.sh. Re-run install.sh."
+# shellcheck source=../lib/rules_copies.sh
+. .agents/lib/rules_copies.sh
 
 # put <target> <generated>: write target only when content differs
 put() {
@@ -960,6 +960,10 @@ for a in $ADAPTERS; do
   esac
 done
 
+# Local mode with a tracked AGENTS.md: the rules for tools that don't read .agents/AGENTS.local.md
+# (see .agents/lib/rules_copies.sh).
+agents_rules_sync
+
 # JSON configs: hooks, permission rules, Codex execpolicy, Gemini context. Merged into files the
 # project may already own; only entries the harness added are replaced.
 if [ -n "$PY" ]; then
@@ -1111,6 +1115,7 @@ exclude_block() {
       { [ -e "$p" ] || [ -L "$p" ]; } || continue
       tracked "$p" || echo "/$pre$p" >> "$WORK/exclude.list"
     done
+    agents_rules_exclude "$pre" >> "$WORK/exclude.list"
     # Codex hooks: only a file holding the harness's (one with just the project's isn't sync's).
     if [ -f .codex/hooks.json ] && ! tracked .codex/hooks.json && grep -qF '.agents/hooks/' .codex/hooks.json; then
       echo "/$pre.codex/hooks.json" >> "$WORK/exclude.list"
@@ -1175,7 +1180,7 @@ fi
 # zero-width chars, bidi controls, invisible operators, BOM, and Unicode tag characters
 printf '\342\200\213\n\342\200\214\n\342\200\215\n\342\200\216\n\342\200\217\n\342\200\252\n\342\200\253\n\342\200\254\n\342\200\255\n\342\200\256\n\342\201\240\n\342\201\241\n\342\201\242\n\342\201\243\n\342\201\244\n\342\201\246\n\342\201\247\n\342\201\250\n\342\201\251\n\357\273\277\n\363\240\200\n\363\240\201\n' > "$WORK/hidden.pat"
 {
-  for f in AGENTS.md CLAUDE.md CLAUDE.local.md GEMINI.md .github/copilot-instructions.md .mcp.json; do if [ -f "$f" ]; then echo "$f"; fi; done
+  for f in AGENTS.md AGENTS.override.md CLAUDE.md CLAUDE.local.md GEMINI.md .github/copilot-instructions.md .mcp.json; do if [ -f "$f" ]; then echo "$f"; fi; done
   find .agents .claude .cursor .github/hooks .github/agents .codex .gemini -type f \
     \( -name '*.md' -o -name '*.conf' -o -name '*.json' -o -name '*.sh' -o -name '*.py' -o -name '*.rules' -o -name '*.toml' -o -name '*.patterns' -o -name '*.allow' \) \
     -not -path '.agents/cache/*' -not -path '.agents/plans/*' -not -path '.agents/evals/results/*' 2>/dev/null || true
