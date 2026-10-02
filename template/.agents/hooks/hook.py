@@ -364,10 +364,15 @@ def pre_tool(tool, data, conf):
         args = tool_args(data)
         if name in SHELL_TOOLS:
             kind, value = "shell", args.get("command") or args.get("input") or ""
+            # Where the command runs, when the tool says (Codex workdir, Gemini dir_path / directory)
+            wd = args.get("workdir") or args.get("dir_path") or args.get("directory")
+            if isinstance(wd, str) and wd:
+                cwd = os.path.join(cwd, wd)
             if isinstance(value, list):   # an argv list, as in ["bash", "-lc", "<script>"]
                 value = " ".join(shlex.quote(str(v)) for v in value)
         elif name in READ_TOOLS:
-            kind, value = "read", args.get("file_path") or args.get("path") or args.get("filePath") or ""
+            kind, value = "read", (args.get("file_path") or args.get("path") or args.get("filePath")
+                                   or args.get("absolute_path") or "")
     reason = None
     if kind == "shell":
         reason = shell_denied(str(value), rules, cwd)
@@ -469,17 +474,21 @@ def post_edit(tool, data, conf):
     if tool == "copilot":
         print(json.dumps({"additionalContext": msg}))
         return 0
-    if tool == "codex":   # block on PostToolUse: the edit stays, the reason goes to the agent
-        print(json.dumps({"decision": "block", "reason": msg}))
-        return 0
-    if tool == "gemini":
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "AfterTool", "additionalContext": msg}}))
+    if tool in ("codex", "gemini"):   # added to what the agent sees; the edit and the tool's own output stay
+        ev = "PostToolUse" if tool == "codex" else "AfterTool"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": ev, "additionalContext": msg}}))
         return 0
     return 0  # cursor ignores afterFileEdit output; the stop gate reports instead
 
 
 def turn_start(tool, data, conf):
-    write_file(os.path.join(CACHE, "turn-" + session_key(data)), tree_state())
+    key = session_key(data)
+    # Codex and Gemini continue a blocked stop as a new prompt, which may fire this hook again; a fresh
+    # snapshot then would let the next stop through with verify still failing. The counter goes back
+    # to 0 on a pass, a pause, or giving up, so the next real prompt snapshots as usual.
+    if tool in ("codex", "gemini") and int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0:
+        return allow(tool, "turn-start")
+    write_file(os.path.join(CACHE, "turn-" + key), tree_state())
     return allow(tool, "turn-start")
 
 

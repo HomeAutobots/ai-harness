@@ -264,7 +264,13 @@ def cursor_render(existing, conf, enabled):
 
 def merge_hook_groups(hooks, want):
     """hooks.<Event>[] = {matcher, hooks: [...]} (Codex and Gemini, as Claude): the harness's entries
-    (by command path) leave, everything else stays, then want's groups are added. {} when empty."""
+    (by command path) leave, everything else stays, then want's groups are added. {} when empty.
+    None when there's nothing to add and nothing of the harness's to take out: the caller changes nothing."""
+    if not want and not any(isinstance(g, dict) and isinstance(g.get("hooks"), list)
+                            and any(isinstance(h, dict) and ours(h.get("command")) for h in g["hooks"])
+                            for gs in (hooks.values() if isinstance(hooks, dict) else [])
+                            for g in (gs if isinstance(gs, list) else [])):
+        return None
     out = {}
     for name, groups in (hooks if isinstance(hooks, dict) else {}).items():
         kept = []
@@ -283,6 +289,17 @@ def merge_hook_groups(hooks, want):
     for name, groups in want.items():
         out.setdefault(name, []).extend(groups)
     return out
+
+
+def bad_shape(obj):
+    """Why a hooks config can't take the harness's hooks, or "" when it can."""
+    if obj is None:
+        return ""
+    if not isinstance(obj, dict):
+        return "not a JSON object"
+    if obj.get("hooks") is not None and not isinstance(obj["hooks"], dict):
+        return "its hooks value isn't an object"
+    return ""
 
 
 def codex_cmd(event):
@@ -315,10 +332,13 @@ def codex_render(existing, conf, enabled):
     if "turn" in feats:
         want["UserPromptSubmit"] = [group("turn-start", 10)]
         want["Stop"] = [group("stop-gate", turn_t)]
+    if not isinstance(existing, (dict, type(None))) or (existing or {}).get("hooks") is not None \
+            and not isinstance(existing["hooks"], dict):
+        return existing   # not an object: the project's to fix (render reports it with codex on)
     obj = dict(existing or {})
-    if obj.get("hooks") is not None and not isinstance(obj["hooks"], dict):
-        return existing   # not an object: the project's to fix; left as it is
     hooks = merge_hook_groups(obj.get("hooks"), want)
+    if hooks is None:
+        return existing
     if hooks:
         obj["hooks"] = hooks
     else:
@@ -354,6 +374,8 @@ def gemini_hooks(conf):
 def gemini_render(existing, enabled, conf=None):
     """.gemini/settings.json: AGENTS.md as a context file, and with conf, the harness hooks. Off: the
     harness hooks leave; the context entries stay (they're harmless, and may be the project's)."""
+    if not isinstance(existing, (dict, type(None))):
+        return existing   # not an object: the project's to fix (render reports it with gemini on)
     obj = dict(existing or {})
     have = obj.get("hooks")
     # A hooks value that isn't an object is the project's to fix; it's left as it is.
@@ -361,7 +383,7 @@ def gemini_render(existing, enabled, conf=None):
         hooks = merge_hook_groups(have, gemini_hooks(conf) if enabled else {})
         if hooks:
             obj["hooks"] = hooks
-        else:
+        elif hooks is not None:
             obj.pop("hooks", None)
     if not enabled:
         return obj if existing is not None else None
@@ -508,6 +530,8 @@ def render(check):
         if err:
             errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
         elif old is not None or "gemini" in adapters:
+            if "gemini" in adapters and bad_shape(old):
+                errors.append("%s: %s, so sync can't add the harness to it; fix it, then re-run sync" % (rel, bad_shape(old)))
             settle_json(rel, gemini_render(old, "gemini" in adapters, conf), old)
 
     # Codex hooks, merged beside the project's. A tracked file in local mode is left alone; that's
@@ -522,6 +546,8 @@ def render(check):
             if "codex" in adapters:   # with codex off, a broken file of the project's own isn't sync's business
                 errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
         elif old is not None or "codex" in adapters:
+            if "codex" in adapters and bad_shape(old):
+                errors.append("%s: %s, so sync can't add the harness hooks; fix it, then re-run sync" % (rel, bad_shape(old)))
             settle_json(rel, codex_render(old, conf, "codex" in adapters), old)
 
     # Codex execpolicy rules: a file the harness owns outright
@@ -587,6 +613,8 @@ def unshare():
             new, _ = claude_render(old, conf, rules, False, prev)
         elif rel.startswith(".codex"):
             new = codex_render(old, conf, False)
+            if new == old:
+                continue   # nothing of the harness's in it (an empty file of the project's stays tracked)
         else:
             new = cursor_render(old, conf, False)
         if not new:
