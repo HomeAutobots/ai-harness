@@ -262,8 +262,129 @@ def cursor_render(existing, conf, enabled):
     return obj
 
 
-def gemini_render(existing, enabled):
+def merge_hook_groups(hooks, want):
+    """hooks.<Event>[] = {matcher, hooks: [...]} (Codex and Gemini, as Claude): the harness's entries
+    (by command path) leave, everything else stays, then want's groups are added. {} when empty.
+    None when there's nothing to add and nothing of the harness's to take out: the caller changes nothing."""
+    if not want and not any(isinstance(g, dict) and isinstance(g.get("hooks"), list)
+                            and any(isinstance(h, dict) and ours(h.get("command")) for h in g["hooks"])
+                            for gs in (hooks.values() if isinstance(hooks, dict) else [])
+                            for g in (gs if isinstance(gs, list) else [])):
+        return None
+    out = {}
+    for name, groups in (hooks if isinstance(hooks, dict) else {}).items():
+        kept = []
+        for g in groups if isinstance(groups, list) else []:
+            if not isinstance(g, dict):
+                kept.append(g)
+                continue
+            inner = g.get("hooks") or []
+            left = [h for h in inner if not (isinstance(h, dict) and ours(h.get("command")))] if isinstance(inner, list) else inner
+            if left:
+                kept.append(dict(g, hooks=left))
+            elif not inner:
+                kept.append(g)
+        if kept:
+            out[name] = kept
+    for name, groups in want.items():
+        out.setdefault(name, []).extend(groups)
+    return out
+
+
+def bad_shape(obj):
+    """Why a hooks config can't take the harness's hooks, or "" when it can."""
+    if obj is None:
+        return ""
+    if not isinstance(obj, dict):
+        return "not a JSON object"
+    if obj.get("hooks") is not None and not isinstance(obj["hooks"], dict):
+        return "its hooks value isn't an object"
+    return ""
+
+
+def codex_cmd(event):
+    """Codex runs hooks in the session's cwd, which can be a subdirectory, so the path starts at the
+    repo top (Codex's hooks docs do the same), plus this install's place in the repo."""
+    try:
+        prefix = subprocess.run(["git", "-C", ROOT, "rev-parse", "--show-prefix"], capture_output=True,
+                                text=True).stdout.strip()
+    except OSError:
+        prefix = ""
+    prefix = re.sub(r'(["\\$`])', r"\\\1", prefix)
+    return '"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/%s.agents/hooks/run" %s --tool=codex' % (prefix, event)
+
+
+def codex_render(existing, conf, enabled):
+    """.codex/hooks.json: the harness's hooks merged beside the project's. Timeouts in seconds."""
+    feats = set(conf.get("HOOKS", "").split()) if enabled else set()
+    edit_t, turn_t = budgets(conf)
+    want = {}
+
+    def group(event, timeout, matcher=None):
+        g = {"hooks": [{"type": "command", "command": codex_cmd(event), "timeout": timeout}]}
+        return dict({"matcher": matcher}, **g) if matcher else g
+    if "policy" in feats:
+        want["PreToolUse"] = [group("pre-tool", 10, "Bash")]
+    if "edit" in feats:
+        want["PostToolUse"] = [group("post-edit", edit_t, "apply_patch")]
+    if "questions" in feats:
+        want["SessionStart"] = [group("session-start", 10)]
+    if "turn" in feats:
+        want["UserPromptSubmit"] = [group("turn-start", 10)]
+        want["Stop"] = [group("stop-gate", turn_t)]
+    if not isinstance(existing, (dict, type(None))) or (existing or {}).get("hooks") is not None \
+            and not isinstance(existing["hooks"], dict):
+        return existing   # not an object: the project's to fix (render reports it with codex on)
     obj = dict(existing or {})
+    hooks = merge_hook_groups(obj.get("hooks"), want)
+    if hooks is None:
+        return existing
+    if hooks:
+        obj["hooks"] = hooks
+    else:
+        obj.pop("hooks", None)
+    if not obj:
+        return {} if existing == {} else None   # an empty file someone made stays
+    return obj
+
+
+def gemini_hooks(conf):
+    """Gemini CLI's hooks key. Timeouts in milliseconds; lifecycle events take no matcher."""
+    feats = set(conf.get("HOOKS", "").split())
+    edit_t, turn_t = budgets(conf)
+    want = {}
+
+    def group(event, seconds, matcher=None):
+        g = {"hooks": [{"type": "command", "name": "ai-harness " + event,
+                        "command": '"$GEMINI_PROJECT_DIR"/.agents/hooks/run %s --tool=gemini' % event,
+                        "timeout": seconds * 1000}]}
+        return dict({"matcher": matcher}, **g) if matcher else g
+    if "policy" in feats:
+        want["BeforeTool"] = [group("pre-tool", 10, "run_shell_command|read_file")]
+    if "edit" in feats:
+        want["AfterTool"] = [group("post-edit", edit_t, "write_file|replace")]
+    if "questions" in feats:
+        want["SessionStart"] = [group("session-start", 10)]
+    if "turn" in feats:
+        want["BeforeAgent"] = [group("turn-start", 10)]
+        want["AfterAgent"] = [group("stop-gate", turn_t)]
+    return want
+
+
+def gemini_render(existing, enabled, conf=None):
+    """.gemini/settings.json: AGENTS.md as a context file, and with conf, the harness hooks. Off: the
+    harness hooks leave; the context entries stay (they're harmless, and may be the project's)."""
+    if not isinstance(existing, (dict, type(None))):
+        return existing   # not an object: the project's to fix (render reports it with gemini on)
+    obj = dict(existing or {})
+    have = obj.get("hooks")
+    # A hooks value that isn't an object is the project's to fix; it's left as it is.
+    if (have is None or isinstance(have, dict)) and (not enabled or conf is not None):
+        hooks = merge_hook_groups(have, gemini_hooks(conf) if enabled else {})
+        if hooks:
+            obj["hooks"] = hooks
+        elif hooks is not None:
+            obj.pop("hooks", None)
     if not enabled:
         return obj if existing is not None else None
     ctx = dict(obj.get("context") or {})
@@ -402,14 +523,32 @@ def render(check):
         elif old is not None or "cursor" in adapters:
             settle_json(rel, cursor_render(old, conf, "cursor" in adapters), old)
 
-    # Gemini CLI (context file only; hooks not rendered yet)
+    # Gemini CLI: AGENTS.md as a context file, and the hooks
     rel = os.path.join(".gemini", "settings.json")
     if not skip_tracked(rel):
         old, err = read_json(os.path.join(ROOT, rel))
         if err:
             errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
         elif old is not None or "gemini" in adapters:
-            settle_json(rel, gemini_render(old, "gemini" in adapters), old)
+            if "gemini" in adapters and bad_shape(old):
+                errors.append("%s: %s, so sync can't add the harness to it; fix it, then re-run sync" % (rel, bad_shape(old)))
+            settle_json(rel, gemini_render(old, "gemini" in adapters, conf), old)
+
+    # Codex hooks, merged beside the project's. A tracked file in local mode is left alone; that's
+    # worth a warning only when the codex adapter is on.
+    rel = os.path.join(".codex", "hooks.json")
+    if local and tracked(rel):
+        if "codex" in adapters:
+            skip_tracked(rel)
+    else:
+        old, err = read_json(os.path.join(ROOT, rel))
+        if err:
+            if "codex" in adapters:   # with codex off, a broken file of the project's own isn't sync's business
+                errors.append("%s is not valid JSON (%s); fix or remove it, then re-run sync" % (rel, err))
+        elif old is not None or "codex" in adapters:
+            if "codex" in adapters and bad_shape(old):
+                errors.append("%s: %s, so sync can't add the harness hooks; fix it, then re-run sync" % (rel, bad_shape(old)))
+            settle_json(rel, codex_render(old, conf, "codex" in adapters), old)
 
     # Codex execpolicy rules: a file the harness owns outright
     rel = os.path.join(".codex", "rules", "harness.rules")
@@ -462,7 +601,8 @@ def unshare():
     rules = load_policy()
     lock, _ = read_json(LOCK)
     prev = (lock or {}).get("claude_deny", [])
-    for rel in (os.path.join(".claude", "settings.json"), os.path.join(".cursor", "hooks.json")):
+    for rel in (os.path.join(".claude", "settings.json"), os.path.join(".cursor", "hooks.json"),
+                os.path.join(".codex", "hooks.json")):
         path = os.path.join(ROOT, rel)
         if not tracked(rel):
             continue
@@ -471,6 +611,10 @@ def unshare():
             continue
         if rel.startswith(".claude"):
             new, _ = claude_render(old, conf, rules, False, prev)
+        elif rel.startswith(".codex"):
+            new = codex_render(old, conf, False)
+            if new == old:
+                continue   # nothing of the harness's in it (an empty file of the project's stays tracked)
         else:
             new = cursor_render(old, conf, False)
         if not new:
@@ -482,6 +626,21 @@ def unshare():
     for rel in (os.path.join(".github", "hooks", "harness.json"), os.path.join(".codex", "rules", "harness.rules")):
         if tracked(rel):
             print("untrack " + rel)
+    # Gemini settings: the harness hooks leave. Untracked when the context entries are all that's
+    # left; sync's MCP servers are unshare_mcp's, below.
+    rel = os.path.join(".gemini", "settings.json")
+    path = os.path.join(ROOT, rel)
+    if tracked(rel) and os.path.isfile(path) and not os.path.islink(path):
+        old, err = read_json(path)
+        if isinstance(old, dict) and not err:
+            new = gemini_render(old, False)
+            if new != old:
+                if not new or new == gemini_render({}, True):
+                    print("untrack " + rel)
+                else:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(dump_json(new))
+                    print("stripped " + rel)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import agents_render
     for rel in agents_render.marked_renders(ROOT):

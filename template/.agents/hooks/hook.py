@@ -12,13 +12,14 @@ Translates each tool's hook protocol into the harness's tool-agnostic checks:
   stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
                 anything; block with the findings until it passes (bounded retries)
 
-Usage: hook.py <event> --tool=<claude|copilot|cursor>   (JSON payload on stdin)
+Usage: hook.py <event> --tool=<claude|copilot|cursor|codex|gemini>   (JSON payload on stdin)
 
 A crashing hook must never wedge the agent: every path ends in a valid, permissive
 response unless policy says otherwise.
 """
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import re
@@ -420,8 +421,15 @@ def pre_tool(tool, data, conf):
         args = tool_args(data)
         if name in SHELL_TOOLS:
             kind, value = "shell", args.get("command") or args.get("input") or ""
+            # Where the command runs, when the tool says (Codex workdir, Gemini dir_path / directory)
+            wd = args.get("workdir") or args.get("dir_path") or args.get("directory")
+            if isinstance(wd, str) and wd:
+                cwd = os.path.join(cwd, wd)
+            if isinstance(value, list):   # an argv list, as in ["bash", "-lc", "<script>"]
+                value = " ".join(shlex.quote(str(v)) for v in value)
         elif name in READ_TOOLS:
-            kind, value = "read", args.get("file_path") or args.get("path") or args.get("filePath") or ""
+            kind, value = "read", (args.get("file_path") or args.get("path") or args.get("filePath")
+                                   or args.get("absolute_path") or "")
     reason = None
     if kind == "shell":
         reason = shell_denied(str(value), rules, cwd)
@@ -444,6 +452,13 @@ def deny(tool, reason):
         print(json.dumps({"continue": True, "permission": "deny", "user_message": reason,
                           "agent_message": reason, "userMessage": reason, "agentMessage": reason}))
         return 2
+    if tool == "codex":   # the JSON form: open Codex issues report exit 2 not enforced on some versions
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": reason}}))
+        return 0
+    if tool == "gemini":
+        print(json.dumps({"decision": "deny", "reason": reason}))
+        return 0
     sys.stderr.write(reason + "\n")
     return 2
 
@@ -470,9 +485,11 @@ def edited_files(tool, data):
         for e in args.get("edits") or []:
             if isinstance(e, dict) and e.get("file_path"):
                 files.append(e["file_path"])
-        patch = args.get("patch") or args.get("input") or ""
+        # apply_patch: Codex sends the patch text as tool_input.command, others as input or patch
+        patch = args.get("patch") or args.get("input") or args.get("command") or ""
         if isinstance(patch, str):
-            files += re.findall(r"^\*\*\* (?:Update|Add) File: (.+)$", patch, re.M)
+            files += re.findall(r"^\*\*\* (?:Update|Add) File: (.+?)\s*$", patch, re.M)
+            files += re.findall(r"^\*\*\* Move to: (.+?)\s*$", patch, re.M)
             files += re.findall(r"^\+\+\+ b/(.+)$", patch, re.M)
     out = []
     for f in files:
@@ -514,11 +531,21 @@ def post_edit(tool, data, conf):
     if tool == "copilot":
         print(json.dumps({"additionalContext": msg}))
         return 0
+    if tool in ("codex", "gemini"):   # added to what the agent sees; the edit and the tool's own output stay
+        ev = "PostToolUse" if tool == "codex" else "AfterTool"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": ev, "additionalContext": msg}}))
+        return 0
     return 0  # cursor ignores afterFileEdit output; the stop gate reports instead
 
 
 def turn_start(tool, data, conf):
-    write_file(os.path.join(CACHE, "turn-" + session_key(data)), tree_state())
+    key = session_key(data)
+    # Codex and Gemini continue a blocked stop as a new prompt, which may fire this hook again; a fresh
+    # snapshot then would let the next stop through with verify still failing. The counter goes back
+    # to 0 on a pass, a pause, or giving up, so the next real prompt snapshots as usual.
+    if tool in ("codex", "gemini") and int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0:
+        return allow(tool, "turn-start")
+    write_file(os.path.join(CACHE, "turn-" + key), tree_state())
     return allow(tool, "turn-start")
 
 
@@ -574,6 +601,9 @@ def stop_gate(tool, data, conf):
         return 0
     if tool == "cursor":
         print(json.dumps({"followup_message": reason}))
+        return 0
+    if tool in ("codex", "gemini"):   # Stop / AfterAgent: keep working, with the reason as the next prompt
+        print(json.dumps({"decision": "block", "reason": reason}))
         return 0
     sys.stderr.write(reason + "\n")
     return 2
@@ -707,6 +737,8 @@ def session_start(tool, data, conf):
     text = "\n".join(lines)
     if tool == "copilot":
         print(json.dumps({"additionalContext": text}))
+    elif tool in ("codex", "gemini"):
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     else:
         print(text)
     return 0
@@ -714,7 +746,7 @@ def session_start(tool, data, conf):
 
 def finish_allow(tool, note=""):
     if note:
-        if tool == "claude":
+        if tool in ("claude", "codex", "gemini"):
             print(json.dumps({"systemMessage": note}))
         else:
             sys.stderr.write(note + "\n")
@@ -732,11 +764,26 @@ EVENTS = {"pre-tool": (None, pre_tool), "post-edit": (None, post_edit),
 
 
 def main(argv):
-    event = argv[1] if len(argv) > 1 else ""
     tool = "claude"
     for a in argv[2:]:
         if a.startswith("--tool="):
             tool = a.split("=", 1)[1]
+    if tool != "gemini":
+        return run_event(argv, tool)
+    # Gemini CLI parses stdout as one JSON object: exactly one goes out, {} when there's nothing to say.
+    out, real = io.StringIO(), sys.stdout
+    sys.stdout = out
+    try:
+        rc = run_event(argv, tool)
+    finally:
+        sys.stdout = real
+    text = out.getvalue().strip()
+    print(text if text else "{}")
+    return rc
+
+
+def run_event(argv, tool):
+    event = argv[1] if len(argv) > 1 else ""
     conf = load_conf()
     if event not in EVENTS:
         sys.stderr.write("hook.py: unknown event %r\n" % event)
