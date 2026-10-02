@@ -12,6 +12,7 @@ must hold a reference (fixed text around it is fine, as in "Bearer ${TOKEN}"). $
 gives a default where the tool supports one.
 
   mcp_render.py check <file>     check a server file: errors on stdout, warnings on stderr
+  mcp_render.py render <tool> <file> [ADAPTERS="..."]   print one tool's entry (a debugging aid)
 """
 import json
 import os
@@ -167,6 +168,200 @@ class Server(object):
         return fmt(self.errors), fmt(self.warnings)
 
 
+# ------------------------------------------------------------------ per-tool entries
+
+FILES = {"claude": ".mcp.json", "copilot": ".mcp.json", "cursor": os.path.join(".cursor", "mcp.json"),
+         "gemini": os.path.join(".gemini", "settings.json"), "codex": os.path.join(".codex", "config.toml")}
+BARE = re.compile(r"^[A-Za-z0-9_-]+$")
+RAW_UNSAFE = re.compile("[\x7f-\x9f￾￿]")
+WHOLE_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+BEARER_REF = re.compile(r"^Bearer \$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def tq(v):
+    """A TOML basic string (JSON's escapes are TOML's too; DEL and C1 controls escaped as well)."""
+    return RAW_UNSAFE.sub(lambda m: "\\u%04x" % ord(m.group()), json.dumps(v, ensure_ascii=False))
+
+
+def tkey(k):
+    return k if BARE.match(k) else tq(k)
+
+
+def tvalue(v):
+    """A JSON value as TOML: strings, numbers, booleans, arrays, objects as inline tables (a null
+    member is left out)."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return json.dumps(v)
+    if isinstance(v, str):
+        return tq(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(tvalue(x) for x in v) + "]"
+    if isinstance(v, dict):
+        items = ["%s = %s" % (tkey(k), tvalue(x)) for k, x in v.items() if x is not None]
+        return "{ " + ", ".join(items) + " }" if items else "{}"
+    raise ValueError("no TOML for %r" % (v,))
+
+
+def _subst(value, style, dropped):
+    """value with each ${VAR} written the tool's way: as is (claude), ${env:VAR} (cursor), or ${VAR}
+    without a default (gemini). dropped gets an item when a default was left out."""
+    def rep(m):
+        if style == "claude":
+            return m.group(0)
+        if m.group(2) is not None:
+            dropped.append(m.group(1))
+        return ("${env:%s}" if style == "cursor" else "${%s}") % m.group(1)
+    return REF.sub(rep, value)
+
+
+def _json_entry(srv, style, keys):
+    """(entry, a default was dropped) for a JSON tool; keys is [(entry key, source key)] in order."""
+    out, dropped = {}, []
+    for ek, sk in keys:
+        if sk not in srv.data:
+            continue
+        v = srv.data[sk]
+        if isinstance(v, str):
+            v = _subst(v, style, dropped)
+        elif isinstance(v, list):
+            v = [_subst(x, style, dropped) for x in v]
+        elif isinstance(v, dict):
+            v = dict((k, _subst(x, style, dropped)) for k, x in v.items())
+        out[ek] = v
+    return out, bool(dropped)
+
+
+def _merge_native(entry, srv, tools):
+    for t in tools:
+        for k, v in srv.native.get(t, {}).items():
+            entry[k] = v
+    return entry
+
+
+def render(srv, tool, adapters):
+    """(entry, missing, notes) for one tool. entry: a dict for the JSON tools, the [mcp_servers.<n>]
+    table text for codex, None when the tool gets nothing; missing: fields it can't express; notes:
+    other warnings. claude and copilot share .mcp.json: either gives the entry for both."""
+    missing, notes = [], []
+    if not srv.wants(tool):
+        return None, missing, notes
+    if tool in ("claude", "copilot"):
+        on = [t for t in ("claude", "copilot") if t in adapters and srv.wants(t)] or [tool]
+        keys = [("command", "command"), ("args", "args"), ("env", "env"), ("cwd", "cwd"),
+                ("url", "url"), ("headers", "headers")]
+        entry, _ = _json_entry(srv, "claude", keys)
+        entry = dict([("type", srv.type)] + list(entry.items()))
+        if srv.tools is not None:
+            if "copilot" in on:
+                entry["tools"] = list(srv.tools)   # Copilot CLI reads it; Claude has no per-server list
+            else:
+                missing.append("tools")
+        return _merge_native(entry, srv, on), missing, notes
+    if tool == "cursor":
+        if srv.type == "stdio":
+            entry, dropped = _json_entry(srv, "cursor", [("command", "command"), ("args", "args"), ("env", "env")])
+            entry = dict([("type", "stdio")] + list(entry.items()))
+            if "cwd" in srv.data:
+                missing.append("cwd")
+        else:
+            entry, dropped = _json_entry(srv, "cursor", [("url", "url"), ("headers", "headers")])
+        if srv.tools is not None:
+            missing.append("tools")
+        if dropped:
+            missing.append("defaults in ${VAR:-default}")
+        return _merge_native(entry, srv, ["cursor"]), missing, notes
+    if tool == "gemini":
+        if srv.type == "stdio":
+            keys = [("command", "command"), ("args", "args"), ("env", "env"), ("cwd", "cwd")]
+        else:
+            keys = [("httpUrl" if srv.type == "http" else "url", "url"), ("headers", "headers")]
+        entry, dropped = _json_entry(srv, "gemini", keys)
+        if srv.tools is not None:
+            entry["includeTools"] = list(srv.tools)
+        if dropped:
+            missing.append("defaults in ${VAR:-default}")
+        return _merge_native(entry, srv, ["gemini"]), missing, notes
+    if tool == "codex":
+        return _codex(srv, notes), missing, notes
+    return None, missing, notes
+
+
+def _codex(srv, notes):
+    """The [mcp_servers.<name>] table. Codex has no ${VAR} expansion: it passes env vars by name
+    (env_vars), reads a bearer token from one (bearer_token_env_var), and header values from others
+    (env_http_headers)."""
+    d = srv.data
+    for k in ("command", "cwd", "url"):
+        if isinstance(d.get(k), str) and refs(d[k]):
+            notes.append("codex can't expand ${VAR} in %s; not rendered for codex" % k)
+            return None
+    if any(refs(a) for a in d.get("args", [])):
+        notes.append("codex can't expand ${VAR} in args; not rendered for codex")
+        return None
+    t = []
+    if srv.type == "stdio":
+        t.append(("command", d["command"]))
+        if "args" in d:
+            t.append(("args", list(d["args"])))
+        env, env_vars = {}, []
+        for k, v in d.get("env", {}).items():
+            if not refs(v):
+                env[k] = v
+            elif v == "${%s}" % k:
+                env_vars.append(k)
+            else:
+                notes.append('env.%s: codex passes variables by name only ("K": "${K}"); left out for codex' % k)
+        if env:
+            t.append(("env", env))
+        if env_vars:
+            t.append(("env_vars", env_vars))
+        if "cwd" in d:
+            t.append(("cwd", d["cwd"]))
+    else:
+        t.append(("url", d["url"]))
+        bearer, lit, envh = None, {}, {}
+        for k, v in d.get("headers", {}).items():
+            m = BEARER_REF.match(v)
+            if k.lower() == "authorization" and m and bearer is None:
+                bearer = m.group(1)
+            elif not refs(v):
+                lit[k] = v
+            elif WHOLE_REF.match(v):
+                envh[k] = WHOLE_REF.match(v).group(1)
+            else:
+                notes.append('headers.%s: codex can\'t express this (only "Bearer ${VAR}" for Authorization, or a '
+                             'whole "${VAR}" with no default); left out for codex' % k)
+        if bearer:
+            t.append(("bearer_token_env_var", bearer))
+        if lit:
+            t.append(("http_headers", lit))
+        if envh:
+            t.append(("env_http_headers", envh))
+    if srv.tools is not None:
+        t.append(("enabled_tools", list(srv.tools)))
+    table = dict(t)
+    for k, v in srv.native.get("codex", {}).items():
+        if v is None:
+            table.pop(k, None)   # null takes sync's key out
+        else:
+            table[k] = v
+    lines = ["[mcp_servers.%s]" % tkey(srv.name)]
+    for k, v in table.items():
+        try:
+            lines.append("%s = %s" % (tkey(k), tvalue(v)))
+        except ValueError:
+            notes.append("native.codex.%s: no TOML for that value; left out" % k)
+    return "\n".join(lines) + "\n"
+
+
+def tool_messages(srv, missing_by_field):
+    """One warning per field some tools can't express, naming them."""
+    return ["%s: %s: not supported by %s; they get the server without it" % (srv.shown, m, ", ".join(ts))
+            for m, ts in sorted(missing_by_field.items())]
+
+
 def _main(argv):
     if len(argv) == 3 and argv[1] == "check":
         path = argv[2]
@@ -179,6 +374,28 @@ def _main(argv):
         for e in errors:
             print(e)
         return 1 if errors else 0
+    if len(argv) >= 4 and argv[1] == "render" and argv[2] in TOOLS:
+        path = argv[3]
+        name = os.path.basename(path)
+        name = name[:-5] if name.endswith(".json") else name
+        conf = dict(a.split("=", 1) for a in argv[4:] if "=" in a)
+        adapters = (conf.get("ADAPTERS") or argv[2]).split()
+        srv = Server(name, path, path)
+        errors, warnings = srv.messages()
+        for w in warnings:
+            print("warning: " + w, file=sys.stderr)
+        if errors:
+            for e in errors:
+                print(e)
+            return 1
+        entry, missing, notes = render(srv, argv[2], adapters)
+        for m in tool_messages(srv, dict((m, [argv[2]]) for m in missing)):
+            print("warning: " + m, file=sys.stderr)
+        for n in notes:
+            print("warning: %s: %s" % (path, n), file=sys.stderr)
+        if entry is not None:
+            sys.stdout.write(entry if isinstance(entry, str) else json.dumps(entry, indent=2, ensure_ascii=False) + "\n")
+        return 0
     print(__doc__.strip().split("\n\n")[-1], file=sys.stderr)
     return 2
 

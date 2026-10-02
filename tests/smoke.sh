@@ -2670,6 +2670,61 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "native gemini trust warns as escalation" hasl "$(mc trust '{"command": "x", "native": {"gemini": {"trust": true}}}')" "native.gemini: trust: true skips gemini's confirmation for every tool this server has"
 fi
 
+echo "mcp: what each tool gets"
+if [ "$HAVE_PY" -eq 1 ]; then
+  jeq(){ python3 -c 'import json, sys; sys.exit(json.loads(sys.argv[1]) != json.loads(sys.argv[2]))' "$1" "$2"; }   # same JSON, structurally
+  mr(){ python3 "$MP" render "$@" 2>/dev/null; }
+  mw(){ { python3 "$MP" render "$@" >/dev/null; } 2>&1; }
+  printf '%s\n' '{"type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}", "GITHUB_TOKEN": "${GITHUB_TOKEN}", "LOG_LEVEL": "debug"},
+    "tools": ["search_issues", "get_issue"]}' > "$WORK/github.json"
+  printf '%s\n' '{"type": "http", "url": "https://mcp.linear.app/mcp",
+    "headers": {"Authorization": "Bearer ${LINEAR_TOKEN}", "X-Region": "eu", "X-Api-Key": "${LINEAR_KEY}", "X-Team": "${LINEAR_TEAM:-core}"}}' > "$WORK/linear.json"
+  GENV='"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}", "GITHUB_TOKEN": "${GITHUB_TOKEN}", "LOG_LEVEL": "debug"}'
+  GARGS='"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]'
+  t    "claude: stdio entry exactly"     jeq "$(mr claude "$WORK/github.json" ADAPTERS=claude)" "{\"type\": \"stdio\", $GARGS, $GENV}"
+  t    "...tools has no place in it, and that warns" hasl "$(mw claude "$WORK/github.json" ADAPTERS=claude)" "github.json: tools: not supported by claude"
+  t    "claude with copilot on: tools kept for copilot" jeq "$(mr claude "$WORK/github.json" ADAPTERS="claude copilot")" "{\"type\": \"stdio\", $GARGS, $GENV, \"tools\": [\"search_issues\", \"get_issue\"]}"
+  t    "...without a warning"            test -z "$(mw claude "$WORK/github.json" ADAPTERS="claude copilot")"
+  t    "copilot: the same .mcp.json entry" jeq "$(mr copilot "$WORK/github.json" ADAPTERS="claude copilot")" "$(mr claude "$WORK/github.json" ADAPTERS="claude copilot")"
+  t    "cursor: stdio entry exactly, \${env:VAR}" jeq "$(mr cursor "$WORK/github.json")" "{\"type\": \"stdio\", $GARGS, \"env\": {\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"\${env:GITHUB_TOKEN}\", \"GITHUB_TOKEN\": \"\${env:GITHUB_TOKEN}\", \"LOG_LEVEL\": \"debug\"}}"
+  t    "...and tools warns"              hasl "$(mw cursor "$WORK/github.json")" "tools: not supported by cursor"
+  t    "gemini: stdio entry exactly, includeTools" jeq "$(mr gemini "$WORK/github.json")" "{$GARGS, $GENV, \"includeTools\": [\"search_issues\", \"get_issue\"]}"
+  X="$(mr codex "$WORK/github.json")"
+  exp="$(printf '%s\n' '[mcp_servers.github]' 'command = "npx"' 'args = ["-y", "@modelcontextprotocol/server-github"]' 'env = { LOG_LEVEL = "debug" }' 'env_vars = ["GITHUB_TOKEN"]' 'enabled_tools = ["search_issues", "get_issue"]')"
+  t    "codex: stdio table exactly"      test "$X" = "$exp"
+  t    "...a renamed variable can't be expressed, and warns" hasl "$(mw codex "$WORK/github.json")" "github.json: env.GITHUB_PERSONAL_ACCESS_TOKEN: codex passes variables by name only (\"K\": \"\${K}\"); left out for codex"
+  HD='"Authorization": "Bearer ${LINEAR_TOKEN}", "X-Region": "eu", "X-Api-Key": "${LINEAR_KEY}"'
+  t    "claude: http entry exactly, default kept" jeq "$(mr claude "$WORK/linear.json")" "{\"type\": \"http\", \"url\": \"https://mcp.linear.app/mcp\", \"headers\": {$HD, \"X-Team\": \"\${LINEAR_TEAM:-core}\"}}"
+  t    "cursor: http entry exactly, no type" jeq "$(mr cursor "$WORK/linear.json")" '{"url": "https://mcp.linear.app/mcp", "headers": {"Authorization": "Bearer ${env:LINEAR_TOKEN}", "X-Region": "eu", "X-Api-Key": "${env:LINEAR_KEY}", "X-Team": "${env:LINEAR_TEAM}"}}'
+  t    "...the default dropped, with a warning" hasl "$(mw cursor "$WORK/linear.json")" "linear.json: defaults in \${VAR:-default}: not supported by cursor"
+  t    "gemini: http is httpUrl"         jeq "$(mr gemini "$WORK/linear.json")" "{\"httpUrl\": \"https://mcp.linear.app/mcp\", \"headers\": {$HD, \"X-Team\": \"\${LINEAR_TEAM}\"}}"
+  X="$(mr codex "$WORK/linear.json")"
+  exp="$(printf '%s\n' '[mcp_servers.linear]' 'url = "https://mcp.linear.app/mcp"' 'bearer_token_env_var = "LINEAR_TOKEN"' 'http_headers = { X-Region = "eu" }' 'env_http_headers = { X-Api-Key = "LINEAR_KEY" }')"
+  t    "codex: http table exactly"       test "$X" = "$exp"
+  t    "...a default can't be expressed, and warns" hasl "$(mw codex "$WORK/linear.json")" "headers.X-Team: codex can't express"
+  if python3 -c 'import tomllib' 2>/dev/null; then
+    t  "codex: valid TOML"               python3 -c 'import sys, tomllib; d = tomllib.loads(sys.argv[1] + "\n" + sys.argv[2]); sys.exit(d["mcp_servers"]["linear"]["env_http_headers"] != {"X-Api-Key": "LINEAR_KEY"})' "$(mr codex "$WORK/github.json")" "$X"
+  fi
+  printf '%s\n' '{"type": "sse", "url": "https://x.example/sse"}' > "$WORK/events.json"
+  t    "claude: sse keeps its type"      jeq "$(mr claude "$WORK/events.json")" '{"type": "sse", "url": "https://x.example/sse"}'
+  t    "cursor: sse has no type"         jeq "$(mr cursor "$WORK/events.json")" '{"url": "https://x.example/sse"}'
+  t    "gemini: sse is url"              jeq "$(mr gemini "$WORK/events.json")" '{"url": "https://x.example/sse"}'
+  printf '%s\n' '{"command": "run", "args": ["--home", "${HOME}"], "cwd": "tools"}' > "$WORK/refarg.json"
+  t    "cursor: cwd can't be expressed"  hasl "$(mw cursor "$WORK/refarg.json")" "cwd: not supported by cursor"
+  t    "cursor: \${VAR} in args too"     jeq "$(mr cursor "$WORK/refarg.json")" '{"type": "stdio", "command": "run", "args": ["--home", "${env:HOME}"]}'
+  t    "codex: a reference in args isn't rendered" test -z "$(mr codex "$WORK/refarg.json")"
+  t    "...and says why"                 hasl "$(mw codex "$WORK/refarg.json")" "refarg.json: codex can't expand \${VAR} in args; not rendered for codex"
+  printf '%s\n' '{"command": "x", "native": {"claude": {"timeout": 5}, "codex": {"startup_timeout_sec": 20, "enabled_tools": ["a"], "cwd": null}}, "cwd": "d", "tools": ["b"]}' > "$WORK/nat.json"
+  t    "native keys merge into the entry" jeq "$(mr claude "$WORK/nat.json" ADAPTERS=claude)" '{"type": "stdio", "command": "x", "cwd": "d", "timeout": 5}'
+  X="$(mr codex "$WORK/nat.json")"
+  t    "codex: native keys override sync's, null removes one" test "$X" = "$(printf '%s\n' '[mcp_servers.nat]' 'command = "x"' 'enabled_tools = ["a"]' 'startup_timeout_sec = 20')"
+  printf '%s\n' '{"command": "x", "targets": ["codex"]}' > "$WORK/tgt.json"
+  t    "a tool the targets leave out gets nothing" test -z "$(mr claude "$WORK/tgt.json")"
+  printf '%s\n' '{"command": "x"}' > "$WORK/a.b.json"
+  t    "codex: a name that isn't a bare key is quoted" test "$(mr codex "$WORK/a.b.json" | head -1)" = '[mcp_servers."a.b"]'
+fi
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
