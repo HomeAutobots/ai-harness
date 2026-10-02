@@ -601,6 +601,14 @@ bash "$DEST/.agents/bin/sync"
 if [ "$IN_GIT" -eq 1 ]; then
   (cd "$DEST" && bash .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
 fi
+# feature-driven: approvals count only when fdd approve recorded them in the git dir (0.3.0). The
+# first person-run install (or fdd approve) in a clone records what's already there, and lists it.
+case " $WORKFLOWS " in *" feature-driven "*)
+  if [ "$IN_GIT" -eq 1 ] && command -v python3 >/dev/null 2>&1 && wp="$(agents_resolve workflows feature-driven)" \
+     && grep -q '^def cmd_adopt' "$wp/fdd_tools.py" 2>/dev/null; then   # an older personal pack has no adopt
+    { python3 "$wp/fdd_tools.py" adopt "$DEST" 2>&1 || true; } | sed 's/^/install: /'
+  fi ;;
+esac
 
 if { [ -n "$MIGRATED" ] || [ "$SET_ASIDE" -gt 0 ]; } && [ "$MODE" = team ]; then
   say "moved the harness to the library layout (see CHANGELOG.md). Commit what git status shows:$MIGRATED"

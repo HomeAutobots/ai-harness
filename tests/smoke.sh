@@ -9,6 +9,7 @@ WORK="$(mktemp -d)"
 trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
+unset CLAUDECODE GEMINI_CLI CURSOR_AGENT   # the suite plays the human: fdd approve refuses in an agent's shell
 
 PASS=0; FAIL=0; SKIP=0
 ok()  { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
@@ -1294,6 +1295,157 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_fdd
+
+grp_fdd_bypass() {   # pilot 2's bypasses: same-turn commits (issue 1) and self-approval (issue 3)
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "feature-driven: same-turn commits and self-approval"
+  has(){ printf '%s' "$1" | grep -qF -- "$2"; }
+  B=$(repo fddbypass)
+  mkdir -p "$B/src"; printf 'int a;\n' > "$B/src/a.cpp"; commit "$B" base
+  "$HARNESS/install.sh" --team --workflow feature-driven "$B" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$B/.agents/checks/$tier.sh"; done
+  commit "$B" harness
+  BD="$B/.agents/fdd"; BX="$B/.agents/commands/fdd"; BR="$B/.git/ai-harness/fdd-approvals"
+  t    "no feature list: the install only marks the clone adopted" bash -c "test \"\$(cat '$BR')\" = '#adopted'"
+  S='{"session_id":"b1"}'
+  hook "$B" turn-start claude "$S" >/dev/null 2>&1
+  printf 'int b;\n' >> "$B/src/a.cpp"; (cd "$B" && git commit -qam tweak)
+  trc "absence: no feature list, a same-turn commit passes the stop gate" 0 hook "$B" stop-gate claude "$S"
+  mkdir -p "$BD/designs"
+  printf '# Features\n\n## Sales\n### FS-1 Making a sale\n- F-1 Calculate the total of a sale\n- F-2 Apply a discount to a sale line\n' > "$BD/features.md"
+  "$BX" approve list >/dev/null
+  t    "fdd approve records the line in the git dir" bash -c "grep -q \"\$(tail -1 '$BD/approvals')\" '$BR'"
+  t    "...as it wrote it, once this clone has adopted" bash -c "test \"\$(head -1 '$BR')\" = '#adopted' && grep -q '^list	-	' '$BR'"
+  # Issue 1: the pilot's repro, a doing task with no design, committed in the same turn.
+  (cd "$B" && .agents/bin/tasks new f-1 "F1" >/dev/null && .agents/bin/tasks add f-1 "F-1: total" >/dev/null && .agents/bin/tasks set f-1 T1 doing >/dev/null)
+  printf '# F-1\nAdd the lines.\n' > "$BD/designs/F-1.md"
+  hook "$B" turn-start claude "$S" >/dev/null 2>&1
+  printf 'int c;\n' >> "$B/src/a.cpp"
+  trc  "uncommitted: no design approval fails" 1 "$B/.agents/bin/verify"
+  (cd "$B" && git commit -qam "tweak")
+  trc  "committed: plain verify sees a clean tree" 0 "$B/.agents/bin/verify"
+  out="$(hook "$B" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "same-turn commit: the stop gate still blocks" bash -c "test $rc = 2"
+  t    "...with the design finding"    has "$out" "src/a.cpp:3: error: [fdd-no-design] building F-1, but its design isn't approved"
+  t    "verify --since judges the commits" has "$("$B/.agents/bin/verify" --since=HEAD~1 || true)" "[fdd-no-design]"
+  trc  "verify --since needs a commit" 3 "$B/.agents/bin/verify" --since=no-such-rev
+  hook "$B" turn-start claude '{"session_id":"b2"}' >/dev/null 2>&1
+  (cd "$B" && .agents/bin/tasks set f-1 T1 todo >/dev/null)
+  printf 'int d;\n' >> "$B/src/a.cpp"; (cd "$B" && git -c core.hooksPath=/dev/null commit -qam "skip hooks")
+  t    "a commit that skips git hooks is judged too" has "$(hook "$B" stop-gate claude '{"session_id":"b2"}' 2>&1 || true)" "[fdd-untraced] this change (counting 1 commit since"
+  hook "$B" turn-start claude '{"session_id":"b3"}' >/dev/null 2>&1
+  printf 'int e;\n' >> "$B/src/a.cpp"; (cd "$B" && git add -A && git -c core.hooksPath=/dev/null commit -q --amend --no-edit)
+  t    "an amend in the turn is judged (the whole commit)" has "$(hook "$B" stop-gate claude '{"session_id":"b3"}' 2>&1 || true)" "src/a.cpp:4: error: [fdd-untraced]"
+  hook "$B" turn-start claude '{"session_id":"b4"}' >/dev/null 2>&1
+  printf 'int f;\n' >> "$B/src/a.cpp"; (cd "$B" && git -c core.hooksPath=/dev/null commit -qam "more")
+  (cd "$B" && .agents/bin/tasks set f-1 T1 "done" "$(git rev-parse --short HEAD)" >/dev/null && .agents/bin/tasks ask f-1 T1 --gate=impl "Committed; please inspect." >/dev/null)
+  trc  "a sign-off question doesn't pause over unapproved commits" 2 hook "$B" stop-gate claude '{"session_id":"b4"}'
+  (cd "$B" && env -u CLAUDECODE "$BX" approve design F-1 >/dev/null)
+  trc  "approved design, task done with the turn's commit: passes" 0 hook "$B" stop-gate claude '{"session_id":"b4"}'
+  # A pause (or a give-up) carries the turn's commits to the next stop instead of dropping them.
+  hook "$B" turn-start claude '{"session_id":"b5"}' >/dev/null 2>&1
+  (cd "$B" && .agents/bin/tasks add f-1 "F-2: discount" >/dev/null && .agents/bin/tasks set f-1 T2 doing >/dev/null)
+  printf 'int g;\n' >> "$B/src/a.cpp"; (cd "$B" && git -c core.hooksPath=/dev/null commit -qam "discount")
+  (cd "$B" && .agents/bin/tasks ask f-1 T2 "Round per line or per sale?" >/dev/null)
+  trc  "a question on a blocked task still pauses" 0 hook "$B" stop-gate claude '{"session_id":"b5"}'
+  t    "...and the turn's commits stay pending" bash -c "ls '$B'/.agents/cache/pending-* >/dev/null 2>&1"
+  hook "$B" turn-start claude '{"session_id":"b5"}' >/dev/null 2>&1
+  (cd "$B" && .agents/bin/tasks answer f-1 T2 "Per line" >/dev/null)
+  t    "the next stop judges them"     has "$(hook "$B" stop-gate claude '{"session_id":"b5"}' 2>&1 || true)" "[fdd-no-design] building F-2, but it has no design"
+  (cd "$B" && .agents/bin/tasks set f-1 T2 todo >/dev/null)
+  rm -f "$B"/.agents/cache/pending-*
+  # A merge of the base brings in commits the agent didn't make: they aren't the turn's.
+  base_b="$(git -C "$B" symbolic-ref --short HEAD)"
+  git -C "$B" checkout -q -b feat
+  git -C "$B" checkout -q "$base_b"; printf 'int t;\n' > "$B/src/team.cpp"; git -C "$B" add src/team.cpp; git -C "$B" -c core.hooksPath=/dev/null commit -qm teammate; git -C "$B" checkout -q feat
+  hook "$B" turn-start claude '{"session_id":"b6"}' >/dev/null 2>&1
+  (cd "$B" && git -c core.hooksPath=/dev/null merge -q --no-edit "$base_b" >/dev/null 2>&1)
+  trc  "a merge of the base in the turn isn't judged as the agent's" 0 hook "$B" stop-gate claude '{"session_id":"b6"}'
+  # A done task traces only the files its own commits touched.
+  hook "$B" turn-start claude '{"session_id":"b7"}' >/dev/null 2>&1
+  printf 'int h;\n' >> "$B/src/a.cpp"; (cd "$B" && git -c core.hooksPath=/dev/null commit -qam "more again")
+  (cd "$B" && .agents/bin/tasks add f-1 "F-1: more" >/dev/null && .agents/bin/tasks set f-1 T3 "done" "$(git rev-parse --short HEAD)" >/dev/null)
+  printf 'int i;\n' > "$B/src/b.cpp"; (cd "$B" && git add src/b.cpp && git -c core.hooksPath=/dev/null commit -qm "other")
+  t    "...not another commit in the same turn" has "$(hook "$B" stop-gate claude '{"session_id":"b7"}' 2>&1 || true)" "src/b.cpp:1: error: [fdd-untraced]"
+  git -C "$B" checkout -q "$base_b"; printf 'int u;\n' > "$B/src/team2.cpp"; git -C "$B" add src/team2.cpp; git -C "$B" -c core.hooksPath=/dev/null commit -qm teammate2; git -C "$B" checkout -q feat
+  hook "$B" turn-start claude '{"session_id":"b8"}' >/dev/null 2>&1
+  (cd "$B" && git -c core.hooksPath=/dev/null rebase -q "$base_b" >/dev/null 2>&1)
+  trc  "a rebase onto the base copies commits, it doesn't make new work" 0 hook "$B" stop-gate claude '{"session_id":"b8"}'
+  hook "$B" turn-start claude '{"session_id":"b9"}' >/dev/null 2>&1
+  printf 'int v;\n' >> "$B/src/a.cpp"; (cd "$B" && git -c core.hooksPath=/dev/null commit -qam "then leave")
+  git -C "$B" checkout -q -b next "$base_b"
+  t    "commits on a branch the turn then left are judged" has "$(hook "$B" stop-gate claude '{"session_id":"b9"}' 2>&1 || true)" "[fdd-untraced]"
+  git -C "$B" checkout -q feat
+  rm -rf "$B/.agents/plans/f-1"
+  # Issue 3: the CLI refuses in an agent's shell, however the command is spelled.
+  before="$(cksum < "$BD/approvals")"
+  for v in CLAUDECODE GEMINI_CLI CURSOR_AGENT; do
+    trc "fdd approve refuses with $v set" 2 env "$v=1" "$BX" approve design F-2
+  done
+  out="$(cd "$B" && CLAUDECODE=1 bash -c 'python3 .agents/builtin/workflows/feature-driven/fdd_tools.py "appr""ove" "$(pwd)" list' 2>&1)" && rc=0 || rc=$?
+  t    "the pilot's spliced approve is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'started by Claude Code (CLAUDECODE is set)'" _ "$out"
+  for c in 'c=approve; .agents/commands/fdd $c list' 'printf approve | xargs -I{} .agents/commands/fdd {} list' \
+           "python3 -c \"import subprocess; subprocess.run(['.agents/commands/fdd','appr'+'ove','list'])\""; do
+    (cd "$B" && CLAUDECODE=1 bash -c "$c" >/dev/null 2>&1) || true
+  done
+  t    "...and so are a variable, xargs, and a python subprocess" test "$(cksum < "$BD/approvals")" = "$before"
+  t    "the approve policy reason says what it covers" grep -q 'catches the usual ways to run fdd approve; fdd itself also refuses in an agent shell' "$B/.agents/policy.conf"
+  # A line written straight into approvals (Edit tool, echo, python) doesn't count and is flagged.
+  printf '# F-2\nPercent off.\n' > "$BD/designs/F-2.md"
+  python3 -c "import hashlib,sys; d=open(sys.argv[1],'rb').read(); print('design\tF-2\tt\t2026-10-02\t'+hashlib.sha256(d+b'\0').hexdigest())" "$BD/designs/F-2.md" >> "$BD/approvals"
+  out="$(hook "$B" post-edit claude "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$BD/approvals\"}}" 2>&1)" && rc=0 || rc=$?
+  trc  "an Edit-tool write to approvals is blocked right away" 0 test "$rc" = 2
+  t    "...with the reason"            has "$out" ".agents/fdd/approvals:3: error: [fdd-approval-unrecorded] this design F-2 approval wasn't written by fdd approve, so it doesn't count"
+  out="$("$B/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+  t    "verify: a forged approval is a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q '^BLOCK verify turn' && printf '%s' \"\$1\" | grep -qF 'ask them to run .agents/commands/fdd approve design F-2'" _ "$out"
+  t    "status shows it doesn't count" bash -c "'$BX' status | grep -qx 'not counted, not written by fdd approve: .agents/fdd/approvals:3 design F-2'"
+  t    "...and the feature isn't design-approved" bash -c "'$BX' status F-2 | grep -q 'F-2 Apply a discount to a sale line: 41% designed'"
+  (cd "$B" && .agents/bin/tasks new f-2 "F2" >/dev/null && .agents/bin/tasks add f-2 "F-2: discount" >/dev/null && .agents/bin/tasks set f-2 T1 doing >/dev/null)
+  printf 'int g;\n' >> "$B/src/a.cpp"
+  t    "the gate ignores the forged line" has "$("$B/.agents/bin/verify" || true)" "[fdd-no-design] building F-2, but its design isn't approved"
+  edit "$BD/approvals" '$d'
+  cp "$BD/approvals" "$WORK/approvals.keep"
+  edit "$BD/approvals" '1s/[0-9][0-9][0-9][0-9]-/1999-/'
+  t    "a recorded line edited by hand stops counting" has "$("$B/.agents/bin/verify" || true)" ".agents/fdd/approvals:1: error: [fdd-approval-unrecorded] this list approval"
+  cp "$WORK/approvals.keep" "$BD/approvals"
+  git -C "$B" checkout -q src/a.cpp; rm -rf "$B/.agents/plans/f-2"
+  trc  "restored: verify passes"       0 "$B/.agents/bin/verify"
+  # Upgrade: an install from before the record adopts what's there once, and says so.
+  mv "$BR" "$BR.bak"
+  trc  "no record yet: earlier approvals don't count" 2 "$B/.agents/bin/verify" --tier=full
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team "$B" 2>&1)"
+  t    "an agent-run upgrade doesn't adopt them" bash -c "printf '%s' \"\$1\" | grep -q 'install: the 2 FDD approvals in .agents/fdd/approvals aren.t recorded yet' && test ! -e '$BR'" _ "$out"
+  out="$("$HARNESS/install.sh" --team "$B" 2>&1)"
+  t    "upgrade records the approvals already there, and lists them" has "$out" "install: recorded the 2 FDD approvals already in .agents/fdd/approvals as yours: list, design F-1. Delete any line you didn't approve."
+  trc  "...so they count again"        0 "$B/.agents/bin/verify" --tier=full
+  tnot "...once: the next upgrade says nothing" bash -c "'$HARNESS/install.sh' --team '$B' 2>&1 | grep -q 'FDD approvals'"
+  python3 -c "import hashlib,sys; d=open(sys.argv[1],'rb').read(); print('design\tF-2\tt\t2026-10-02\t'+hashlib.sha256(d+b'\0').hexdigest())" "$BD/designs/F-2.md" >> "$BD/approvals"
+  tnot "a line written after that is never adopted" bash -c "'$HARNESS/install.sh' --team '$B' 2>&1 | grep -q 'FDD approvals'"
+  trc  "...and still blocks"           2 "$B/.agents/bin/verify" --tier=full
+  edit "$BD/approvals" '$d'
+  trc  "the policy blocks the adopt subcommand too" 2 policy "$B" test "python3 .agents/builtin/workflows/feature-driven/fdd_tools.py adopt ."
+  rm -f "$BR"
+  t    "if install.sh couldn't adopt, a person's first fdd approve does" has "$("$BX" approve list)" "also recorded the 2 FDD approvals already in .agents/fdd/approvals as yours: list, design F-1."
+  trc  "...and they count"             0 "$B/.agents/bin/verify" --tier=full
+  # Absence: without the pack, --since and same-turn commits change nothing.
+  N=$(repo fddbypass-none)
+  "$HARNESS/install.sh" --team "$N" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$N/.agents/checks/$tier.sh"; done
+  commit "$N" harness
+  hook "$N" turn-start claude "$S" >/dev/null 2>&1
+  printf 'x\n' >> "$N/README.md"; commit "$N" more
+  trc  "absence: no pack, a same-turn commit passes the stop gate" 0 hook "$N" stop-gate claude "$S"
+  trc  "absence: no pack, verify --since is quiet" 0 "$N/.agents/bin/verify" --since=HEAD~1
+  tnot "absence: no pack, no approval record"   test -e "$N/.git/ai-harness/fdd-approvals"
+  # Any workflow: a sign-off question on a done task no longer pauses over the turn's commits.
+  printf '#!/usr/bin/env bash\nif grep -q BAD "$AGENTS_ROOT/README.md"; then echo "README.md:1: error: bad"; exit 1; fi\n' > "$N/.agents/checks/turn.sh"
+  (cd "$N" && .agents/bin/tasks new s "Sign-off" >/dev/null && .agents/bin/tasks add s "work" >/dev/null && .agents/bin/tasks set s T1 "done" abc1234 >/dev/null && .agents/bin/tasks ask s T1 --gate=impl "Please sign off." >/dev/null)
+  hook "$N" turn-start claude '{"session_id":"n2"}' >/dev/null 2>&1
+  printf 'BAD\n' >> "$N/README.md"; commit "$N" bad
+  trc  "a done task's sign-off doesn't pause over a commit made this turn" 2 hook "$N" stop-gate claude '{"session_id":"n2"}'
+fi
+}
+group grp_fdd_bypass
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

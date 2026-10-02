@@ -5,7 +5,7 @@ description: Feature-Driven Development (FDD) with local artifacts. Model, featu
 
 # Feature-driven change
 
-Everything FDD lives in `FDD_DIR`, set in `.agents/harness.conf` (default `.agents/fdd/`): `model.md`, `features.md`, `designs/<ID>.md`, and `approvals`. It's the developer's working material, local and never committed; the team's shared docs live elsewhere. `verify` enforces the mechanics (list format, trace, design before build, no private IDs in shared code). This skill covers the judgment. Each gate runs through the `validate` skill; gates in `FDD_ASK` end with a check-in, where the human records approval with `.agents/commands/fdd approve ...`. You can't run that command; ask with `tasks ask <slug> <T-id> --gate=<g>` and wait (`--gate=plan` for the list and design check-ins, `--gate=impl` for the inspection). Naming the command in your question is fine if the question is one line in single quotes with no backticks and starts with words, not the command, e.g. `tasks ask f-12-sale-total T1 --gate=plan 'Design ready. Please run: .agents/commands/fdd approve design F-12'`.
+Everything FDD lives in `FDD_DIR`, set in `.agents/harness.conf` (default `.agents/fdd/`): `model.md`, `features.md`, `designs/<ID>.md`, and `approvals`. It's the developer's working material, local and never committed; the team's shared docs live elsewhere. `verify` enforces the mechanics (list format, trace, design before build, no private IDs in shared code). This skill covers the judgment. Each gate runs through the `validate` skill; gates in `FDD_ASK` end with a check-in, where the human records approval with `.agents/commands/fdd approve ...`. You can't run that command (it refuses in your shell, and a line you write into `approvals` yourself doesn't count); ask with `tasks ask <slug> <T-id> --gate=<g>` and wait (`--gate=plan` for the list and design check-ins, `--gate=impl` for the inspection). Naming the command in your question is fine if the question is one line in single quotes with no backticks and starts with words, not the command, e.g. `tasks ask f-12-sale-total T1 --gate=plan 'Design ready. Please run: .agents/commands/fdd approve design F-12'`.
 
 Start every session with `.agents/commands/fdd status` and `.agents/bin/tasks list`: they show the approved list, each feature's milestone, and the plan in progress. That's the state; pick up from there.
 
@@ -29,7 +29,7 @@ Write `designs/F-12.md`: approach, entities and files touched, and a test plan (
 ## 5. Build by feature, then check-in 3
 - Tests from the design's test plan first, then the code. `verify` passes.
 - Never write a private feature ID in code, tests, docs, commit messages, branch summaries (`gitflow start PROJ-123 <summary>`), plan titles, or PR text; use the ticket key or nothing. `verify` and the commit hook catch code and messages; the rest is on you.
-- Commit, record it (`tasks set <slug> <T-id> done <sha>`), validate the change, then ask for `fdd approve inspect F-12` (the task stays done while you wait). The feature is done after that.
+- Commit, record it (`tasks set <slug> <T-id> done <sha>`; the stop gate judges what you committed this turn, traced through that task), validate the change, then ask for `fdd approve inspect F-12` (the task stays done while you wait). The feature is done after that.
 
 ## Report
 Which features moved and to what milestone (`fdd status`), and anything in a design you couldn't build.
