@@ -4,7 +4,8 @@
 #
 # Renders the managed blocks in AGENTS.md, renders skills from the libraries into .agents/skills/
 # (.agents/lib/libraries.sh resolves them), and maintains tool adapters (instructions, skill
-# mirrors, hooks, permissions). Also the CI gate for harness integrity.
+# mirrors, hooks, permissions, library agents and MCP servers). Also the CI gate for harness
+# integrity.
 #   .agents/bin/sync                                   apply
 #   .agents/bin/sync --check                           change nothing; exit 1 if anything is out
 #                                                      of date, a pinned skill changed, or an
@@ -314,6 +315,13 @@ AGENT_RENDERS="$WORK/agents.renders"   # from harness.py agents: shared|personal
 AGENTS_DONE=0      # harness.py agents finished, so AGENT_RENDERS is complete
 AGENT_FINDINGS=0   # --check: an agent file has errors (sync can't fix those)
 AGENT_FAILED=0     # --check: rendering agents didn't finish
+MCP_ITEMS="$WORK/mcp.items"   # every library's MCP servers (and active packs'), in winning order
+MCP_SET="$WORK/mcp.set"       # what gets rendered: name<TAB>path<TAB>library
+MCP_FILES="$WORK/mcp.files"   # from harness.py mcp: the configs holding sync's servers
+: > "$MCP_FILES"
+MCP_DONE=0         # harness.py mcp finished, so MCP_FILES is complete
+MCP_FINDINGS=0     # --check: a server file or a config has errors (sync can't fix those)
+MCP_FAILED=0       # --check: rendering MCP servers didn't finish
 
 # A skill someone put straight into .agents/skills/ moves to the project library: that dir is
 # rendered now, and sync would otherwise remove what it didn't make.
@@ -396,6 +404,17 @@ compute_agent_set() {
     END { for (i = 1; i <= k; i++) print held[i] }' > "$AGENT_ITEMS"
   awk -F '\t' '!seen[$1]++' "$AGENT_ITEMS" > "$AGENT_SET"
 }
+# The MCP servers to render, ordered the same way.
+compute_mcp_set() {
+  if [ "$TEAM" -eq 1 ]; then agents_items mcp team; else agents_items mcp; fi | awk -F '\t' -v team="$TEAM" '
+    team && ($3 == "personal" || $3 == "personal-listed") { held[++k] = $0; next }
+    { print }
+    END { for (i = 1; i <= k; i++) print held[i] }' > "$MCP_ITEMS"
+  awk -F '\t' '!seen[$1]++' "$MCP_ITEMS" > "$MCP_SET"
+}
+kind_label() {  # kind_label <kind>: one item of that kind, in words
+  case "$1" in mcp) printf 'MCP server' ;; *) printf '%s' "${1%s}" ;; esac
+}
 
 # keep_missing: each render that may come from a missing project-listed library (from_missing)
 # stays as it is: it joins the set as "kept", in place of what would replace it. A winner from the
@@ -439,11 +458,11 @@ keep_missing() {
 
 # The same name in two libraries: the higher one wins, with a warning naming both. Workflows and
 # stacks only matter while they're active.
-# Skills and agents go by their items files, so in team mode a personal one that loses to a shared
-# one gets its own message (once per name) instead.
+# Skills, agents, and MCP servers go by their items files, so in team mode a personal one that
+# loses to a shared one gets its own message (once per name) instead.
 report_shadows() {  # report_shadows <kind> <ALL | active names>
   local n ws wp lsrc lpath told=" " items=""
-  case "$1" in skills) items="$SKILL_ITEMS" ;; agents) items="$AGENT_ITEMS" ;; esac
+  case "$1" in skills) items="$SKILL_ITEMS" ;; agents) items="$AGENT_ITEMS" ;; mcp) items="$MCP_ITEMS" ;; esac
   if [ -n "$items" ]; then
     awk -F '\t' '($1 in wp) { printf "%s\t%s\t%s\t%s\t%s\n", $1, ws[$1], wp[$1], $3, $2; next }
                  { wp[$1] = $2; ws[$1] = $3 }' "$items"
@@ -456,13 +475,13 @@ report_shadows() {  # report_shadows <kind> <ALL | active names>
       case "$1:$lpath" in "skills:"*/workflows/"$n"/skill) continue ;; esac
     fi
     if [ "$TEAM" -eq 1 ] && [ "$1" = workflows ] && personal "$ws" && ! personal "$lsrc"; then continue; fi
-    if [ "$TEAM" -eq 1 ] && { [ "$1" = skills ] || [ "$1" = agents ]; } && personal "$lsrc" && ! personal "$ws"; then
+    if [ "$TEAM" -eq 1 ] && { [ "$1" = skills ] || [ "$1" = agents ] || [ "$1" = mcp ]; } && personal "$lsrc" && ! personal "$ws"; then
       case "$told" in *" $n "*) continue ;; esac
       told="$told$n "
-      warn "your personal ${1%s} '$n' isn't used in team mode ($(shown "$lpath")): the repo commits the shared one from $ws, so everyone gets the same. Give yours another name to use both."
+      warn "your personal $(kind_label "$1") '$n' isn't used in team mode ($(shown "$lpath")): the repo commits the shared one from $ws, so everyone gets the same. Give yours another name to use both."
       continue
     fi
-    warn "${1%s} '$n' from the $ws library ($(shown "$wp")) shadows the one in $lsrc ($(shown "$lpath"))"
+    warn "$(kind_label "$1") '$n' from the $ws library ($(shown "$wp")) shadows the one in $lsrc ($(shown "$lpath"))"
   done
 }
 
@@ -629,13 +648,15 @@ report_shadows workflows "${WORKFLOWS:-}"
 report_shadows stacks "${STACKS:-}"
 compute_agent_set
 report_shadows agents ALL
+compute_mcp_set
+report_shadows mcp ALL
 # Something shaped like an item that isn't one (an empty pack directory, a skill without SKILL.md)
 # is ignored by the resolver, so it can't shadow a working one; say so. Packs only while active.
 report_unusable() {  # report_unusable <kind> <ALL | active names> <what it lacks>
   local n p
   agents_unusable "$1" | while IFS="$TAB" read -r n p _; do
     [ "$2" = ALL ] || case " $2 " in *" $n "*) ;; *) continue ;; esac
-    warn "$(shown "$p") isn't a usable ${1%s} ($3); ignored"
+    warn "$(shown "$p") isn't a usable $(kind_label "$1") ($3); ignored"
   done
 }
 report_unusable skills ALL "no SKILL.md"
@@ -908,10 +929,33 @@ if [ -n "$PY" ]; then
     if [ -n "$AOUT" ]; then CHANGED=1; fi
     if [ "$AG_RC" -eq 5 ]; then warn "some library agents weren't rendered (see the errors above)"; fi
   fi
+  # Library MCP servers, merged into each tool's config beside servers added by hand. The same
+  # return codes; the agent set is there to warn about an agent naming a server nothing has.
+  MC_RC=0
+  rm -f "$MCP_FILES"
+  if [ "$CHECK" -eq 1 ]; then
+    MOUT="$(AGENTS_LIBRARY_MISSING="$agmiss" "$PY" .agents/lib/harness.py mcp --check "$MCP_SET" "$MCP_FILES" "$AGENT_SET")" || MC_RC=$?
+  else
+    MOUT="$(AGENTS_LIBRARY_MISSING="$agmiss" "$PY" .agents/lib/harness.py mcp "$MCP_SET" "$MCP_FILES" "$AGENT_SET")" || MC_RC=$?
+  fi
+  if [ -n "$MOUT" ]; then printf '%s\n' "$MOUT"; fi
+  case "$MC_RC" in 0|1|5) if [ -f "$MCP_FILES" ]; then MCP_DONE=1; fi ;; esac
+  if [ "$MCP_DONE" -eq 0 ]; then
+    : > "$MCP_FILES"
+    warn "rendering MCP servers failed (see above)"
+    if [ "$CHECK" -eq 1 ]; then MCP_FAILED=1; fi
+  elif [ "$CHECK" -eq 1 ]; then
+    case "$MOUT" in *"sync: out of date: "*) DRIFT=1 ;; esac
+    if [ "$MC_RC" -eq 5 ]; then MCP_FINDINGS=1; fi
+  else
+    if [ -n "$MOUT" ]; then CHANGED=1; fi
+    if [ "$MC_RC" -eq 5 ]; then warn "some MCP servers weren't rendered (see the errors above)"; fi
+  fi
 else
-  warn "python3 not found: hooks, permission rules, and library agents were not rendered. Install python3 and re-run."
-  # With agents to render, --check can't say they're current.
+  warn "python3 not found: hooks, permission rules, library agents, and MCP servers were not rendered. Install python3 and re-run."
+  # With agents or servers to render, --check can't say they're current.
   if [ "$CHECK" -eq 1 ] && [ -s "$AGENT_SET" ]; then AGENT_FAILED=1; fi
+  if [ "$CHECK" -eq 1 ] && [ -s "$MCP_SET" ]; then MCP_FAILED=1; fi
 fi
 
 # Local mode: keep everything the harness created out of git in this clone; team mode: only the
@@ -941,6 +985,14 @@ exclude_block() {
           else if (r ~ /^\.(claude|github|cursor|codex|gemini)\/agents\//) keep[++n] = $0 }
       END { if (!(waslocal == 1 && nowlocal != 1)) for (i = 1; i <= n; i++) print keep[i] }' "$ex" >> "$WORK/exclude.list"
   fi
+  # The same for the MCP configs: the ones the block lists count as sync's, and are listed below
+  # (local mode only lists them; a team block never has them).
+  if [ "$MCP_DONE" -eq 0 ] && [ "$LOCAL" -eq 1 ] && [ -f "$ex" ]; then
+    AGENTS_EXCL_PRE="/$pre" awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" '$0 == b { f = 1; next } $0 == e { f = 0 }
+      f { p = ENVIRON["AGENTS_EXCL_PRE"]; if (index($0, p) != 1) next
+          r = substr($0, length(p) + 1)
+          if (r == ".mcp.json" || r == ".cursor/mcp.json" || r == ".codex/config.toml" || r == ".gemini/settings.json") print r }' "$ex" > "$MCP_FILES"
+  fi
   if [ "$LOCAL" -eq 0 ]; then
     # Team mode: the block holds only the personal skills this clone renders, their mirrors, its
     # personal agent renders, and the commands only a personal pack ships.
@@ -969,12 +1021,16 @@ exclude_block() {
     cut -f2 "$AGENT_RENDERS" | while IFS= read -r p; do
       if [ -n "$p" ] && { [ -e "$p" ] || [ -L "$p" ]; } && ! tracked "$p"; then echo "/$pre$p" >> "$WORK/exclude.list"; fi
     done
+    # The MCP configs that hold sync's servers (merged into a file the project may have made).
+    while IFS= read -r p; do
+      if [ -n "$p" ] && [ -f "$p" ] && ! tracked "$p"; then echo "/$pre$p" >> "$WORK/exclude.list"; fi
+    done < "$MCP_FILES"
   fi
   {
     if [ -f "$ex" ]; then
       awk -v b="$EXCL_BEGIN" -v e="$EXCL_END" '$0 == b { skip = 1; next } $0 == e { skip = 0; next } !skip' "$ex"
     fi
-    if [ -s "$WORK/exclude.list" ]; then echo "$EXCL_BEGIN"; cat "$WORK/exclude.list"; echo "$EXCL_END"; fi
+    if [ -s "$WORK/exclude.list" ]; then echo "$EXCL_BEGIN"; awk '!seen[$0]++' "$WORK/exclude.list"; echo "$EXCL_END"; fi
   } > "$WORK/exclude.new"
   if [ -f "$ex" ] && cmp -s "$ex" "$WORK/exclude.new"; then return 0; fi
   if [ ! -f "$ex" ] && [ ! -s "$WORK/exclude.new" ]; then return 0; fi
@@ -1027,6 +1083,7 @@ printf '\342\200\213\n\342\200\214\n\342\200\215\n\342\200\216\n\342\200\217\n\3
   # (personal, listed), in it but outside .agents/, or a link the find above doesn't follow.
   { cut -f2 "$SKILL_SET"
     cut -f2 "$AGENT_SET"
+    cut -f2 "$MCP_SET"
     set -f
     for w in ${WORKFLOWS:-}; do agents_resolve workflows "$w" 2>/dev/null || true; done
     for s in ${STACKS:-}; do agents_resolve stacks "$s" 2>/dev/null || true; done
@@ -1059,12 +1116,14 @@ todos=$(cat "$AGENTS_FILE" .agents/checks/*.sh 2>/dev/null | grep -c 'TODO(harne
   || warn "$todos TODO(harness-tailor) markers left. Ask your agent to run the harness-tailor skill."
 
 if [ "$CHECK" -eq 1 ]; then
-  if [ "$DRIFT" -eq 0 ] && [ "$INFRA" -eq 0 ] && [ "$AGENT_FINDINGS" -eq 0 ] && [ "$AGENT_FAILED" -eq 0 ]; then
+  if [ "$DRIFT" -eq 0 ] && [ "$INFRA" -eq 0 ] && [ "$AGENT_FINDINGS" -eq 0 ] && [ "$AGENT_FAILED" -eq 0 ] \
+     && [ "$MCP_FINDINGS" -eq 0 ] && [ "$MCP_FAILED" -eq 0 ]; then
     say "up to date"; exit 0
   fi
   [ "$INFRA" -eq 0 ] || say "check out the libraries LIBRARIES lists (git submodule update --init, say), then re-run"
   [ "$AGENT_FINDINGS" -eq 0 ] || say "fix the agent files named above, then re-run"
-  [ "$AGENT_FAILED" -eq 0 ] || say "fix the error above (or install python3), then re-run"
+  [ "$MCP_FINDINGS" -eq 0 ] || say "fix the MCP server files or configs named above, then re-run"
+  { [ "$AGENT_FAILED" -eq 0 ] && [ "$MCP_FAILED" -eq 0 ]; } || say "fix the error above (or install python3), then re-run"
   [ "$DRIFT" -eq 0 ] || say "run .agents/bin/sync to fix"
   exit 1
 fi

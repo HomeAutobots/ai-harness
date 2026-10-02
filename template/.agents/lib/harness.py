@@ -485,7 +485,63 @@ def unshare():
     for rel in agents_render.marked_renders(ROOT):
         if tracked(rel) and not os.path.islink(os.path.join(ROOT, rel)):
             print("untrack " + rel)
+    unshare_mcp(lock or {})
     return 0
+
+
+def unshare_mcp(lock):
+    """The MCP configs: a tracked one holding only sync's servers is untracked (it stays on disk, and
+    local mode keeps it); one with the project's servers too loses sync's, which the lock forgets."""
+    import mcp_render
+    owned = mcp_lock(lock)
+    kept = dict(owned)
+    for rel in mcp_render.JSON_FILES:
+        path = os.path.join(ROOT, rel)
+        names = set(owned.get(rel, []))
+        if not names or not tracked(rel) or os.path.islink(path):
+            continue
+        old, err = read_json(path)
+        if err or not isinstance(old, dict) or not isinstance(old.get("mcpServers"), dict):
+            continue
+        left = dict((n, v) for n, v in old["mcpServers"].items() if n not in names)
+        new = dict(old)
+        if left:
+            new["mcpServers"] = left
+        else:
+            new.pop("mcpServers")
+        if not new or (rel == mcp_render.FILES["gemini"] and new == gemini_render({}, True)):
+            print("untrack " + rel)
+        elif new != old:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(dump_json(new))
+            print("stripped " + rel)
+            kept.pop(rel, None)
+    rel = mcp_render.FILES["codex"]
+    path = os.path.join(ROOT, rel)
+    if tracked(rel) and os.path.isfile(path) and not os.path.islink(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                outside, _, has_block = mcp_render.toml_block(fh.read())
+        except (OSError, ValueError, UnicodeDecodeError):
+            has_block = False
+        if has_block:
+            while outside and not outside[-1].strip():
+                outside.pop()
+            if not outside:
+                print("untrack " + rel)
+            else:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(outside) + "\n")
+                print("stripped " + rel)
+                kept.pop(rel, None)
+    if kept != owned:
+        new_lock = dict(lock)
+        if kept:
+            new_lock["mcp"] = kept
+        else:
+            new_lock.pop("mcp", None)
+        with open(LOCK, "w", encoding="utf-8") as fh:
+            fh.write(dump_json(new_lock))
 
 
 def agents(check, set_path, out_path):

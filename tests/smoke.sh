@@ -2837,6 +2837,114 @@ print(json.dumps(d, sort_keys=True))' "$1" "$2" 2>/dev/null; }   # jget <file> <
   t    "local: a personal server renders where nothing's tracked" test "$(jget "$MM/.cursor/mcp.json" mcpServers.helper.command)" = '"npx"'
 fi
 
+echo "mcp: sync"
+if [ "$HAVE_PY" -eq 1 ]; then
+  MS=$(repo mcpsync)
+  printf '{"mcpServers": {"mine": {"command": "mine"}}}\n' > "$MS/.mcp.json"; commit "$MS" "our own server"
+  "$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1
+  edit "$MS/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude copilot cursor codex gemini"|'
+  mkdir -p "$MS/.agents/library/mcp"
+  cp "$WORK/github.json" "$WORK/linear.json" "$MS/.agents/library/mcp/"
+  mkdir -p "$WORK/mspack/workflows/msflow/checks" "$WORK/mspack/workflows/msflow/mcp"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/mspack/workflows/msflow/checks/turn.sh"; chmod +x "$WORK/mspack/workflows/msflow/checks/turn.sh"
+  printf '{"command": "flow-server"}\n' > "$WORK/mspack/workflows/msflow/mcp/flowsrv.json"
+  printf '{"command": "pack-github"}\n' > "$WORK/mspack/workflows/msflow/mcp/github.json"
+  edit "$MS/.agents/harness.conf" "s|^LIBRARIES=.*|LIBRARIES=\"$WORK/mspack\"|"
+  edit "$MS/.agents/harness.conf" 's|^WORKFLOWS=.*|WORKFLOWS="msflow"|'
+  mkdir -p "$MS/.agents/library/agents"
+  printf -- '---\ndescription: d\nmcp: [github, mine, nosuch]\n---\nb\n' > "$MS/.agents/library/agents/user.md"
+  out="$("$MS/.agents/bin/sync" 2>&1)"
+  for f in .mcp.json .cursor/mcp.json .gemini/settings.json; do
+    t  "sync renders the servers into $f" test "$(jget "$MS/$f" mcpServers.linear | wc -c)" -gt 3
+  done
+  t    "sync renders the codex block"    grep -qx '\[mcp_servers.linear\]' "$MS/.codex/config.toml"
+  t    "an active workflow's server renders" test "$(jget "$MS/.mcp.json" mcpServers.flowsrv.command)" = '"flow-server"'
+  t    "the library's server wins over the pack's" test "$(jget "$MS/.mcp.json" mcpServers.github.command)" = '"npx"'
+  t    "...with a shadow warning"        hasl "$out" "MCP server 'github' from the project library"
+  t    "the hand-added server stays"     test "$(jget "$MS/.mcp.json" mcpServers.mine.command)" = '"mine"'
+  t    "gemini settings keep the context sync renders" test "$(jget "$MS/.gemini/settings.json" context.fileName)" = '["AGENTS.md", "GEMINI.md"]'
+  t    "an agent naming a server no library has warns" hasl "$out" ".agents/library/agents/user.md: mcp: no library has a server named 'nosuch'"
+  tnot "...not one a library has"        hasl "$out" "named 'github'"
+  tnot "...or one added by hand"         hasl "$out" "named 'mine'"
+  t    "sync --check is clean after"     "$MS/.agents/bin/sync" --check
+  t    "a second sync changes nothing"   bash -c "'$MS/.agents/bin/sync' 2>&1 | grep -q 'already up to date'"
+  edit "$MS/.cursor/mcp.json" 's|"npx"|"evil"|'
+  out="$("$MS/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
+  t    "--check sees a hand-edited server entry" test "$rc" = 1
+  t    "...naming the file"              hasl "$out" "out of date: .cursor/mcp.json"
+  "$MS/.agents/bin/sync" >/dev/null 2>&1
+  : > "$MS/.agents/library/mcp/empty.json"
+  t    "an empty server file is ignored, with a warning" hasl "$("$MS/.agents/bin/sync" 2>&1)" ".agents/library/mcp/empty.json isn't a usable MCP server (empty); ignored"
+  rm "$MS/.agents/library/mcp/empty.json"
+  printf '{"command": "x", "env": {"API_TOKEN": "sk-123"}}\n' > "$MS/.agents/library/mcp/leaky.json"
+  out="$("$MS/.agents/bin/sync" 2>&1)"
+  t    "a literal secret stops that server, with path" hasl "$out" ".agents/library/mcp/leaky.json: env.API_TOKEN is a literal"
+  t    "...and sync says some weren't rendered" hasl "$out" "some MCP servers weren't rendered (see the errors above)"
+  tnot "...nothing leaks"                grep -q 'sk-123' "$MS/.mcp.json"
+  out="$("$MS/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
+  t    "...--check fails"                test "$rc" = 1
+  t    "...saying to fix the file"       hasl "$out" "fix the MCP server files or configs named above"
+  rm "$MS/.agents/library/mcp/leaky.json"
+  printf '{"command": "x", "args": ["a\342\200\213b"]}\n' > "$MS/.agents/library/mcp/hidden.json"
+  out="$("$MS/.agents/bin/sync" --check 2>&1)" || true
+  t    "invisible Unicode in a server file fails --check" hasl "$out" "invisible Unicode in .agents/library/mcp/hidden.json"
+  rm "$MS/.agents/library/mcp/hidden.json"
+  "$MS/.agents/bin/sync" >/dev/null 2>&1
+  edit "$MS/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude copilot codex gemini"|'
+  "$MS/.agents/bin/sync" >/dev/null 2>&1
+  t    "dropping an adapter takes its config's servers away" test ! -e "$MS/.cursor/mcp.json"
+  edit "$MS/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude copilot cursor codex gemini"|'
+  "$MS/.agents/bin/sync" >/dev/null 2>&1
+  commit "$MS" "servers"
+  t    "team: the configs are committed" bash -c "cd '$MS' && git ls-files --error-unmatch .mcp.json .cursor/mcp.json .codex/config.toml .gemini/settings.json >/dev/null 2>&1"
+
+  echo "mcp: team and local mode"
+  "$HARNESS/install.sh" --local "$MS" >/dev/null 2>&1
+  t    "team to local: a config with only sync's servers is untracked" bash -c "cd '$MS' && ! git ls-files --error-unmatch .cursor/mcp.json >/dev/null 2>&1 && ! git ls-files --error-unmatch .codex/config.toml >/dev/null 2>&1"
+  t    "...kept, and hidden"             bash -c "test -f '$MS/.cursor/mcp.json' && cd '$MS' && git check-ignore -q .cursor/mcp.json && git check-ignore -q .codex/config.toml"
+  t    "...one with the project's servers too stays tracked" bash -c "cd '$MS' && git ls-files --error-unmatch .mcp.json >/dev/null 2>&1"
+  t    "...stripped of sync's"           bash -c "grep -q '\"mine\"' '$MS/.mcp.json' && ! grep -q github '$MS/.mcp.json'"
+  out="$("$MS/.agents/bin/sync" 2>&1)"
+  t    "local: the tracked .mcp.json is left alone, with a warning" hasl "$out" "the project tracks .mcp.json; local mode leaves it alone"
+  t    "local: the other configs still have the servers" test "$(jget "$MS/.cursor/mcp.json" mcpServers.linear.url)" = '"https://mcp.linear.app/mcp"'
+  commit "$MS" "local"
+  t    "local: status clean"             test -z "$(git -C "$MS" status --porcelain)"
+  t    "local: --check clean"            "$MS/.agents/bin/sync" --check
+  git -C "$MS" add -f .cursor/mcp.json
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$MS/.agents/checks/$tier.sh"; done
+  out="$("$MS/.agents/bin/verify" 2>&1 || true)"
+  t    "verify: a tracked config with sync's servers is a finding" hasl "$out" ".cursor/mcp.json:1: error: [harness-tracked]"
+  git -C "$MS" rm -q --cached .cursor/mcp.json
+  cp "$MS/.agents/lib/mcp_render.py" "$WORK/mcp_render.keep"
+  printf 'raise RuntimeError("boom")\n' > "$MS/.agents/lib/mcp_render.py"
+  out="$("$MS/.agents/bin/sync" 2>&1)" && rc=0 || rc=$?
+  t    "a crash: plain sync still finishes" test "$rc" = 0
+  t    "...says rendering failed"        hasl "$out" "rendering MCP servers failed (see above)"
+  t    "...and the configs stay hidden"  bash -c "cd '$MS' && git check-ignore -q .cursor/mcp.json && git check-ignore -q .codex/config.toml"
+  out="$("$MS/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
+  t    "...--check fails"                test "$rc" = 1
+  tnot "...without block drift"          hasl "$out" "harness block"
+  cp "$WORK/mcp_render.keep" "$MS/.agents/lib/mcp_render.py"
+  t    "...and it's fine once fixed"     "$MS/.agents/bin/sync" --check
+  "$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1
+  t    "local to team: the servers are back in .mcp.json" test "$(jget "$MS/.mcp.json" mcpServers.github.command)" = '"npx"'
+  t    "...and the configs aren't hidden" bash -c "cd '$MS' && ! git check-ignore -q .cursor/mcp.json"
+  t    "team: --check clean"             "$MS/.agents/bin/sync" --check
+
+  echo "mcp: absence"
+  MA=$(repo mcpabsent)
+  mkdir -p "$MA/.codex"; printf '{"mcpServers": {"x": {"command": "y"}}}\n' > "$MA/.mcp.json"; printf 'model = "m"\n' > "$MA/.codex/config.toml"
+  cp "$MA/.mcp.json" "$WORK/abs.mcp"; cp "$MA/.codex/config.toml" "$WORK/abs.toml"
+  "$HARNESS/install.sh" --team "$MA" >/dev/null 2>&1
+  edit "$MA/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude copilot cursor codex gemini"|'
+  "$MA/.agents/bin/sync" >/dev/null 2>&1
+  t    "no servers: hand-written configs untouched" bash -c "cmp -s '$MA/.mcp.json' '$WORK/abs.mcp' && cmp -s '$MA/.codex/config.toml' '$WORK/abs.toml'"
+  t    "...no .cursor/mcp.json"          test ! -e "$MA/.cursor/mcp.json"
+  tnot "...no mcp key in the lock"       grep -q '"mcp"' "$MA/.agents/generated.lock"
+  tnot "...no mcpServers in gemini settings" grep -q mcpServers "$MA/.gemini/settings.json"
+  t    "...and --check is clean"         "$MA/.agents/bin/sync" --check
+fi
+
 echo "guards"
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
 tnot "refuses missing dir"             "$HARNESS/install.sh" --team "$WORK/nope"
