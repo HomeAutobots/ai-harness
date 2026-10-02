@@ -118,8 +118,9 @@ fi
 [ "$GUARD_RC" -ne 0 ] && cat "$RAW.part" >> "$RAW"
 
 # 1b. Local install mode: nothing the harness keeps out of git may be tracked.
-# Markers below must match EXCL_BEGIN/EXCL_END in .agents/bin/sync. Block entries are relative to
-# the repo top; an install in a subdirectory strips its prefix to get paths relative to here.
+# The paths come from this install's block in the exclude file (.agents/lib/exclude.sh, which sync
+# writes it with). Block entries are relative to the repo top; an install in a subdirectory strips
+# its prefix to get paths relative to here.
 # A tracked file other than .agents/ counts only while it still holds harness content: a stale
 # entry for a file the project has since committed on its own is sync's to drop, not a finding.
 agent_marked() {  # agent_marked <line no> <file>: that line is sync's generated-by marker
@@ -148,15 +149,18 @@ harness_content() {  # harness_content <path>: true if the file (or skill mirror
 }
 LOCAL_RC=0
 if [ "$TIER" != edit ] && [ "${HARNESS_MODE:-team}" = local ]; then
-  ex="$(git rev-parse --git-path info/exclude 2>/dev/null)"
-  # Same escaping as sync's entries; passed through the environment, since awk -v eats backslashes.
-  pre="$(git rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
   paths=""
-  [ -f "$ex" ] && paths="$(pre="$pre" awk '$0 == "# >>> ai-harness (local install; managed by .agents/bin/sync)" { f = 1; next }
-                               $0 == "# <<< ai-harness" { f = 0 }
-                               f { sub(/^\//, ""); sub(/\/$/, ""); pre = ENVIRON["pre"]
-                                   if (pre != "") { if (index($0, pre) != 1) next; $0 = substr($0, length(pre) + 1) }
-                                   print }' "$ex")"
+  if [ -f "$ROOT/.agents/lib/exclude.sh" ]; then
+    # shellcheck source=../lib/exclude.sh
+    . "$ROOT/.agents/lib/exclude.sh"
+    ex="$(agents_excl_file)"; begin="$(agents_excl_begin)"
+    # Same escaping as sync's entries; passed through the environment, since awk -v eats backslashes.
+    pre="$(agents_excl_pre)"
+    [ -f "$ex" ] && [ -n "$begin" ] && paths="$(agents_excl_own "$ex" "$begin" | pre="$pre" awk '
+                               { sub(/^\//, ""); sub(/\/$/, ""); pre = ENVIRON["pre"]
+                                 if (pre != "") { if (index($0, pre) != 1) next; $0 = substr($0, length(pre) + 1) }
+                                 print }')"
+  fi
   [ -n "$paths" ] || paths=".agents"
   hits=""
   while IFS= read -r p; do
