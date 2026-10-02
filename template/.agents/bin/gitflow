@@ -18,6 +18,8 @@
 #   gitflow review                                   review comments on this branch's PR/MR
 #   gitflow merge                                    merge the PR/MR (GIT_MERGE_METHOD)
 #   gitflow install-hooks [--quiet]                  commit-msg and pre-push git hooks (when needed)
+# `gitflow <command> --help` (or -h) prints its usage and does nothing else. An unknown option, or
+# --help among other words, is refused before anything changes; words that start with - go after --.
 # Workflow packs can add commit-message rules: <library>/workflows/<name>/checks/commit-msg.sh <file>
 # (exit 1 or 2 rejects with its output; any other failure, like a missing tool, also blocks, and so
 # does an active workflow that doesn't resolve while a LIBRARIES entry isn't here: exit 3).
@@ -25,7 +27,7 @@
 # Internal: check-branch <name>, check-msg <file>, check-cmd <command>, hook-commit-msg <file>,
 #           hook-prepare-commit-msg <file> [source], hook-pre-push.
 # Exit: 0 ok, 1 problem, 2 blocked by the workflow (check-cmd), 3 an active workflow pack isn't
-# available (check-msg, commit, the commit-msg hook).
+# available (check-msg, commit, the commit-msg hook), or a usage error (nothing was done).
 set -uo pipefail
 set -f   # patterns in config (release/*) are matched, never expanded against files
 
@@ -33,6 +35,29 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT" || exit 3
 TAB="$(printf '\t')"
 die() { echo "gitflow: $*" >&2; exit 1; }
+# usage_of <command>: that command's lines from the header above
+usage_of() {
+  awk -v c="$1" 'NR > 1 && !/^#/ { exit }
+    /^#   gitflow / { on = ($3 == c) }
+    !/^#   gitflow / && !/^#      / { on = 0 }
+    on { sub(/^# /, ""); print }' "$0"
+}
+# wants_help <args...>: -h or --help before any --
+wants_help() {
+  local a
+  for a in "$@"; do case "$a" in --) return 1 ;; -h|--help) return 0 ;; esac; done
+  return 1
+}
+# bad_arg <command> <arg>: misuse is refused before anything changes (exit 3, the usage-error code)
+bad_arg() {
+  case "$2" in
+    -?*) echo "gitflow: $1: unknown option '$2'" >&2 ;;
+    *) echo "gitflow: $1: unexpected argument '$2'" >&2 ;;
+  esac
+  echo "usage:" >&2
+  usage_of "$1" >&2
+  exit 3
+}
 # The resolver finds workflow packs in the libraries (config parsed, never run: git hooks run this).
 if [ -f "$ROOT/.agents/lib/libraries.sh" ]; then
   # shellcheck disable=SC2034  # read by libraries.sh
@@ -457,10 +482,16 @@ cmd_config() {
 }
 
 cmd_start() {
-  local type="" ticket="" summary name start
+  local type="" ticket="" summary name start pos=()
   while [ $# -gt 0 ]; do
-    case "$1" in --type=*) type="${1#--type=}"; shift ;; *) break ;; esac
+    case "$1" in
+      --type=*) type="${1#--type=}"; shift ;;
+      --) shift; pos+=("$@"); break ;;
+      -?*) bad_arg start "$1" ;;
+      *) pos+=("$1"); shift ;;
+    esac
   done
+  set -- ${pos[@]+"${pos[@]}"}
   case "$GIT_BRANCH" in *"{ticket}"*)
     ticket="${1:-}"; [ $# -gt 0 ] && shift
     matches "$ticket" "^($(ticket_re))$" || die "'$ticket' isn't a ticket ID (GIT_TICKET: $(ticket_re)). Usage: gitflow start <ticket> <summary>" ;;
@@ -526,6 +557,7 @@ cmd_commit() {
       --section=*) sections="$sections${1#--section=}$RS"; shift ;;
       -a|--all) all=1; shift ;;
       --) shift; words="$words${words:+ }$*"; break ;;
+      -?*) bad_arg commit "$1" ;;
       *) words="$words${words:+ }$1"; shift ;;
     esac
   done
@@ -623,8 +655,8 @@ cmd_check() {
 }
 
 cmd_push() {
-  local lease=0 b
-  [ "${1:-}" = --lease ] && lease=1
+  local lease=0 b a
+  for a in "$@"; do case "$a" in --lease) lease=1 ;; *) bad_arg push "$a" ;; esac; done
   cmd_check || exit 1
   b="$(current_branch)"
   if [ "$lease" -eq 1 ]; then
@@ -662,7 +694,7 @@ replace_all() {  # replace_all <text>: {placeholders} from the environment (mult
 cmd_pr() {
   local title="" draft="$GIT_PR_DRAFT" b list tpl body_file title_file v
   while [ $# -gt 0 ]; do
-    case "$1" in --title=*) title="${1#--title=}"; shift ;; --draft) draft=1; shift ;; *) die "unknown option $1" ;; esac
+    case "$1" in --title=*) title="${1#--title=}"; shift ;; --draft) draft=1; shift ;; *) bad_arg pr "$1" ;; esac
   done
   b="$(current_branch)"; [ -n "$b" ] || die "not on a branch"
   [ "$b" = "$GIT_BASE" ] && die "you're on the base branch ($GIT_BASE); a PR needs its own branch (gitflow start)"
@@ -747,8 +779,8 @@ cmd_status() {
 }
 
 cmd_install_hooks() {
-  local hp dir h f quiet=0 wrote=""
-  [ "${1:-}" = --quiet ] && quiet=1
+  local hp dir h f quiet=0 wrote="" a
+  for a in "$@"; do case "$a" in --quiet) quiet=1 ;; *) bad_arg install-hooks "$a" ;; esac; done
   case "$GIT_LOCAL_HOOKS" in
     off) [ "$quiet" -eq 1 ] || echo "gitflow: git hooks off (GIT_LOCAL_HOOKS=off)"; return 0 ;;
     on) ;;
@@ -961,6 +993,10 @@ cmd_check_cmd() {
           for a in "$@"; do case "$a" in -a|--approve) echo "agents never approve PRs"; return 2 ;; esac; done ;;
       esac ;;
     .agents/bin/gitflow|gitflow)
+      # `gitflow <command> --help` only prints the usage. Exactly that form, so no spelling of --
+      # or of a quoted word can make a real run look like help. (It trusts the gitflow that runs to
+      # be this one: a cd into an older checkout first isn't seen here.)
+      if [ $# -eq 3 ] && { [ "$3" = --help ] || [ "$3" = -h ]; }; then return 0; fi
       case "${2:-}" in
         start) may branch || { echo "creating branches is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
         commit|update) may commit || { echo "committing is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; } ;;
@@ -976,6 +1012,22 @@ cmd_check_cmd() {
 
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
+# The commands people and agents run: -h or --help alone prints the usage and does nothing else;
+# with other words before any -- it's a usage error (exit 3). The ones that take no arguments
+# refuse any.
+case "$cmd" in
+  config|status|start|commit|template|update|check|push|pr|review|merge|install-hooks)
+    if [ $# -eq 1 ] && wants_help "$@"; then echo "usage:"; usage_of "$cmd"; exit 0; fi
+    # Help among other words (commit fix -h parsing) is a mistake, not a request: a 0 would read
+    # as a commit or push that happened, so it's a usage error and nothing runs.
+    if wants_help "$@"; then
+      echo "gitflow: $cmd: -h or --help with other arguments; nothing was done (words that start with - go after --)" >&2
+      echo "usage:" >&2; usage_of "$cmd" >&2; exit 3
+    fi ;;
+esac
+case "$cmd" in
+  config|status|template|update|check|review|merge) [ $# -eq 0 ] || bad_arg "$cmd" "$1" ;;
+esac
 case "$cmd" in
   config) cmd_config ;;
   status) cmd_status ;;
@@ -997,6 +1049,6 @@ case "$cmd" in
   hook-commit-msg) hook_commit_msg "${1:-}" ;;
   hook-pre-push) hook_pre_push ;;
   hook-prepare-commit-msg) hook_prepare_commit_msg "${1:-}" "${2:-}" ;;
-  ""|-h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
+  ""|-h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0" ;;
   *) die "unknown command '$cmd' (see: gitflow --help)" ;;
 esac

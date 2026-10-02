@@ -23,7 +23,24 @@ the agent changed keep it from wandering into pre-existing debt.
   existing findings elsewhere in a file don't show up.
 - **Affected tests.** CMake's file API maps changed sources to targets, then to everything
   that depends on them, then to the CTest tests those executables run. Header, CMake, or
-  unknown changes run everything; so does a missing codemodel. Conservative on purpose.
+  unknown changes run everything; so does a missing codemodel, or a selection that matches no
+  test CTest lists. Conservative on purpose.
+- **No tests is never a quiet pass.** When the build tree has no `CTestTestfile.cmake`, or
+  `ctest -N` lists `Total Tests: 0`, the test steps (`cpp_test_affected`, `cpp_test_all`, and
+  the sanitizer tests in `cpp_sanitize`) print `infra: tests: no tests ran: ...` and exit 3,
+  so verify says `INFRA`, not `ok`. The count comes from the listing, not ctest's exit code,
+  which for "No tests were found!!!" is 0 or 8 depending on the version and
+  `CTEST_NO_TESTS_ACTION`. The stop gate lets exit 3 through, so agents aren't blocked; CI on
+  `verify --tier=full` fails until it's settled. Two ways to settle it:
+  - Tests that are plain executables CTest doesn't know about (`add_executable` with no
+    `add_test`): register them, or run them from the tier scripts and set `CPP_NO_TESTS=ok`
+    there. The seeded scripts have commented lines for both:
+    `agents_step tests "$AGENTS_ROOT/$CPP_BUILD_DIR/<binary>"` in turn and full, and
+    `agents_step sanitizer-tests "$AGENTS_ROOT/$CPP_SAN_DIR/<binary>"` in full. Wire both:
+    `CPP_NO_TESTS=ok` quiets the sanitizer step too, so leaving the second one out means the
+    ASan build runs no tests.
+  - A project with no tests at all: `CPP_NO_TESTS=ok` in `.agents/harness.conf`. That's a
+    person's call, not an agent's.
 - **Warnings don't depend on build state.** New-warning detection uses a syntax-only pass over
   the changed sources, so a warning keeps showing until it's fixed, not just on the build that
   happened to recompile the file.
@@ -33,9 +50,11 @@ the agent changed keep it from wandering into pre-existing debt.
   bug-finding checks, no style checks.
 
 ## Settings
-Set in the check scripts (or `.agents/harness.conf`): `CPP_BUILD_DIR`, `CPP_SAN_DIR`,
-`CPP_BUILD_TYPE`, `CPP_CMAKE_ARGS`, `CPP_JOBS`, `CPP_TIDY_CONFIG`, `CPP_TIDY_ARGS`,
-`CPP_SANITIZERS`, `CPP_TEST_TIMEOUT`, `CPP_CPPCHECK_ARGS`. See the top of `lib.sh`.
+Set in the check scripts: `CPP_BUILD_DIR`, `CPP_SAN_DIR`, `CPP_BUILD_TYPE`, `CPP_CMAKE_ARGS`,
+`CPP_JOBS`, `CPP_TIDY_CONFIG`, `CPP_TIDY_ARGS`, `CPP_SANITIZERS`, `CPP_TEST_TIMEOUT`,
+`CPP_CPPCHECK_ARGS`, `CPP_NO_TESTS`. See the top of `lib.sh`. `verify` reads
+`.agents/harness.conf` but doesn't pass its settings on to the check scripts, so of these only
+`CPP_NO_TESTS` also works there (unset means "no tests ran" is reported; `ok` turns that off).
 
 ## Notes
 - **Cross compiling** (embedded targets): the syntax check uses each file's real compile

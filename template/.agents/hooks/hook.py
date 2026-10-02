@@ -699,7 +699,7 @@ def question_pre(tool, data):
         h = hashlib.sha1(q.lower().encode()).hexdigest()[:12]
         if h in seen:
             continue  # already shown the earlier answer; asking again is the agent's call
-        rc, out = tasks_cli("similar", q)
+        rc, out = tasks_cli("similar", "--", q)
         best = [l.split("\t") for l in out.splitlines() if l.strip()]
         best = [b for b in best if len(b) >= 6 and float(b[0]) >= 0.7]
         if best:
@@ -718,7 +718,7 @@ def question_post(tool, data):
     """After the agent asked the human: record question and answer in the ledger."""
     qs = question_texts(tool_args(data))
     for q, a in zip(qs, answer_texts(data, qs)):
-        tasks_cli("record", "--source=hook-" + tool, q, a)
+        tasks_cli("record", "--source=hook-" + tool, "--", q, a)
     if qs:
         log_event(tool, "post-edit", "question-recorded", str(len(qs)))
     return 0

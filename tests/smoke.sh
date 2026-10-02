@@ -686,6 +686,76 @@ t    "still on wip"                    test "$(git -C "$H" symbolic-ref --short 
 }
 group grp_ahead
 
+grp_clihelp() {
+echo "CLI help and unknown options change nothing"
+git init -q --bare "$WORK/helpremote.git"
+HP=$(repo clihelp); git -C "$HP" branch -M main
+git -C "$HP" remote add origin "$WORK/helpremote.git"; git -C "$HP" push -q origin main
+"$HARNESS/install.sh" "$HP" >/dev/null 2>&1
+printf 'GIT_PUSH_REQUIRES="off"\n' >> "$HP/.agents/git.conf"
+(cd "$HP" && .agents/bin/gitflow start 'help probe' >/dev/null 2>&1)
+echo a > "$HP/a.txt"; git -C "$HP" add a.txt; git -C "$HP" -c core.hooksPath=/dev/null commit -qm "unpushed work"
+echo b > "$HP/b.txt"; git -C "$HP" add b.txt   # staged: a commit that ran would take it
+hstate(){ printf '%s %s %s %s\n' "$(git -C "$HP" symbolic-ref -q --short HEAD)" "$(git -C "$HP" rev-parse HEAD)" \
+  "$(git -C "$HP" branch --format='%(refname:short)' | tr '\n' ' ')" "$(git --git-dir="$WORK/helpremote.git" for-each-ref --format='%(refname) %(objectname)' | tr '\n' ' ')"; }
+before="$(hstate)"
+bad_help=""
+for c in config status start commit template update check push pr review merge install-hooks; do
+  for h in --help -h; do
+    out="$(cd "$HP" && .agents/bin/gitflow "$c" "$h" 2>&1)" || bad_help="$bad_help $c$h(rc)"
+    { [ "$(printf '%s\n' "$out" | head -1)" = "usage:" ] && hasl "$out" "gitflow $c"; } || bad_help="$bad_help $c$h(text)"
+    [ "$(hstate)" = "$before" ] || { bad_help="$bad_help $c$h(changed)"; before="$(hstate)"; }
+  done
+done
+t    "gitflow <every command> --help: usage, exit 0, nothing changed" test -z "$bad_help"
+[ -z "$bad_help" ] || echo "        $bad_help"
+trc  "--help among other words: a usage error (3)" 3 bash -c "cd '$HP' && .agents/bin/gitflow commit fix -h parsing"
+trc  "...push too (3)" 3               bash -c "cd '$HP' && .agents/bin/gitflow push --lease --help"
+t    "...no commit, no branch, no push" test "$(hstate)" = "$before"
+t    "gitflow --help shows the whole header" bash -c "cd '$HP' && .agents/bin/gitflow --help | grep -q 'or a usage error (nothing was done)'"
+trc  "start --frobnicate refused (3)" 3 bash -c "cd '$HP' && .agents/bin/gitflow start --frobnicate thing"
+out="$(cd "$HP" && .agents/bin/gitflow start --frobnicate thing 2>&1 || true)"
+t    "...says which option, with the usage" bash -c "printf '%s' \"\$1\" | grep -q \"start: unknown option '--frobnicate'\" && printf '%s' \"\$1\" | grep -q 'gitflow start \['" _ "$out"
+trc  "commit -m refused (3)" 3         bash -c "cd '$HP' && .agents/bin/gitflow commit -m 'a message'"
+trc  "push --force refused (3)" 3      bash -c "cd '$HP' && .agents/bin/gitflow push --force"
+trc  "status takes no arguments (3)" 3 bash -c "cd '$HP' && .agents/bin/gitflow status extra"
+trc  "pr: unknown option is a usage error (3)" 3 bash -c "cd '$HP' && .agents/bin/gitflow pr --base=main"
+t    "refusals changed nothing"        test "$(hstate)" = "$before"
+t    "-- keeps a dash summary"         bash -c "cd '$HP' && .agents/bin/gitflow commit Handle -- --help -v && test \"\$(git log -1 --format=%s)\" = 'Handle --help -v'"
+t    "start takes --type after the summary" bash -c "cd '$HP' && .agents/bin/gitflow start other thing --type=feature && test \"\$(git symbolic-ref --short HEAD)\" = other-thing"
+git -C "$HP" checkout -q help-probe
+t    "push still pushes"               bash -c "cd '$HP' && .agents/bin/gitflow push >/dev/null 2>&1 && git --git-dir='$WORK/helpremote.git' show-ref -q refs/heads/help-probe"
+trc  "agent: gitflow push --help needs no push permission" 0 bash -c "cd '$HP' && .agents/bin/gitflow check-cmd '.agents/bin/gitflow push --help'"
+trc  "...but push with --help among other words still does" 2 bash -c "cd '$HP' && .agents/bin/gitflow check-cmd '.agents/bin/gitflow push --lease --help'"
+trc  "...and so does a quoted --" 2    bash -c "cd '$HP' && .agents/bin/gitflow check-cmd \".agents/bin/gitflow push '--' --help\""
+# tasks: the same for every command; the ledger is untouched
+(cd "$HP" && .agents/bin/tasks new probe "Probe" >/dev/null && .agents/bin/tasks add probe "first" >/dev/null)
+lstate(){ (cd "$HP/.agents/plans" && find . -type f | LC_ALL=C sort | xargs cat) | git hash-object --stdin; }
+before="$(lstate)"; bad_help=""
+for c in new add list next set ask answer questions similar link log check record; do
+  out="$(cd "$HP" && .agents/bin/tasks "$c" --help 2>&1)" || bad_help="$bad_help $c(rc)"
+  { [ "$(printf '%s\n' "$out" | head -1)" = "usage:" ] && hasl "$out" "tasks $c"; } || bad_help="$bad_help $c(text)"
+  rc=0; (cd "$HP" && .agents/bin/tasks "$c" probe T1 --help >/dev/null 2>&1) || rc=$?
+  [ "$rc" = 3 ] || bad_help="$bad_help $c-mixed(rc=$rc)"
+  [ "$(lstate)" = "$before" ] || { bad_help="$bad_help $c(changed)"; before="$(lstate)"; }
+done
+t    "tasks <every command> --help: usage, exit 0; among other words: 3; ledger unchanged" test -z "$bad_help"
+[ -z "$bad_help" ] || echo "        $bad_help"
+t    "tasks --help shows the whole header" bash -c "cd '$HP' && .agents/bin/tasks --help | grep -q 'with - goes after --'"
+trc  "tasks link --force refused (3)" 3 bash -c "cd '$HP' && .agents/bin/tasks link probe --force"
+trc  "tasks ask --gate (no =) refused (3)" 3 bash -c "cd '$HP' && .agents/bin/tasks ask probe T1 --gate plan 'Which way?'"
+t    "refusals left the ledger alone"  test "$(lstate)" = "$before"
+t    "tasks: -- keeps dash text"       bash -c "cd '$HP' && .agents/bin/tasks log probe -- -x was odd && tail -1 .agents/plans/probe/progress.log | grep -q ': -x was odd$'"
+t    "tasks ask: options, then -- text" bash -c "cd '$HP' && .agents/bin/tasks ask probe T1 --gate=plan -- '-1 or 0 for the default?' >/dev/null && grep -q '\"gate\":\"plan\".*\"question\":\"-1 or 0 for the default?\"' .agents/plans/probe/questions.json"
+t    "tasks record: a question that starts with -" bash -c "cd '$HP' && .agents/bin/tasks record --source=hook-claude -- '-v or --verbose?' 'both' | grep -q '^recorded'"
+# the other CLIs
+t    "guard allow --help writes nothing" bash -c "cd '$HP' && .agents/bin/guard allow --help x y z | grep -q 'guard allow' && test ! -e .agents/guard.allow"
+t    "sync --help prints the usage"    bash -c "cd '$HP' && .agents/bin/sync --help | grep -q 'sync --check'"
+t    "policy test --help prints the usage" bash -c "cd '$HP' && .agents/bin/policy test --help | grep -q 'policy test --read'"
+t    "eval new --help writes no task"  bash -c "cd '$HP' && .agents/bin/eval new --help HEAD | grep -q 'eval new' && test ! -e .agents/evals/tasks/--help.task"
+}
+group grp_clihelp
+
 grp_tasks() {
 wait_group grp_policy; P="$WORK/fresh"   # the fresh install, after the policy hook used it
 echo "tasks ledger"
@@ -948,6 +1018,81 @@ fi
 }
 group grp_cpp
 
+grp_cpp_notests() {
+echo "cpp-cmake: no tests ran is never ok"
+CN=$(repo cppnone)
+"$HARNESS/install.sh" --stack cpp-cmake "$CN" >/dev/null 2>&1
+# Stand-ins for cmake and ctest, so this runs without them. STUB_TESTS: how many tests ctest lists;
+# with none it says so and exits STUB_NONE_RC (0 on older ctest, 8 when no tests is an error).
+mkdir -p "$WORK/cppstub"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/cppstub/cmake"
+cat > "$WORK/cppstub/ctest" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *" -N "*) n="${STUB_TESTS:-0}"; case " $* " in *" -R "*) n="${STUB_RMATCH:-$n}" ;; esac
+            printf 'Test project %s\n\nTotal Tests: %s\n' "$PWD" "$n"
+            [ "$n" = 0 ] && exit "${STUB_NONE_RC:-0}"; exit 0 ;;
+  *" --show-only"*) echo '{"tests":[]}'; exit 0 ;;
+esac
+[ -n "${STUB_LOG:-}" ] && echo "$*" >> "$STUB_LOG"
+if [ "${STUB_TESTS:-0}" = 0 ]; then echo 'No tests were found!!!'; exit "${STUB_NONE_RC:-0}"; fi
+[ "${STUB_FAIL:-0}" = 1 ] && { echo 'The following tests FAILED:'; echo '	  1 - unit (Failed)'; exit 8; }
+exit 0
+EOF
+chmod +x "$WORK/cppstub/cmake" "$WORK/cppstub/ctest"
+mkdir -p "$CN/build-agent" "$CN/build-agent-asan"; : > "$CN/build-agent/CMakeCache.txt"; : > "$CN/build-agent-asan/CMakeCache.txt"
+cppfn(){   # cppfn [VAR=value...] <function> [args...]: a stack function with the stand-ins on PATH
+  local vars=()
+  while case "${1:-}" in *=*) true ;; *) false ;; esac; do vars+=("$1"); shift; done
+  (cd "$CN" && env PATH="$WORK/cppstub:$PATH" AGENTS_ROOT="$CN" ${vars[@]+"${vars[@]}"} bash -c '. .agents/stacks/cpp-cmake/lib.sh && "$@"' _ "$@")
+}
+trc  "no CTest file: tests are infra (3)" 3 cppfn cpp_test_all
+out="$(cppfn cpp_test_all || true)"
+t    "...and say no tests ran, with the fix" bash -c "printf '%s' \"\$1\" | grep -q '^infra: tests: no tests ran: CTest has none registered in build-agent' && printf '%s' \"\$1\" | grep -qF 'CPP_NO_TESTS=ok'" _ "$out"
+: > "$CN/build-agent/CTestTestfile.cmake"; : > "$CN/build-agent-asan/CTestTestfile.cmake"
+trc  "zero tests, ctest exits 0: infra (3)" 3 cppfn STUB_NONE_RC=0 cpp_test_all
+trc  "zero tests, ctest exits 8: infra (3)" 3 cppfn STUB_NONE_RC=8 cpp_test_all
+trc  "affected tests: none registered is infra too" 3 cppfn cpp_test_affected src/x.cpp
+trc  "...even with nothing changed" 3  cppfn cpp_test_affected
+trc  "sanitizer tests: none registered is infra" 3 cppfn cpp_sanitize
+out="$(cppfn cpp_sanitize || true)"
+t    "...named as the sanitizer step"  bash -c "printf '%s' \"\$1\" | grep -q '^infra: sanitizer-tests: no tests ran: CTest has none registered in build-agent-asan'" _ "$out"
+trc  "registered tests run as before" 0 cppfn STUB_TESTS=2 cpp_test_all
+trc  "...and a failing one fails (ctest's 8)" 8 cppfn STUB_TESTS=2 STUB_FAIL=1 cpp_test_all
+trc  "...with nothing affected, quiet" 0 cppfn STUB_TESTS=2 cpp_test_affected
+printf '. .agents/stacks/cpp-cmake/lib.sh\ncpp_py() { echo "^(Nope)\\$"; }\ncpp_test_affected src/x.cpp\n' > "$WORK/cpp-nomatch.sh"
+trc  "a selection matching no listed test runs them all" 0 cppfn STUB_TESTS=2 STUB_RMATCH=0 STUB_LOG="$WORK/ctest-runs.log" bash "$WORK/cpp-nomatch.sh"
+t    "...without -R"                   bash -c "test -s '$WORK/ctest-runs.log' && ! grep -q -- ' -R ' '$WORK/ctest-runs.log'"
+rm -f "$WORK/ctest-runs.log"
+trc  "...while one that matches runs just those" 0 cppfn STUB_TESTS=2 STUB_RMATCH=1 STUB_LOG="$WORK/ctest-runs.log" bash "$WORK/cpp-nomatch.sh"
+t    "...with -R"                      grep -qF -- ' -R ^(Nope)$' "$WORK/ctest-runs.log"
+out="$(cd "$CN" && PATH="$WORK/cppstub:$PATH" .agents/bin/verify --no-cache 2>&1 || true)"
+t    "verify says INFRA, not ok"       bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify turn' && printf '%s' \"\$1\" | grep -q 'no tests ran'" _ "$out"
+trc  "verify exits 3"  3               bash -c "cd '$CN' && PATH='$WORK/cppstub':\$PATH .agents/bin/verify --no-cache"
+printf 'CPP_NO_TESTS="ok"   # this project has no tests\n' >> "$CN/.agents/harness.conf"
+trc  "CPP_NO_TESTS=ok in harness.conf: quiet" 0 cppfn cpp_test_all
+t    "...and verify is ok"             bash -c "cd '$CN' && PATH='$WORK/cppstub':\$PATH .agents/bin/verify --no-cache | grep -qx 'ok verify turn'"
+edit "$CN/.agents/harness.conf" '/^CPP_NO_TESTS=/d'
+trc  "CPP_NO_TESTS=ok in the tier script works too" 0 cppfn CPP_NO_TESTS=ok cpp_sanitize
+trc  "any other value still reports" 3 cppfn CPP_NO_TESTS=yes cpp_test_all
+if [ "$HAVE_PY" -eq 1 ] && command -v cmake >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
+  # The pilot's case for real: a failing test binary CTest doesn't know about.
+  CR=$(repo cppnone-real)
+  printf 'cmake_minimum_required(VERSION 3.16)\nproject(d CXX)\nenable_testing()\nadd_executable(unit_tests t.cpp)\n' > "$CR/CMakeLists.txt"
+  printf 'int main() { return 1; }\n' > "$CR/t.cpp"
+  commit "$CR" code
+  "$HARNESS/install.sh" --stack cpp-cmake "$CR" >/dev/null 2>&1
+  out="$("$CR/.agents/bin/verify" 2>&1 || true)"
+  t  "real ctest, none registered: INFRA, no tests ran" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify turn' && printf '%s' \"\$1\" | grep -q '^infra: tests: no tests ran'" _ "$out"
+  edit "$CR/.agents/checks/turn.sh" 's|^# CPP_NO_TESTS=ok$|CPP_NO_TESTS=ok|; s|^# \(agents_step tests .*\)/my_tests"|\1/unit_tests"|'
+  out="$("$CR/.agents/bin/verify" 2>&1 || true)"
+  t  "...wired in the tier script, it runs and fails" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify turn' && printf '%s' \"\$1\" | grep -q '^FAIL tests (exit 1)' && ! printf '%s' \"\$1\" | grep -q 'no tests ran'" _ "$out"
+else
+  echo "  (real cmake part skipped: needs python3, cmake, c++)"; SKIP=$((SKIP + 1))
+fi
+}
+group grp_cpp_notests
+
 grp_fdd() {
 if [ "$HAVE_PY" -eq 1 ]; then
   echo "feature-driven workflow"
@@ -964,6 +1109,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t  "approve denied in policy"        grep -q '^deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve' "$F/.agents/policy.conf"
   t  "fdd skill installed"             test -f "$F/.agents/skills/feature-driven/SKILL.md"
   t  "fdd command executable"          test -x "$FDDX"
+  t  "fdd approve --help: usage, exit 0" bash -c "'$FDDX' approve design --help | grep -q '^usage: fdd approve'"
   t  "artifacts stay local"            bash -c "mkdir -p '$FD' && echo x > '$FD/model.md' && git -C '$F' check-ignore -q .agents/fdd/model.md"
   t  "seeded gitignore itself tracked" bash -c "git -C '$F' ls-files --error-unmatch .agents/fdd/.gitignore"
   printf 'int total(int a, int b) { return b + a; }\n' > "$F/src/sale.cpp"
