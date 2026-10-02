@@ -44,6 +44,10 @@ def refs(value):
     return [(m.group(1), m.group(2)) for m in REF.finditer(value)]
 
 
+def _no_constant(name):
+    raise ValueError("%s isn't JSON" % name)   # NaN and Infinity: Python takes them, JSON and TOML don't
+
+
 def _strings(v):
     return isinstance(v, list) and all(isinstance(x, str) for x in v)
 
@@ -66,7 +70,7 @@ class Server(object):
             self.errors.append((None, "can't read it (%s)" % e))
             return
         try:
-            data = json.loads(text)
+            data = json.loads(text, parse_constant=_no_constant)
         except ValueError as e:
             self.errors.append((getattr(e, "lineno", None), "not valid JSON (%s)" % getattr(e, "msg", e)))
             return
@@ -154,9 +158,21 @@ class Server(object):
                         self._err("native.%s: expected an object" % tool)
                     else:
                         self.native[tool] = block
+                        self._secrets("native.%s." % tool, block)
                         if tool == "gemini" and block.get("trust") is True:
                             self._warn("native.gemini: trust: true skips gemini's confirmation for every tool this "
                                        "server has; rendered as written")
+
+    def _secrets(self, prefix, block):
+        """The secrets rule for a native block's env and header maps, as for the neutral ones."""
+        for k in ("env", "headers", "http_headers"):
+            v = block.get(k)
+            if not isinstance(v, dict):
+                continue
+            for name, val in v.items():
+                if isinstance(val, str) and secret_name(name, k != "env") and val != "" and not refs(val):
+                    self._err("%s%s.%s is a literal; use ${VAR} so the secret stays out of the repo"
+                              % (prefix, k, name))
 
     def wants(self, tool):
         return self.targets is None or tool in self.targets
@@ -254,8 +270,9 @@ def render(srv, tool, adapters):
         entry, _ = _json_entry(srv, "claude", keys)
         entry = dict([("type", srv.type)] + list(entry.items()))
         if srv.tools is not None:
-            if "copilot" in on:
-                entry["tools"] = list(srv.tools)   # Copilot CLI reads it; Claude has no per-server list
+            # Copilot CLI reads it (and reads .mcp.json whatever targets says); Claude has no per-server list
+            if "copilot" in on or "copilot" in adapters:
+                entry["tools"] = list(srv.tools)
             else:
                 missing.append("tools")
         return _merge_native(entry, srv, on), missing, notes
@@ -397,6 +414,43 @@ def _table_name(line):
     return m.group(2) if m.group(2) is not None else m.group(3)
 
 
+# A plain key at the start of a line (bare or quoted), then = or a dot.
+KEY = re.compile(r"""^\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([A-Za-z0-9_-]+))\s*([.=])""")
+
+
+def _key(m):
+    if m.group(1) is not None:
+        try:
+            return json.loads('"%s"' % m.group(1))
+        except ValueError:
+            return m.group(1)
+    return m.group(2) if m.group(2) is not None else m.group(3)
+
+
+def project_names(lines):
+    """The MCP servers a config.toml's own lines define: [mcp_servers.<n>] tables (and subtables),
+    <n>.x = / <n> = under [mcp_servers], and mcp_servers.<n>.x = at the top level."""
+    out, table = set(), None
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("["):
+            n = _table_name(ln)
+            if n is not None:
+                out.add(n)
+            table = re.sub(r"\s+", "", s.split("#", 1)[0])
+            continue
+        m = KEY.match(ln)
+        if not m:
+            continue
+        if table == "[mcp_servers]":
+            out.add(_key(m))
+        elif table is None and _key(m) == "mcp_servers" and m.group(4) == ".":
+            m2 = KEY.match(ln[m.end():])
+            if m2:
+                out.add(_key(m2))
+    return out
+
+
 def file_tools(rel, adapters):
     return [t for t in adapters if FILES[t] == rel]
 
@@ -416,10 +470,9 @@ def toml_block(text):
     chunks, name = {}, None
     for ln in lines[b + 1:e]:
         n = _table_name(ln) if ln.startswith("[") else None
-        if n is not None and not ln.lstrip().startswith("[[") and ln.rstrip().endswith("]") \
-                and ln.count("[") == 1:
+        if n is not None and not ln.lstrip().startswith("[[") and n != name:
             name = n
-            chunks[name] = [ln]
+            chunks.setdefault(name, []).append(ln)
         elif name is not None:
             chunks[name].append(ln)
     sep = 1 if b > 0 and not lines[b - 1].strip() else 0   # the blank line sync puts before the block
@@ -453,6 +506,8 @@ def sync_mcp(root, conf, rows, check, tracked, old_lock, team, library_missing=F
             continue
         if srv.targets is not None and "claude" in adapters and "claude" not in tools and "copilot" in tools:
             res["warnings"].append("%s: claude reads .mcp.json too, so it gets this server along with copilot" % shown)
+        if srv.targets is not None and "copilot" in adapters and "copilot" not in tools and "claude" in tools:
+            res["warnings"].append("%s: copilot reads .mcp.json too, so it gets this server along with claude" % shown)
         missing = {}
         for tool in tools:
             entry, miss, notes = render(srv, tool, adapters)
@@ -470,14 +525,15 @@ def sync_mcp(root, conf, rows, check, tracked, old_lock, team, library_missing=F
         elif rel in JSON_FILES:
             _settle_json(root, rel, want.get(rel, {}), set(old_lock.get(rel, [])), held, check, tracked, team,
                          library_missing, adapters, res)
-    for rel in JSON_FILES + (FILES["codex"],):   # names other agents' mcp: may point at
-        if rel in res["lock"] or not os.path.isfile(os.path.join(root, rel)):
+    for rel in JSON_FILES + (FILES["codex"],):   # names an agent's mcp: may point at, wherever they are
+        if not os.path.isfile(os.path.join(root, rel)):
             continue
         try:
             with open(os.path.join(root, rel), encoding="utf-8") as fh:
                 text = fh.read()
             if rel == FILES["codex"]:
-                res["seen"].update(n for n in (_table_name(ln) for ln in toml_block(text)[0]) if n)
+                outside, chunks, _ = toml_block(text)
+                res["seen"].update(project_names(outside) | set(chunks))
             else:
                 res["seen"].update(((json.loads(text) or {}).get("mcpServers") or {}).keys())
         except (OSError, ValueError, AttributeError, UnicodeDecodeError):
@@ -489,9 +545,12 @@ def _skip(root, rel, ws, old, tracked, team, adapters, res):
     """True (with a warning) when sync mustn't touch the file: a link, or tracked in local mode.
     What sync recorded for it stays recorded."""
     full = os.path.join(root, rel)
+    d = os.path.dirname(rel)
     why = None
     if os.path.islink(full):
         why = "%s is a link; sync leaves it alone" % rel
+    elif d and os.path.realpath(os.path.join(root, d)) != os.path.join(os.path.realpath(root), d):
+        why = "%s is a link (or inside one); sync leaves %s alone" % (d, rel)
     elif not team and tracked(rel):
         why = ("the project tracks %s; local mode leaves it alone, so these servers aren't rendered for %s"
                % (rel, ", ".join(file_tools(rel, adapters)) or "it"))
@@ -519,8 +578,14 @@ def _settle(root, rel, old_text, new_text, check, res):
     d = os.path.dirname(full)
     if d:
         os.makedirs(d, exist_ok=True)
-    with open(full, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
+    tmp = full + ".ai-harness.tmp"   # the file is the project's too: never leave it half-written
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+        os.replace(tmp, full)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     res["wrote"].append("wrote " + rel)
 
 
@@ -542,7 +607,6 @@ def _settle_json(root, rel, ws, old, held, check, tracked, team, library_missing
                 res["lock"][rel] = sorted(old)
             return
     servers = (obj or {}).get("mcpServers") or {}
-    res["seen"].update(servers)
     new, owned = {}, set()
     for n, v in servers.items():
         if n in old and n not in ws:
@@ -557,7 +621,7 @@ def _settle_json(root, rel, ws, old, held, check, tracked, team, library_missing
         new[n] = v
     for n in sorted(ws):
         entry, shown = ws[n]
-        if n in servers and n not in old:
+        if n in servers and n not in old and servers[n] != entry:   # one just like sync's is sync's
             res["warnings"].append("%s: server '%s' was added by hand; it stays, and the one from %s isn't rendered "
                                    "for %s" % (rel, n, shown, ", ".join(file_tools(rel, adapters))))
             continue
@@ -603,8 +667,7 @@ def _settle_toml(root, rel, ws, old, held, check, tracked, team, library_missing
         return
     if not has_block and not ws:
         return   # nothing of sync's there, and nothing to add: untouched
-    project = set(n for n in (_table_name(ln) for ln in outside) if n)
-    res["seen"].update(project)
+    project = project_names(outside)
     final = {}
     for n, chunk in chunks.items():   # the block is sync's: what's in it is sync's, recorded or not
         if n in ws or n in project:

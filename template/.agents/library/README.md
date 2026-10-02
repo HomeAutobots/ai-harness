@@ -164,9 +164,11 @@ Where each server lands:
 sync owns only the names it wrote, recorded per file in `generated.lock`. A re-render replaces
 those, adds new ones, and removes ones whose server is gone; everything else in the file stays. A
 server you added by hand with the same name wins, with a warning. A config that ends up holding
-nothing is removed. A config that isn't valid JSON is an error and is left alone. An agent's
+nothing is removed. A config that isn't valid JSON is an error and is left alone. A `native`
+block's `env` and header values follow the same secrets rule. An agent's
 `mcp: [x]` naming a server no library or config here has gets a warning.
 
 Team mode commits these configs, so a personal server isn't rendered; sync names your tool's user
 scope instead (`claude mcp add --scope local`, `~/.cursor/mcp.json`, and so on). Local mode never
-touches a config the project tracks, and hides the ones it writes in the clone's exclude block.
+touches a config the project tracks, and hides the ones it writes in the clone's exclude block
+(an untracked one of yours too, once it holds sync's servers).

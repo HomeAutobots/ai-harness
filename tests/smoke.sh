@@ -2667,6 +2667,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "an unknown target warns"         hasl "$(mc badtgt '{"command": "x", "targets": ["claude", "vim"]}')" "targets: unknown tool 'vim'"
   t    "an unknown native tool warns"    hasl "$(mc badnat '{"command": "x", "native": {"vim": {}}}')" "native: unknown tool 'vim'"
   t    "a native block must be an object" hasl "$(mc badnat2 '{"command": "x", "native": {"claude": "x"}}')" "native.claude: expected an object"
+  t    "a literal secret in a native block is refused too" hasl "$(mc natsec '{"command": "x", "native": {"claude": {"env": {"GITHUB_TOKEN": "ghp_live"}}, "codex": {"http_headers": {"Authorization": "Bearer abc"}}}}')" "native.claude.env.GITHUB_TOKEN is a literal"
+  t    "...for codex's http_headers as well" hasl "$(mc natsec '{"command": "x", "native": {"codex": {"http_headers": {"Authorization": "Bearer abc"}}}}')" "native.codex.http_headers.Authorization is a literal"
+  t    "NaN isn't JSON"                  hasl "$(mc nan '{"command": "x", "native": {"codex": {"t": NaN}}}')" "not valid JSON (NaN isn't JSON)"
   t    "native gemini trust warns as escalation" hasl "$(mc trust '{"command": "x", "native": {"gemini": {"trust": true}}}')" "native.gemini: trust: true skips gemini's confirmation for every tool this server has"
 fi
 
@@ -2719,6 +2722,8 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "native keys merge into the entry" jeq "$(mr claude "$WORK/nat.json" ADAPTERS=claude)" '{"type": "stdio", "command": "x", "cwd": "d", "timeout": 5}'
   X="$(mr codex "$WORK/nat.json")"
   t    "codex: native keys override sync's, null removes one" test "$X" = "$(printf '%s\n' '[mcp_servers.nat]' 'command = "x"' 'enabled_tools = ["a"]' 'startup_timeout_sec = 20')"
+  printf '%s\n' '{"command": "x", "tools": ["a"], "targets": ["claude"]}' > "$WORK/tgtc.json"
+  t    "copilot on but not targeted: tools still kept, since copilot reads .mcp.json anyway" hasl "$(mr claude "$WORK/tgtc.json" ADAPTERS="claude copilot")" '"tools"'
   printf '%s\n' '{"command": "x", "targets": ["codex"]}' > "$WORK/tgt.json"
   t    "a tool the targets leave out gets nothing" test -z "$(mr claude "$WORK/tgt.json")"
   printf '%s\n' '{"command": "x"}' > "$WORK/a.b.json"
@@ -2762,6 +2767,10 @@ print(json.dumps(d, sort_keys=True))' "$1" "$2" 2>/dev/null; }   # jget <file> <
   out="$(mrun "$WORK/mset" "$WORK/mout" 2>/dev/null)"
   t    "a second run changes nothing"    test -z "$out"
   trc  "...and --check is clean"         0 mrun --check "$WORK/mset" "$WORK/mout"
+  python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); d.pop("mcp"); open(sys.argv[1], "w").write(json.dumps(d, indent=2) + "\n")' "$MM/.agents/generated.lock"
+  out="$(mrun "$WORK/mset" "$WORK/mout" 2>&1)"
+  tnot "a lost lock: entries just like sync's are sync's again, no warning" hasl "$out" "server 'github' was added by hand"
+  t    "...and the lock is back"         test "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["mcp"][".cursor/mcp.json"])' "$MM/.agents/generated.lock")" = "['github', 'linear']"
   edit "$MM/.cursor/mcp.json" 's|"npx"|"evil"|'
   cp "$MM/.cursor/mcp.json" "$WORK/cursor.before"
   out="$(mrun --check "$WORK/mset" "$WORK/mout" 2>&1)" && rc=0 || rc=$?
@@ -2784,6 +2793,30 @@ print(json.dumps(d, sort_keys=True))' "$1" "$2" 2>/dev/null; }   # jget <file> <
   t    "...with a warning"               hasl "$out" ".codex/config.toml: server 'github' was added by hand; it stays"
   t    "...and the lock drops the name"  test "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["mcp"][".codex/config.toml"])' "$MM/.agents/generated.lock")" = "['linear']"
   tail -n +3 "$MM/.codex/config.toml" > "$WORK/cx.tail"; cat "$WORK/cx.tail" > "$MM/.codex/config.toml"
+  { cat "$WORK/cx.tail"; printf '[mcp_servers]\ngithub = { command = "inline" }\nlinear.command = "dotted"\n'; } > "$MM/.codex/config.toml"
+  out="$(mrun "$WORK/mset" "$WORK/mout" 2>&1)"
+  t    "codex: servers the project defines with keys under [mcp_servers] win too" bash -c "! grep -qx '\[mcp_servers.github\]' '$MM/.codex/config.toml' && ! grep -qx '\[mcp_servers.linear\]' '$MM/.codex/config.toml'"
+  t    "...with a warning each"          bash -c "printf '%s' \"\$1\" | grep -q \"server 'github' was added by hand\" && printf '%s' \"\$1\" | grep -q \"server 'linear' was added by hand\"" _ "$out"
+  if python3 -c 'import tomllib' 2>/dev/null; then
+    t  "...and the file stays valid TOML" python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$MM/.codex/config.toml"
+  fi
+  { printf 'mcp_servers.linear.command = "dotted"\n'; cat "$WORK/cx.tail"; } > "$MM/.codex/config.toml"
+  mrun "$WORK/mset" "$WORK/mout" >/dev/null 2>&1
+  t    "codex: ...and with a dotted key at the top" bash -c "! grep -qx '\[mcp_servers.linear\]' '$MM/.codex/config.toml' && grep -qx '\[mcp_servers.github\]' '$MM/.codex/config.toml'"
+  cat "$WORK/cx.tail" > "$MM/.codex/config.toml"
+  mrun "$WORK/mset" "$WORK/mout" >/dev/null 2>&1
+  printf '# >>> ai-harness mcp (managed by .agents/bin/sync)\n' >> "$MM/.codex/config.toml"
+  cp "$MM/.codex/config.toml" "$WORK/cx.broken"
+  out="$(mrun "$WORK/mset" "$WORK/mout" 2>&1)" && rc=0 || rc=$?
+  t    "codex: broken block markers are an error (rc 5)" test "$rc" = 5
+  t    "...naming the file"              hasl "$out" ".codex/config.toml: its ai-harness mcp block markers are broken"
+  t    "...left untouched"               cmp -s "$MM/.codex/config.toml" "$WORK/cx.broken"
+  cat "$WORK/cx.tail" > "$MM/.codex/config.toml"
+  { row github "$MM/.agents/library/mcp/github.json" project; echo; } > "$WORK/msetc"
+  printf '{"command": "x", "targets": ["copilot"]}\n' > "$WORK/conly.json"
+  { row conly "$WORK/conly.json" project; echo; } >> "$WORK/msetc"
+  out="$(mrun "$WORK/msetc" "$WORK/mout" 2>&1)"
+  t    "a server only for copilot: claude sees .mcp.json too, and that warns" hasl "$out" "conly.json: claude reads .mcp.json too, so it gets this server along with copilot"
   { row github "$MM/.agents/library/mcp/github.json" project; echo; } > "$WORK/mset1"
   mrun "$WORK/mset1" "$WORK/mout" >/dev/null 2>&1
   t    "a server that's gone leaves every file" bash -c "! grep -q linear '$MM/.cursor/mcp.json' && ! grep -q linear '$MM/.gemini/settings.json' && ! grep -q 'mcp_servers.linear' '$MM/.codex/config.toml'"
@@ -2822,6 +2855,11 @@ print(json.dumps(d, sort_keys=True))' "$1" "$2" 2>/dev/null; }   # jget <file> <
   t    "a config that's a link warns"    hasl "$out" ".cursor/mcp.json is a link; sync leaves it alone"
   t    "...and isn't written through"    cmp -s "$WORK/cursor.before" "$WORK/cursor.target"
   rm "$MM/.cursor/mcp.json"
+  mv "$MM/.cursor" "$WORK/cursor-dir"; ln -s "$WORK/cursor-dir" "$MM/.cursor"
+  out="$(mrun "$WORK/mset1" "$WORK/mout" 2>&1)" || true
+  t    "a config inside a linked dir warns" hasl "$out" ".cursor is a link (or inside one); sync leaves .cursor/mcp.json alone"
+  t    "...and isn't written through"    test ! -e "$WORK/cursor-dir/mcp.json"
+  rm "$MM/.cursor"; mv "$WORK/cursor-dir" "$MM/.cursor"
   { row helper "$MM/.agents/library/mcp/github.json" personal; echo; } > "$WORK/mpers"
   out="$(mrun "$WORK/mpers" "$WORK/mout" 2>&1)" || true
   t    "team: a personal server isn't rendered" bash -c "! grep -q helper '$MM/.mcp.json'"
@@ -2840,7 +2878,8 @@ fi
 echo "mcp: sync"
 if [ "$HAVE_PY" -eq 1 ]; then
   MS=$(repo mcpsync)
-  printf '{"mcpServers": {"mine": {"command": "mine"}}}\n' > "$MS/.mcp.json"; commit "$MS" "our own server"
+  printf '{"mcpServers": {"mine": {"command": "mine"}}}\n' > "$MS/.mcp.json"
+  mkdir -p "$MS/.codex"; printf 'model = "m"\n' > "$MS/.codex/config.toml"; commit "$MS" "our own server"
   "$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1
   edit "$MS/.agents/harness.conf" 's|^ADAPTERS=.*|ADAPTERS="claude copilot cursor codex gemini"|'
   mkdir -p "$MS/.agents/library/mcp"
@@ -2900,12 +2939,15 @@ if [ "$HAVE_PY" -eq 1 ]; then
 
   echo "mcp: team and local mode"
   "$HARNESS/install.sh" --local "$MS" >/dev/null 2>&1
-  t    "team to local: a config with only sync's servers is untracked" bash -c "cd '$MS' && ! git ls-files --error-unmatch .cursor/mcp.json >/dev/null 2>&1 && ! git ls-files --error-unmatch .codex/config.toml >/dev/null 2>&1"
-  t    "...kept, and hidden"             bash -c "test -f '$MS/.cursor/mcp.json' && cd '$MS' && git check-ignore -q .cursor/mcp.json && git check-ignore -q .codex/config.toml"
+  t    "team to local: a config with only sync's servers is untracked" bash -c "cd '$MS' && ! git ls-files --error-unmatch .cursor/mcp.json >/dev/null 2>&1"
+  t    "...kept, and hidden"             bash -c "test -f '$MS/.cursor/mcp.json' && cd '$MS' && git check-ignore -q .cursor/mcp.json"
+  t    "...a codex config with the project's lines stays tracked" bash -c "cd '$MS' && git ls-files --error-unmatch .codex/config.toml >/dev/null 2>&1"
+  t    "...without the block"            test "$(cat "$MS/.codex/config.toml")" = 'model = "m"'
   t    "...one with the project's servers too stays tracked" bash -c "cd '$MS' && git ls-files --error-unmatch .mcp.json >/dev/null 2>&1"
   t    "...stripped of sync's"           bash -c "grep -q '\"mine\"' '$MS/.mcp.json' && ! grep -q github '$MS/.mcp.json'"
   out="$("$MS/.agents/bin/sync" 2>&1)"
   t    "local: the tracked .mcp.json is left alone, with a warning" hasl "$out" "the project tracks .mcp.json; local mode leaves it alone"
+  t    "local: so is the tracked codex config" hasl "$out" "the project tracks .codex/config.toml; local mode leaves it alone"
   t    "local: the other configs still have the servers" test "$(jget "$MS/.cursor/mcp.json" mcpServers.linear.url)" = '"https://mcp.linear.app/mcp"'
   commit "$MS" "local"
   t    "local: status clean"             test -z "$(git -C "$MS" status --porcelain)"
@@ -2920,7 +2962,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$MS/.agents/bin/sync" 2>&1)" && rc=0 || rc=$?
   t    "a crash: plain sync still finishes" test "$rc" = 0
   t    "...says rendering failed"        hasl "$out" "rendering MCP servers failed (see above)"
-  t    "...and the configs stay hidden"  bash -c "cd '$MS' && git check-ignore -q .cursor/mcp.json && git check-ignore -q .codex/config.toml"
+  t    "...and the configs stay hidden"  bash -c "cd '$MS' && git check-ignore -q .cursor/mcp.json"
   out="$("$MS/.agents/bin/sync" --check 2>&1)" && rc=0 || rc=$?
   t    "...--check fails"                test "$rc" = 1
   tnot "...without block drift"          hasl "$out" "harness block"
@@ -2929,6 +2971,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$HARNESS/install.sh" --team "$MS" >/dev/null 2>&1
   t    "local to team: the servers are back in .mcp.json" test "$(jget "$MS/.mcp.json" mcpServers.github.command)" = '"npx"'
   t    "...and the configs aren't hidden" bash -c "cd '$MS' && ! git check-ignore -q .cursor/mcp.json"
+  t    "...and the codex block is back"  grep -qx '\[mcp_servers.linear\]' "$MS/.codex/config.toml"
   t    "team: --check clean"             "$MS/.agents/bin/sync" --check
 
   echo "mcp: absence"
@@ -2943,6 +2986,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   tnot "...no mcp key in the lock"       grep -q '"mcp"' "$MA/.agents/generated.lock"
   tnot "...no mcpServers in gemini settings" grep -q mcpServers "$MA/.gemini/settings.json"
   t    "...and --check is clean"         "$MA/.agents/bin/sync" --check
+  mkdir -p "$MA/.agents/library/mcp"; printf '{"command": "x"}\n' > "$MA/.agents/library/mcp/new.json"
+  trc  "a new server: --check fails"     1 "$MA/.agents/bin/sync" --check
+  t    "...and writes nothing"           bash -c "test ! -e '$MA/.cursor/mcp.json' && cmp -s '$MA/.mcp.json' '$WORK/abs.mcp' && cmp -s '$MA/.codex/config.toml' '$WORK/abs.toml' && ! grep -q '\"mcp\"' '$MA/.agents/generated.lock'"
 fi
 
 echo "guards"
