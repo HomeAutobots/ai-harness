@@ -39,6 +39,7 @@ inspection records the commit and is final.
 | turn, full | `fdd-simulated-human` | a simulated-human switch that `install.sh --simulated-human` didn't write, or that appeared or changed during an agent turn; it's off, and it's a policy block |
 | turn, full | `fdd-not-local` | `FDD_DIR` is in the repo but git tracks files in it or doesn't ignore it |
 | turn, full | `fdd-list-missing` | the approved list was deleted |
+| turn, full (when a change outside `FDD_DIR` and `.agents/` is judged) | `fdd-scope-empty` | `FDD_SCOPE` matches no tracked file and no new one git doesn't ignore, so every gate below would stay quiet; set it to where the code is |
 | turn, full | `fdd-list-unapproved` | in-scope code changed while the list isn't approved, or changed since |
 | turn, full | `fdd-unknown` | a task in progress names a feature that isn't in the list |
 | turn, full | `fdd-untraced` | in-scope code changed with no task in progress naming a feature |
@@ -47,9 +48,18 @@ inspection records the commit and is final.
 
 The full tier writes `.agents/cache/fdd-progress.md`, FDD's parking lot: each feature's milestone
 (designed 41%, design approved 44%, built 89%, inspected 100%) and each feature set's average.
+Built needs a `done` task whose recorded commit is a SHA git has (`git cat-file -e <sha>^{commit}`);
+a made-up SHA, a ref name, or a commit since lost stays at 44% as `built (commit not found)`
+(`tasks set <slug> <T-id> done HEAD` records the SHA `HEAD` names, so that works). Any real commit
+counts, though, even one that doesn't touch `FDD_SCOPE` or belongs to another feature; review
+`fdd status` before you approve an inspection.
+`fdd status` shows the same milestones.
 
 ## Notes
 - **Nothing configured, nothing happens.** Until `features.md` exists, every check is quiet and commits pass.
+  After that, an `FDD_SCOPE` that matches nothing is a finding (`fdd-scope-empty`, exit 1), not a
+  quiet pass: the default `src/**` matches nothing in a repo without `src/`, and an untailored
+  scope would otherwise turn every gate off.
 - **Tracing is local.** A change belongs to the feature whose plan task is `doing`, or, for a commit
   made in the turn, the feature whose task is `done` with that commit recorded; nothing in the code says so.
 - **Gates.** `FDD_ASK` picks the check-ins that need your approval; the others get an agent review only.
