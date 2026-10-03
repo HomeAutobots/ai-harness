@@ -246,6 +246,7 @@ Pack scripts run from wherever the pack lives. Find the pack's own files from th
 A stack's settings go in `.agents/harness.conf` (every tier) or in a tier script (that tier). A value the tier script sets wins over `harness.conf`, which wins over the stack's default. A stack's `lib.sh` picks its keys up with `agents_conf_import <PREFIX>` (from `.agents/lib/feedback.sh`), since `verify` reads `harness.conf` without passing it on.
 
 - **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only (skipped when it isn't installed; drop the guard in the tier scripts to require it), affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. When CTest has no tests registered, the test steps print `no tests ran` and exit 3 (`INFRA verify turn`), never a quiet `ok`; set `CPP_NO_TESTS=ok` for a project with no tests, or one whose tier scripts run its test binaries themselves. Settings are `CPP_*` (`CPP_BUILD_DIR`, `CPP_JOBS`, `CPP_TEST_TIMEOUT`, and so on). See `stacks/cpp-cmake/README.md`.
+- **python**: runs the tools the project already uses, from its own environment (`PY_RUN`, else its virtualenv: `PY_VENV`, `.venv`, `venv`, an activated `$VIRTUAL_ENV`, or poetry's; else `PATH`, though pytest and mypy never come from `PATH` when the project has or expects an environment of its own). Edit: a format check (ruff format or black, only when the project formats with one; reported, never applied) and ruff lint on the edited files (only syntax errors and undefined names when the project has no ruff config), or a syntax check without ruff. Turn: the same on changed files, mypy or pyright for changed files when the project configures one, and only the pytest tests the change can reach, from a static import scan (anything it can't place runs the whole suite). Full: all of it over the whole project, every test. A tool the project configures but the machine lacks is `INFRA`; one it doesn't configure is skipped. When pytest collects nothing, the test steps say `no tests ran` and exit 3, like cpp-cmake; `PY_NO_TESTS=ok` turns that off. Settings are `PY_*` (`PY_RUN`, `PY_VENV`, `PY_FORMAT`, `PY_TYPECHECK`, `PY_PYTEST_ARGS`, and so on). See `stacks/python/README.md`.
 
 ## Workflow packs
 
@@ -315,7 +316,7 @@ Change the harness here, bump `VERSION`, add a CHANGELOG entry, then per project
 ## Requirements
 
 - bash 3.2+ (stock macOS works), git, POSIX tools (any awk: tested with gawk, mawk, one-true-awk).
-- python3 3.8+ for hooks, JSON config rendering, evals, the cpp-cmake helpers, and workflow packs' checks. Without it, sync warns and hooks step aside rather than wedging the agent.
+- python3 3.8+ for hooks, JSON config rendering, evals, the cpp-cmake helpers, the python stack's affected-test scan, and workflow packs' checks. Without it, sync warns and hooks step aside rather than wedging the agent.
 
 ## Windows
 

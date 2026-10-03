@@ -10,6 +10,8 @@ trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
+# shellcheck disable=SC2046  # one name per word
+unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT $(compgen -v PY_ || true)   # the python stack reads these; an activated venv mustn't decide its tests
 
 PASS=0; FAIL=0; SKIP=0
 ok()  { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
@@ -1177,6 +1179,447 @@ else
 fi
 }
 group grp_cpp_notests
+
+# The python stack runs against stand-in tools, on a PATH that hides any real ruff, black, mypy,
+# pyright, pytest, poetry, or uv (a PATH directory holding one is replaced by links to the rest).
+pyhide() {  # pyhide <dir>: prints that PATH
+  local d s i=0 out=""
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    if [ ! -e "$d/ruff" ] && [ ! -e "$d/black" ] && [ ! -e "$d/mypy" ] && [ ! -e "$d/pyright" ] \
+       && [ ! -e "$d/pytest" ] && [ ! -e "$d/poetry" ] && [ ! -e "$d/uv" ]; then
+      out="$out${out:+:}$d"; continue
+    fi
+    i=$((i + 1)); s="$1/$i"; mkdir -p "$s"
+    ln -s "$d"/* "$s/" 2>/dev/null || true
+    rm -f "$s/ruff" "$s/black" "$s/mypy" "$s/dmypy" "$s/pyright" "$s/pytest" "$s/py.test" "$s/poetry" "$s/uv"
+    out="$out${out:+:}$s"
+  done <<EOF
+$(printf '%s\n' "$PATH" | tr ':' '\n')
+EOF
+  printf '%s' "$out"
+}
+pystubs() {  # pystubs <dir>: stand-ins driven by STUB_* variables; each logs its arguments to STUB_LOG
+  mkdir -p "$1"
+  cat > "$1/ruff" <<'EOF'
+#!/bin/sh
+case "$1" in --version) echo "ruff ${STUB_RUFF_VERSION:-0.15.0}"; exit 0 ;; esac
+[ -n "${STUB_LOG:-}" ] && echo "ruff $*" >> "$STUB_LOG"
+case "$1" in
+  check) [ -n "${STUB_RUFF_OUT:-}" ] || exit 0; printf '%s\n' "$STUB_RUFF_OUT"; echo "Found 1 error."; exit 1 ;;
+  format) [ -n "${STUB_FMT_DIFF:-}" ] || exit 0; cat "$STUB_FMT_DIFF"; exit 1 ;;
+esac
+exit 0
+EOF
+  cat > "$1/black" <<'EOF'
+#!/bin/sh
+[ -n "${STUB_LOG:-}" ] && echo "black $*" >> "$STUB_LOG"
+[ -n "${STUB_FMT_DIFF:-}" ] || exit 0; cat "$STUB_FMT_DIFF"; exit 1
+EOF
+  cat > "$1/mypy" <<'EOF'
+#!/bin/sh
+[ -n "${STUB_LOG:-}" ] && echo "mypy $*" >> "$STUB_LOG"
+[ -n "${STUB_MYPY_OUT:-}" ] || exit 0; printf '%s\n' "$STUB_MYPY_OUT"; exit 1
+EOF
+  cat > "$1/pyright" <<'EOF'
+#!/bin/sh
+[ -n "${STUB_LOG:-}" ] && echo "pyright $*" >> "$STUB_LOG"
+[ -n "${STUB_PYRIGHT_OUT:-}" ] || exit 0; cat "$STUB_PYRIGHT_OUT"; exit "${STUB_PYRIGHT_RC:-1}"
+EOF
+  cat > "$1/pytest" <<'EOF'
+#!/bin/sh
+if [ -n "${STUB_LOG:-}" ]; then { printf '%s' "${STUB_PYTEST_NAME:-pytest}"; for a in "$@"; do printf ' [%s]' "$a"; done; echo; } >> "$STUB_LOG"; fi
+rc="${STUB_PYTEST_RC:-0}"
+for a in "$@"; do case "$a" in *.py) rc="${STUB_PYTEST_RC_FILES:-$rc}" ;; esac; done
+[ -n "${STUB_PYTEST_OUT:-}" ] && printf '%s\n' "$STUB_PYTEST_OUT"
+exit "$rc"
+EOF
+  printf '#!/bin/sh\n[ -n "${STUB_LOG:-}" ] && echo "runner $*" >> "$STUB_LOG"\nexec "$@"\n' > "$1/runner"
+  chmod +x "$1"/*
+  for f in "$1"/*; do "$f" check </dev/null >/dev/null 2>&1 || true; done   # macOS checks a new executable on its first run: not inside a budget
+}
+
+grp_python() {
+echo "python stack"
+PYNP="$(pyhide "$WORK/pyhide")"; pystubs "$WORK/pystub"; PYLOG="$WORK/py-stub.log"
+pyv(){   # pyv <repo> [VAR=value...] <command...>: run with the stand-ins on a PATH without the real tools
+  local r="$1" vars=()
+  shift
+  while case "${1:-}" in *=*) true ;; *) false ;; esac; do vars+=("$1"); shift; done
+  (cd "$r" && env PATH="$WORK/pystub:$PYNP" STUB_LOG="$PYLOG" ${vars[@]+"${vars[@]}"} "$@")
+}
+tnot "the test PATH hides the real tools" env PATH="$PYNP" sh -c 'command -v ruff || command -v pytest || command -v mypy'
+PV=$(repo pyv)
+mkdir -p "$PV/tests"
+printf '[tool.ruff]\nline-length = 100\n\n[tool.mypy]\n' > "$PV/pyproject.toml"
+printf 'def add(a, b):\n    return a + b\n' > "$PV/app.py"
+printf 'def other():\n    return 1\n' > "$PV/other.py"
+printf 'from app import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n' > "$PV/tests/test_app.py"
+printf 'from other import other\n\n\ndef test_other():\n    assert other() == 1\n' > "$PV/tests/test_other.py"
+printf '.venv/\n__pycache__/\n' > "$PV/.gitignore"
+commit "$PV" code
+"$HARNESS/install.sh" --stack python "$PV" >/dev/null 2>&1
+printf 'EDIT_BUDGET=120   # a loaded test machine, not the budget, is under test here\n' >> "$PV/.agents/harness.conf"
+t    "stack recorded"               grep -q '^STACKS="python"' "$PV/.agents/harness.conf"
+t    "stack checks seeded"             bash -c "grep -q py_test_affected '$PV/.agents/checks/turn.sh' && grep -q py_lint '$PV/.agents/checks/edit.sh' && grep -q py_test_all '$PV/.agents/checks/full.sh'"
+t    "shim sources the pack"           grep -qF "agents_resolve stacks 'python'" "$PV/.agents/stacks/python/lib.sh"
+t    "clean tree: turn ok"             bash -c "cd '$PV' && PATH='$WORK/pystub:$PYNP' .agents/bin/verify --no-cache | grep -qx 'ok verify turn'"
+rm -f "$PYLOG"
+# The stand-ins' answers come from the environment, which verify's cache key doesn't see: --no-cache.
+pyedit(){ local r="$1"; shift; pyv "$r" "$@" .agents/bin/verify --tier=edit --no-cache app.py; }
+out="$(pyedit "$PV" STUB_RUFF_OUT='app.py:1:8: F401 [*] `os` imported but unused' 2>&1 || true)"
+t    "edit: ruff finding as path:line:col: error: message [code]" hasl "$out" 'app.py:1:8: error: `os` imported but unused [F401]'
+t    "...FAIL"                         bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify edit'" _ "$out"
+t    "...ruff never fixes, and keeps the project's excludes" grep -qF 'ruff check --no-fix --force-exclude --output-format=concise app.py' "$PYLOG"
+tnot "...no format check without a sign the project formats with ruff" grep -q '^ruff format' "$PYLOG"
+out="$(pyedit "$PV" STUB_RUFF_OUT='app.py:2:5: invalid-syntax: Expected an expression' 2>&1 || true)"
+t    "edit: a syntax error from ruff"  hasl "$out" 'app.py:2:5: error: Expected an expression [syntax]'
+trc  "edit: a non-Python file: nothing runs" 0 pyv "$PV" STUB_RUFF_OUT='x.py:1:1: F401 nope' .agents/bin/check README.md
+printf '\n[tool.ruff.format]\n' >> "$PV/pyproject.toml"
+printf -- '--- app.py\n+++ app.py\n@@ -3,4 +3,4 @@\n x = 1\n y = 2\n--- a comment\n+-- a comment\n z = 3\n' > "$WORK/py-fmt.diff"
+rm -f "$PYLOG"
+out="$(pyedit "$PV" STUB_FMT_DIFF="$WORK/py-fmt.diff" 2>&1 || true)"
+t    "[tool.ruff.format]: format checked, at the first line it would change" hasl "$out" 'app.py:5: error: not formatted the way ruff formats it (run: ruff format app.py) [ruff-format]'
+t    "...with --check and --diff, never in place" grep -qF 'ruff format --check --diff --force-exclude app.py' "$PYLOG"
+trc  "...and a formatted file passes" 0 pyedit "$PV"
+edit "$PV/pyproject.toml" '/^\[tool\.ruff\.format\]/d'
+printf 'repos:\n  - repo: https://github.com/astral-sh/ruff-pre-commit\n    hooks:\n      - id: ruff-format\n' > "$PV/.pre-commit-config.yaml"
+rm -f "$PYLOG"; pyedit "$PV" >/dev/null 2>&1 || true
+t    "ruff-format in pre-commit counts as formatting with ruff" grep -q '^ruff format' "$PYLOG"
+rm -f "$PV/.pre-commit-config.yaml"
+printf '\n[tool.black]\n' >> "$PV/pyproject.toml"
+printf -- '--- app.py\t2026-01-01 10:00:00.000000+00:00\n+++ app.py\t2026-01-01 10:00:01.000000+00:00\n@@ -1,2 +1,2 @@\n-def add(a,b):\n+def add(a, b):\n     return a + b\n' > "$WORK/py-black.diff"
+out="$(pyedit "$PV" STUB_FMT_DIFF="$WORK/py-black.diff" 2>&1 || true)"
+t    "[tool.black]: black checks the format" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
+tnot "...and its diff's timestamps stay out" hasl "$out" '2026-01-01'
+git -C "$PV" checkout -q pyproject.toml
+printf 'def add(a, b):\n    return a + b + 0\n' > "$PV/app.py"
+out="$(pyv "$PV" STUB_MYPY_OUT='other.py:2: error: Returning Any  [no-any-return]' .agents/bin/verify --no-cache 2>&1 || true)"
+t    "mypy: an error in a file the change didn't touch doesn't count" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'ok verify turn'" _ "$out"
+out="$(pyv "$PV" STUB_MYPY_OUT="$(printf 'other.py:2: error: Returning Any  [no-any-return]\napp.py:2: error: Unsupported operand  [operator]')" .agents/bin/verify --no-cache 2>&1 || true)"
+t    "...one in the changed file does" hasl "$out" 'app.py:2: error: Unsupported operand  [operator]'
+tnot "...alone"                        hasl "$out" 'other.py:2'
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "full: mypy over the project root, ruff over the project" bash -c "grep -qF 'mypy --no-pretty --no-color-output --no-error-summary .' '$PYLOG' && grep -qF 'ruff check --no-fix --force-exclude --output-format=concise .' '$PYLOG'"
+printf 'PY_TYPECHECK="pyright"\n' >> "$PV/.agents/harness.conf"
+printf '%s/app.py\n  %s/app.py:2:12 - error: Operator "+" not supported\n    \302\240\302\240Operand types are "int" and "str" (reportOperatorIssue)\n  %s/app.py:1:5 - warning: Unused thing (reportUnusedVariable)\n  %s/other.py:1:1 - error: Not this file (reportGeneralTypeIssues)\n2 errors, 1 warning, 0 informations\n' \
+  "$PV" "$PV" "$PV" "$PV" > "$WORK/py-pyright.out"
+rm -f "$PYLOG"
+out="$(pyv "$PV" STUB_PYRIGHT_OUT="$WORK/py-pyright.out" .agents/bin/verify --no-cache 2>&1 || true)"
+t    "PY_TYPECHECK=pyright: its errors as path:line:col, message lines joined, rule last" hasl "$out" 'app.py:2:12: error: Operator "+" not supported; Operand types are "int" and "str" [reportOperatorIssue]'
+tnot "...warnings don't fail"         hasl "$out" 'Unused thing'
+tnot "...nor other files' errors"     hasl "$out" 'Not this file'
+tnot "...and mypy doesn't run"        grep -q '^mypy' "$PYLOG"
+printf '  %s/app.py:1:5 - warning: Unused thing (reportUnusedVariable)\n0 errors, 1 warning, 0 informations\n' "$PV" > "$WORK/py-pyright.warn"
+trc  "...a warning alone passes"       0 pyv "$PV" STUB_PYRIGHT_OUT="$WORK/py-pyright.warn" STUB_PYRIGHT_RC=0 .agents/bin/verify --no-cache
+edit "$PV/.agents/harness.conf" '/^PY_TYPECHECK=/d'
+echo "python stack: tests"
+rm -f "$PYLOG"
+trc  "turn: passing tests, ok"         0 pyv "$PV" .agents/bin/verify --no-cache
+if [ "$HAVE_PY" -eq 1 ]; then
+  t  "...pytest ran just the test file that imports the changed module" bash -c "grep '^pytest' '$PYLOG' | grep -qF '[tests/test_app.py]' && ! grep -q 'test_other' '$PYLOG'"
+else
+  t  "...without python3 for the scan, every test" bash -c "grep '^pytest' '$PYLOG' | grep -qvF '.py]'"
+fi
+t    "...quietly, with short tracebacks" grep -qF '[-q] [--tb=short] [--color=no]' "$PYLOG"
+out="$(pyv "$PV" STUB_PYTEST_RC=1 STUB_PYTEST_OUT="$(printf '/usr/lib/python3/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name)\ntests/test_app.py:5: in test_add\n    assert add(1, 2) == 4\nE   assert 3 == 4\nFAILED tests/test_app.py::test_add - assert 3 == 4\n1 failed, 1 passed in 0.42s')" .agents/bin/verify --no-cache 2>&1 || true)"
+t    "a failing test: FAIL, at its line" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify turn' && printf '%s' \"\$1\" | grep -qx 'tests/test_app.py:5: in test_add'" _ "$out"
+t    "...with the assertion under it"   hasl "$out" '    E   assert 3 == 4'
+t    "...and the FAILED line"           hasl "$out" 'FAILED tests/test_app.py::test_add - assert 3 == 4'
+tnot "...without frames from outside the project" bash -c "printf '%s' \"\$1\" | grep -qE 'importlib|_bootstrap'" _ "$out"
+tnot "...and no timings, in the output or the log" bash -c "printf '%s' \"\$1\" | grep -q '0\.42s' || grep -rq '0\.42s' '$PV/.agents/cache/logs'" _ "$out"
+trc  "collection errors (pytest's 2): a finding, never a policy block" 1 pyv "$PV" STUB_PYTEST_RC=2 .agents/bin/verify --no-cache
+trc  "a usage error (pytest's 4): tooling" 3 pyv "$PV" STUB_PYTEST_RC=4 .agents/bin/verify --no-cache
+out="$(pyv "$PV" STUB_PYTEST_RC=4 .agents/bin/verify --no-cache 2>&1 || true)"
+t    "...said"                          hasl "$out" 'infra: tests: pytest exit 4'
+out="$(pyv "$PV" STUB_PYTEST_RC=5 .agents/bin/verify --no-cache 2>&1 || true)"
+t    "nothing collected (pytest's 5): INFRA, no tests ran" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify turn' && printf '%s' \"\$1\" | grep -q '^infra: tests: no tests ran: pytest collected none'" _ "$out"
+t    "...with the fix"                  hasl "$out" 'PY_NO_TESTS=ok'
+rm -f "$PYLOG"
+trc  "selected files that hold no tests: the whole suite runs instead" 0 pyv "$PV" STUB_PYTEST_RC_FILES=5 .agents/bin/verify --no-cache
+t    "...a second run, without files"   bash -c "test \"\$(grep -c '^pytest' '$PYLOG')\" = 2 && tail -1 '$PYLOG' | grep -qv 'test_app'"
+printf 'PY_NO_TESTS="ok"   # no tests here\n' >> "$PV/.agents/harness.conf"
+trc  "PY_NO_TESTS=ok in harness.conf: nothing collected is quiet" 0 pyv "$PV" STUB_PYTEST_RC=5 .agents/bin/verify --no-cache
+edit "$PV/.agents/harness.conf" '/^PY_NO_TESTS=/d'
+git -C "$PV" checkout -q app.py
+if [ "$HAVE_PY" -eq 1 ]; then
+  trc "nothing changed: no tests run, ok" 0 pyv "$PV" STUB_PYTEST_RC=1 .agents/bin/verify --no-cache
+fi
+out="$(pyv "$PV" STUB_PYTEST_RC=1 .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "full: every test, failing here"   bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify full'" _ "$out"
+echo "python stack: settings and environments"
+printf 'PY_PYTEST_ARGS="-x -m '"'not slow'"'"\n' >> "$PV/.agents/harness.conf"
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "PY_PYTEST_ARGS from harness.conf, read like a command line" grep -qF '[-x] [-m] [not slow]' "$PYLOG"
+cp "$PV/.agents/checks/full.sh" "$WORK/py-full.before"
+edit "$PV/.agents/checks/full.sh" 's|^# PY_PYTEST_ARGS="-x"$|PY_PYTEST_ARGS="--maxfail=2"|'
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "...the tier script's value beats it" bash -c "grep -qF '[--maxfail=2]' '$PYLOG' && ! grep -qF '[not slow]' '$PYLOG'"
+cp "$WORK/py-full.before" "$PV/.agents/checks/full.sh"
+edit "$PV/.agents/harness.conf" '/^PY_PYTEST_ARGS=/d'
+mkdir -p "$PV/.venv/bin"; : > "$PV/.venv/pyvenv.cfg"
+sed 's/STUB_PYTEST_NAME:-pytest/STUB_PYTEST_NAME:-venv-pytest/' "$WORK/pystub/pytest" > "$PV/.venv/bin/pytest"; chmod +x "$PV/.venv/bin/pytest"
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "a .venv's pytest comes before PATH's" grep -q '^venv-pytest ' "$PYLOG"
+out="$(pyv "$PV" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...and mypy must come from the .venv too (PATH's can't import the project)" hasl "$out" "infra: mypy not found (not in the project's environment, $PV/.venv)"
+mkdir -p "$WORK/py-otherenv/bin"; : > "$WORK/py-otherenv/pyvenv.cfg"
+sed 's/STUB_PYTEST_NAME:-pytest/STUB_PYTEST_NAME:-other-pytest/' "$WORK/pystub/pytest" > "$WORK/py-otherenv/bin/pytest"; chmod +x "$WORK/py-otherenv/bin/pytest"
+"$WORK/py-otherenv/bin/pytest" >/dev/null 2>&1 || true
+rm -f "$PYLOG"; pyv "$PV" VIRTUAL_ENV="$WORK/py-otherenv" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "the project's .venv comes before an activated \$VIRTUAL_ENV" grep -q '^venv-pytest ' "$PYLOG"
+rm -f "$PYLOG"; pyv "$PV" PY_VENV="$WORK/py-otherenv" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "PY_VENV comes before both"        grep -q '^other-pytest ' "$PYLOG"
+rm -rf "$PV/.venv"
+rm -f "$PYLOG"; pyv "$PV" VIRTUAL_ENV="$WORK/py-otherenv" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "without a .venv, \$VIRTUAL_ENV's"  grep -q '^other-pytest ' "$PYLOG"
+out="$(pyv "$PV" PY_VENV=nope .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "a PY_VENV that isn't a virtualenv: INFRA, said" hasl "$out" "infra: pytest not found (PY_VENV=nope isn't a virtualenv)"
+: > "$PV/uv.lock"
+out="$(pyv "$PV" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "a uv.lock and no environment: INFRA with the fix, not PATH's pytest" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify full' && printf '%s' \"\$1\" | grep -qF 'the project has uv.lock but no environment yet; uv sync makes one'" _ "$out"
+rm -f "$PV/uv.lock"
+if [ "$HAVE_PY" -eq 1 ]; then   # PY_RUN's probe asks the runner's Python
+  rm -f "$PYLOG"; pyv "$PV" PY_RUN="$WORK/pystub/runner" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+  t  "PY_RUN runs every tool through the project's runner" bash -c "grep -q '^runner pytest' '$PYLOG' && grep -q '^runner ruff check' '$PYLOG' && grep -q '^runner mypy' '$PYLOG'"
+fi
+printf 'PY_LINT="off"\nPY_TYPECHECK="off"\n' >> "$PV/.agents/harness.conf"
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+tnot "PY_LINT=off and PY_TYPECHECK=off turn those steps off" grep -qE '^(ruff|mypy)' "$PYLOG"
+printf 'PY_TYPECHECK="mpy"\n' >> "$PV/.agents/harness.conf"
+out="$(pyv "$PV" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "a PY_TYPECHECK typo is a tooling problem, said" hasl "$out" "PY_TYPECHECK='mpy' isn't mypy, pyright, or off"
+edit "$PV/.agents/harness.conf" '/^PY_LINT=/d; /^PY_TYPECHECK=/d'
+rm -f "$PYLOG"; pyv "$PV" PY_RUFF_ARGS="--select=B" PY_MYPY_ARGS="--strict" .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+t    "PY_RUFF_ARGS and PY_MYPY_ARGS reach their tools" bash -c "grep -q '^ruff check .*--select=B' '$PYLOG' && grep -q '^mypy .*--strict' '$PYLOG'"
+printf '\n[tool.ruff.format]\n' >> "$PV/pyproject.toml"
+rm -f "$PYLOG"; pyv "$PV" PY_FORMAT=off .agents/bin/verify --tier=full --no-cache >/dev/null 2>&1 || true
+tnot "PY_FORMAT=off: no format check, even with [tool.ruff.format]" grep -q '^ruff format' "$PYLOG"
+printf -- '--- nb.ipynb:cell 2\n+++ nb.ipynb:cell 2\n@@ -1,2 +1,3 @@\n import os\n-x=1\n+\n+x = 1\n' > "$WORK/py-nb.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-nb.diff" STUB_RUFF_OUT='nb.ipynb:cell 2:1:8: F401 [*] `os` imported but unused' .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "notebooks: ruff findings at path:line, the cell in the message" hasl "$out" 'nb.ipynb:1:8: error: cell 2: `os` imported but unused [F401]'
+t    "...format findings too"           hasl "$out" 'nb.ipynb:2: error: cell 2: not formatted the way ruff formats it'
+git -C "$PV" checkout -q pyproject.toml
+printf '\nfiles = ["app.py"]\n' >> "$PV/pyproject.toml"
+printf 'def add(a, b):\n    return a + b + 0\n' > "$PV/app.py"
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --no-cache >/dev/null 2>&1 || true
+t    "mypy scoped by files =: the turn tier runs that scope, not the changed files" bash -c "grep '^mypy' '$PYLOG' | grep -qx 'mypy --no-pretty --no-color-output --no-error-summary'"
+git -C "$PV" checkout -q pyproject.toml app.py
+out="$(pyv "$PV" STUB_PYTEST_RC=4 STUB_PYTEST_OUT="$(printf "ImportError while loading conftest '/x/tests/conftest.py'.\ntests/conftest.py:1: in <module>\n    import nope\nE   ModuleNotFoundError: No module named 'nope'")" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "a conftest that doesn't import (pytest's 4): a finding, at its line" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify full' && printf '%s' \"\$1\" | grep -qx 'tests/conftest.py:1: in <module>'" _ "$out"
+PU=$(repo pyunconf)
+printf 'def f():\n    return 1\n' > "$PU/app.py"; commit "$PU" code
+"$HARNESS/install.sh" --stack python "$PU" >/dev/null 2>&1
+printf 'EDIT_BUDGET=120\n' >> "$PU/.agents/harness.conf"
+rm -f "$PYLOG"; pyv "$PU" .agents/bin/verify --tier=edit --no-cache app.py >/dev/null 2>&1 || true
+t    "ruff installed, not configured: syntax errors and undefined names only, whatever its user config" grep -qF 'ruff check --no-fix --force-exclude --output-format=concise --isolated --select=E9,F63,F7,F82 app.py' "$PYLOG"
+rm -f "$PYLOG"
+trc  "...an old one (no concise output) is passed over for the syntax check" 0 pyv "$PU" STUB_RUFF_VERSION=0.4.10 .agents/bin/verify --tier=edit --no-cache app.py
+tnot "...without running it"           grep -q '^ruff check' "$PYLOG"
+out="$(pyedit "$PV" STUB_RUFF_VERSION=0.4.10 2>&1 || true)"
+t    "an old ruff the project configures: INFRA, said" hasl "$out" 'infra: ruff 0.4.10 is older than 0.5'
+printf '\nexclude = ["build"]\n' >> "$PV/pyproject.toml"
+printf 'def add(a, b):\n    return a + b + 0\n' > "$PV/app.py"
+rm -f "$PYLOG"; pyv "$PV" .agents/bin/verify --no-cache >/dev/null 2>&1 || true
+t    "mypy scoped by exclude = alone: discovery from the root, which applies it" bash -c "grep '^mypy' '$PYLOG' | grep -qx 'mypy --no-pretty --no-color-output --no-error-summary \.'"
+git -C "$PV" checkout -q pyproject.toml app.py
+if [ "$HAVE_PY" -eq 1 ]; then
+  : > "$PV/uv.lock"
+  rm -f "$PYLOG"
+  trc "PY_RUN=env: a lock file without an environment is fine, tools from PATH on purpose" 0 pyv "$PV" PY_RUN=env .agents/bin/verify --tier=full --no-cache
+  t   "...pytest ran"                   grep -q '^pytest' "$PYLOG"
+  rm -f "$PV/uv.lock"
+fi
+
+echo "python stack: absence"
+PN=$(repo pynone)
+printf 'def f():\n    return 1\n' > "$PN/app.py"; commit "$PN" code
+"$HARNESS/install.sh" "$PN" >/dev/null 2>&1
+t    "no --stack python: STACKS stays empty" grep -qx 'STACKS=""' "$PN/.agents/harness.conf"
+t    "...the tier scripts stay stubs"   bash -c "grep -q 'ai-harness:stub' '$PN/.agents/checks/edit.sh' && grep -q 'ai-harness:stub' '$PN/.agents/checks/turn.sh'"
+t    "...and there's no shim"           test ! -e "$PN/.agents/stacks/python"
+PB=$(repo pybare)
+printf 'def f(x):\n    return x\n' > "$PB/app.py"; commit "$PB" code
+"$HARNESS/install.sh" --stack python "$PB" >/dev/null 2>&1
+printf 'EDIT_BUDGET=120\n' >> "$PB/.agents/harness.conf"
+pyb(){ (cd "$PB" && env PATH="$PYNP" "$@"); }   # no tools at all, not even stand-ins
+if [ "$HAVE_PY" -eq 1 ]; then
+  trc  "no config, no tools: edit tier ok" 0 pyb .agents/bin/check app.py
+  printf 'def f(x)\n    return x\n' > "$PB/app.py"
+  out="$(pyb .agents/bin/check app.py 2>&1 || true)"
+  t    "...a syntax error, from the project's Python" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify edit' && printf '%s' \"\$1\" | grep -q '^app.py:1:[0-9]*: error: .* \[syntax\]$'" _ "$out"
+else
+  echo "  (syntax fallback part skipped: needs python3)"; SKIP=$((SKIP + 1))
+fi
+printf 'def f(x):\n    return x + 1\n' > "$PB/app.py"
+out="$(pyb .agents/bin/verify --no-cache 2>&1 || true)"
+t    "no tests and no pytest: INFRA, no tests ran" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify turn' && printf '%s' \"\$1\" | grep -q '^infra: tests: no tests ran: no test_\*.py or \*_test.py files'" _ "$out"
+t    "...the only thing said (no mypy config, no ruff: nothing about them)" test "$(printf '%s\n' "$out" | grep -c '^infra:')" = 1
+printf 'PY_NO_TESTS="ok"\n' >> "$PB/.agents/harness.conf"
+t    "PY_NO_TESTS=ok: ok, with no mypy or ruff anywhere" bash -c "cd '$PB' && PATH='$PYNP' .agents/bin/verify --no-cache | grep -qx 'ok verify turn'"
+t    "...the full tier too"             bash -c "cd '$PB' && PATH='$PYNP' .agents/bin/verify --tier=full --no-cache | grep -qx 'ok verify full'"
+printf '[tool.mypy]\nstrict = true\n' > "$PB/pyproject.toml"
+out="$(pyb .agents/bin/verify --no-cache 2>&1 || true)"
+t    "mypy configured but missing: INFRA, said" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify turn' && printf '%s' \"\$1\" | grep -qF 'infra: mypy not found (not on PATH), and the project configures it (pyproject.toml)'" _ "$out"
+printf '[tool.pyright]\n' > "$PB/pyproject.toml"
+out="$(pyb .agents/bin/verify --no-cache 2>&1 || true)"
+t    "pyright configured but missing: said on one line" hasl "$out" "infra: pyright not found (not on PATH), and the project configures it (pyproject.toml). Install it"
+printf '[tool.ruff]\n' > "$PB/pyproject.toml"
+out="$(pyb .agents/bin/check app.py 2>&1 || true)"
+t    "ruff configured but missing: INFRA on edit" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify edit' && printf '%s' \"\$1\" | grep -qF 'infra: ruff not found (not on PATH), and the project configures it (pyproject.toml)'" _ "$out"
+printf '[tool.black]\n' > "$PB/pyproject.toml"
+out="$(pyb .agents/bin/check app.py 2>&1 || true)"
+t    "black configured but missing: INFRA" hasl "$out" 'infra: black not found (not on PATH), and pyproject.toml configures it ([tool.black])'
+rm -f "$PB/pyproject.toml"
+mkdir -p "$PB/tests"; printf 'import unittest\n\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n' > "$PB/tests/test_x.py"
+t    "unittest tests, no pytest, PY_NO_TESTS=ok: quiet (the tier scripts run them)" bash -c "cd '$PB' && PATH='$PYNP' .agents/bin/verify --no-cache | grep -qx 'ok verify turn'"
+edit "$PB/.agents/harness.conf" '/^PY_NO_TESTS=/d'
+out="$(pyb .agents/bin/verify --no-cache 2>&1 || true)"
+t    "...without it: INFRA, pytest not found" hasl "$out" 'infra: pytest not found (not on PATH), and the project has test files'
+if [ "$HAVE_PY" -eq 1 ]; then
+  printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/stacks/python/lib.sh"\nagents_step tests py_run python -m unittest discover -s tests\n' > "$PB/.agents/checks/turn.sh"
+  printf 'PY_NO_TESTS="ok"\n' >> "$PB/.agents/harness.conf"
+  trc  "...run from the tier script with py_run instead: ok" 0 pyb .agents/bin/verify --no-cache
+  printf 'import unittest\n\n\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.fail("no")\n' > "$PB/tests/test_x.py"
+  trc  "...and failing there: FAIL"         1 pyb .agents/bin/verify --no-cache
+  printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/stacks/python/lib.sh"\nagents_step tests py_run python -c "import sys; sys.exit(2)"\n' > "$PB/.agents/checks/turn.sh"
+  trc  "a tool's exit 2 through py_run is a finding, never a policy block" 1 pyb .agents/bin/verify --no-cache
+fi
+printf '#!/bin/sh\nexit 2\n' > "$WORK/py-fail2"; chmod +x "$WORK/py-fail2"; "$WORK/py-fail2" || true
+printf '[tool.mypy]\n' > "$PB/pyproject.toml"; cp "$HARNESS/stacks/python/checks/turn.sh" "$PB/.agents/checks/turn.sh"
+out="$(pyb env PY_RUN="$WORK/py-fail2" .agents/bin/verify --no-cache 2>&1)" && rc=0 || rc=$?
+t    "a PY_RUN that fails (exit 2): configured tools are missing, INFRA" bash -c "test '$rc' = 3 && printf '%s' \"\$1\" | grep -qF \"infra: mypy not found (PY_RUN ($WORK/py-fail2) failed (exit 2)\"" _ "$out"
+}
+group grp_python
+
+grp_python_affected() {
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "python stack: affected tests"
+  PA=$(repo pyaff)
+  mkdir -p "$PA/pkg" "$PA/tests/sub" "$PA/src/lib2" "$PA/docs"
+  printf 'from .ops import add\nfrom .fmt import shout as yell\n' > "$PA/pkg/__init__.py"
+  printf 'from pkg import add\n\n\ndef test_api():\n    assert add(1, 1) == 2\n' > "$PA/tests/test_api.py"
+  printf 'def add(a, b):\n    return a + b\n' > "$PA/pkg/ops.py"
+  printf 'from .ops import add\n\n\ndef total(xs):\n    return sum(xs)\n' > "$PA/pkg/agg.py"
+  printf 'def shout(s):\n    return s.upper()\n' > "$PA/pkg/fmt.py"
+  printf 'X = 1\n' > "$PA/pkg/lonely.py"
+  printf 'NAME = "plug"\n' > "$PA/pkg/plug.py"
+  printf '{}\n' > "$PA/pkg/data.json"
+  printf 'def core():\n    return 1\n' > "$PA/src/lib2/core.py"
+  printf 'import pkg.ops\n\n\ndef test_ops():\n    assert pkg.ops.add(1, 1) == 2\n' > "$PA/tests/test_ops.py"
+  printf 'from pkg import agg\n\n\ndef test_agg():\n    assert agg.total([1]) == 1\n' > "$PA/tests/test_agg.py"
+  printf 'import importlib\n\n\ndef test_plug():\n    assert importlib.import_module("pkg.plug").NAME\n' > "$PA/tests/test_plug.py"
+  printf 'from lib2.core import core\n\n\ndef test_core():\n    assert core() == 1\n' > "$PA/tests/test_core.py"
+  printf 'from pkg.fmt import shout\n' > "$PA/tests/sub/conftest.py"
+  printf 'def test_deep():\n    pass\n' > "$PA/tests/sub/test_deep.py"
+  printf 'from pkg.fmt import shout\nthis is not python (\n' > "$PA/tests/sub/test_broken.py"
+  printf '# docs\n' > "$PA/docs/guide.md"
+  commit "$PA" code
+  "$HARNESS/install.sh" --stack python "$PA" >/dev/null 2>&1
+  aff(){ (cd "$PA" && python3 .agents/builtin/stacks/python/py_tools.py affected "$PA" "$@" | tr '\n' ' ' | sed 's/ $//'); }
+  t  "a changed test file runs itself"     test "$(aff tests/test_ops.py)" = "tests/test_ops.py"
+  t  "a module: the tests that import it, through other modules and the package's re-exports" test "$(aff pkg/ops.py)" = "tests/test_agg.py tests/test_api.py tests/test_ops.py"
+  t  "a module one test imports: that test" test "$(aff pkg/agg.py)" = "tests/test_agg.py"
+  t  "a package re-exporting a module passes on only its names (from pkg import add isn't reached by fmt.py)" bash -c "! printf '%s' \"\$1\" | grep -q test_api" _ "$(aff pkg/fmt.py)"
+  t  "a changed __init__.py: whatever imports anything in its package" test "$(aff pkg/__init__.py)" = "tests/sub/test_broken.py tests/sub/test_deep.py tests/test_agg.py tests/test_api.py tests/test_ops.py tests/test_plug.py"
+  t  "a module a conftest imports: the tests under it (and a file only a line scan can read)" test "$(aff pkg/fmt.py)" = "tests/sub/test_broken.py tests/sub/test_deep.py"
+  t  "a changed conftest: the tests under it" test "$(aff tests/sub/conftest.py)" = "tests/sub/test_broken.py tests/sub/test_deep.py"
+  t  "importlib.import_module by name counts" test "$(aff pkg/plug.py)" = "tests/test_plug.py"
+  t  "a src layout module"                 test "$(aff src/lib2/core.py)" = "tests/test_core.py"
+  t  "a module no test reaches: ALL"       test "$(aff pkg/lonely.py)" = ALL
+  t  "config or a data file: ALL"          bash -c "test \"\$(cd '$PA' && python3 .agents/builtin/stacks/python/py_tools.py affected '$PA' pyproject.toml)\" = ALL && test \"\$(cd '$PA' && python3 .agents/builtin/stacks/python/py_tools.py affected '$PA' pkg/data.json)\" = ALL"
+  t  "docs and the harness's files: NONE"  test "$(aff docs/guide.md .agents/harness.conf README.md)" = NONE
+  t  "nothing changed: NONE"               test "$(aff)" = NONE
+  t  "the scan is cached"                  test -s "$PA/.agents/cache/py-imports.json"
+  printf 'import pkg.lonely\n' >> "$PA/tests/test_core.py"
+  t  "...and the cache follows an edit (a new import)" test "$(aff pkg/lonely.py)" = "tests/test_core.py"
+  git -C "$PA" checkout -q tests/test_core.py
+  git -C "$PA" rm -q pkg/plug.py
+  t  "a deleted module: ALL"               test "$(aff tests/test_ops.py)" = ALL
+  git -C "$PA" reset -q HEAD pkg/plug.py; git -C "$PA" checkout -q pkg/plug.py
+  printf '[pytest]\npython_files = check_*.py\n' > "$PA/pytest.ini"
+  t  "custom python_files: ALL"            test "$(aff tests/test_ops.py)" = ALL
+  printf '[pytest]\naddopts = --doctest-modules\n' > "$PA/pytest.ini"
+  t  "doctests in modules: ALL"            test "$(aff pkg/agg.py)" = ALL
+  rm -f "$PA/pytest.ini"
+  t  "requirements files: ALL"             bash -c "test \"\$1\" = ALL && test \"\$2\" = ALL" _ "$(aff requirements-dev.txt)" "$(aff requirements/dev.txt)"
+  printf '[tox]\n[testenv:docs]\ncommands = sphinx-build -b doctest docs out\n' > "$PA/tox.ini"
+  t  "...but sphinx's doctest builder isn't pytest's" test "$(aff pkg/agg.py)" = "tests/test_agg.py"
+  rm -f "$PA/tox.ini"
+  t  "a golden file next to the tests: ALL" test "$(aff tests/sub/expected.txt)" = ALL
+  PZ=$(repo pyaff-none)
+  printf 'X = 1\n' > "$PZ/app.py"; commit "$PZ" code
+  t  "no test files at all: ALL (pytest decides)" bash -c "test \"\$(python3 '$HARNESS/stacks/python/py_tools.py' affected '$PZ' app.py)\" = ALL"
+  t  "...even with nothing changed"      bash -c "test \"\$(python3 '$HARNESS/stacks/python/py_tools.py' affected '$PZ')\" = ALL"
+  printf 'def test_top():\n    pass\n' > "$PZ/test_top.py"; commit "$PZ" tests
+  t  "tests at the top don't make every doc a fixture" bash -c "test \"\$(python3 '$HARNESS/stacks/python/py_tools.py' affected '$PZ' README.md)\" = NONE"
+else
+  echo "python stack: affected tests (skipped: needs python3)"; SKIP=$((SKIP + 1))
+fi
+}
+group grp_python_affected
+
+grp_python_real() {
+if [ "$HAVE_PY" -eq 1 ] && command -v ruff >/dev/null 2>&1 && command -v pytest >/dev/null 2>&1; then
+  echo "python stack: real ruff and pytest"
+  PR=$(repo pyreal)
+  mkdir -p "$PR/src/calc" "$PR/tests"
+  printf '[project]\nname = "calc"\nversion = "0.1"\n\n[tool.ruff]\nline-length = 100\n\n[tool.ruff.format]\n\n[tool.pytest.ini_options]\npythonpath = ["src"]\n' > "$PR/pyproject.toml"
+  : > "$PR/src/calc/__init__.py"
+  printf 'def add(a: int, b: int) -> int:\n    return a + b\n' > "$PR/src/calc/ops.py"
+  printf 'from calc.ops import add\n\n\ndef total(xs: list) -> int:\n    t = 0\n    for x in xs:\n        t = add(t, x)\n    return t\n' > "$PR/src/calc/agg.py"
+  printf 'def shout(s: str) -> str:\n    return s.upper()\n' > "$PR/src/calc/text.py"
+  printf 'from calc.ops import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n' > "$PR/tests/test_ops.py"
+  printf 'from calc.agg import total\n\n\ndef test_total():\n    assert total([1, 2, 3]) == 6\n' > "$PR/tests/test_agg.py"
+  printf 'import os\n\nfrom calc.text import shout\n\n\ndef test_shout():\n    assert os.environ.get("PYSTACK_TRAP") != "1"\n    assert shout("a") == "A"\n' > "$PR/tests/test_text.py"
+  printf '__pycache__/\n' > "$PR/.gitignore"
+  commit "$PR" code
+  "$HARNESS/install.sh" --stack python "$PR" >/dev/null 2>&1
+  printf 'EDIT_BUDGET=120\n' >> "$PR/.agents/harness.conf"
+  t    "clean tree: turn and full ok" bash -c "cd '$PR' && .agents/bin/verify --no-cache | grep -qx 'ok verify turn' && .agents/bin/verify --tier=full --no-cache | grep -qx 'ok verify full'"
+  t    "...and git status stays clean" test -z "$(git -C "$PR" status --porcelain)"
+  printf 'import os\ndef add(a: int, b: int) -> int:\n    return  a + b\n' > "$PR/src/calc/ops.py"
+  out="$("$PR/.agents/bin/check" src/calc/ops.py 2>&1 || true)"
+  t    "edit: ruff's unused import"   hasl "$out" 'src/calc/ops.py:1:8: error: `os` imported but unused [F401]'
+  t    "edit: ruff format, at the first line it would change" hasl "$out" 'src/calc/ops.py:2: error: not formatted the way ruff formats it (run: ruff format src/calc/ops.py) [ruff-format]'
+  git -C "$PR" checkout -q src/calc/ops.py
+  printf 'def add(a: int, b: int) -> int\n    return a + b\n' > "$PR/src/calc/ops.py"
+  out="$("$PR/.agents/bin/check" src/calc/ops.py 2>&1 || true)"
+  t    "edit: a syntax error, and the formatter leaves it to the linter" bash -c "printf '%s' \"\$1\" | grep -q '^src/calc/ops.py:1:[0-9]*: error: .*\[syntax\]$' && ! printf '%s' \"\$1\" | grep -q 'ruff-format'" _ "$out"
+  git -C "$PR" checkout -q src/calc/ops.py
+  printf 'from calc.ops import add\n\n\ndef total(xs: list) -> int:\n    t = 1\n    for x in xs:\n        t = add(t, x)\n    return t\n' > "$PR/src/calc/agg.py"
+  out="$(cd "$PR" && PYSTACK_TRAP=1 .agents/bin/verify --no-cache 2>&1 || true)"
+  t    "turn: the affected test fails, at its line" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify turn' && printf '%s' \"\$1\" | grep -qx 'tests/test_agg.py:5: in test_total' && printf '%s' \"\$1\" | grep -qF 'FAILED tests/test_agg.py::test_total'" _ "$out"
+  t    "...with pytest's assertion detail" hasl "$out" '    E   assert 7 == 6'
+  tnot "...and tests the change can't reach don't run" hasl "$out" 'test_text'
+  tnot "...and no timings"              bash -c "printf '%s' \"\$1\" | grep -qE ' in [0-9.]+s'" _ "$out"
+  git -C "$PR" checkout -q src/calc/agg.py
+  printf 'def shout(s: str) -> str:\n    return s.upper()  # loud\n' > "$PR/src/calc/text.py"
+  out="$(cd "$PR" && PYSTACK_TRAP=1 .agents/bin/verify --no-cache 2>&1 || true)"
+  t    "...the ones it can reach do"   hasl "$out" 'FAILED tests/test_text.py::test_shout'
+  git -C "$PR" checkout -q src/calc/text.py
+  if command -v mypy >/dev/null 2>&1; then
+    printf '\n[tool.mypy]\n' >> "$PR/pyproject.toml"
+    printf 'def add(a: int, b: int) -> int:\n    return a + b\n\n\nX: str = add(1, 2)\n' > "$PR/src/calc/ops.py"
+    printf 'from calc.ops import add\n\n\ndef total(xs: list) -> int:\n    t: str = 0\n    for x in xs:\n        t = add(t, x)\n    return t\n' > "$PR/src/calc/agg.py"
+    git -C "$PR" add src/calc/ops.py; git -C "$PR" -c core.hooksPath=/dev/null commit -qm "a type error elsewhere" >/dev/null 2>&1
+    out="$(cd "$PR" && .agents/bin/verify --no-cache 2>&1 || true)"
+    t  "mypy: the changed file's error" hasl "$out" 'src/calc/agg.py:5: error: Incompatible types in assignment'
+    tnot "...not the imported file's"   hasl "$out" 'src/calc/ops.py:5'
+    git -C "$PR" checkout -q src/calc/agg.py
+  else
+    echo "  (real mypy part skipped: needs mypy)"; SKIP=$((SKIP + 1))
+  fi
+  PQ=$(repo pyreal-none)
+  printf 'X = 1\n' > "$PQ/app.py"; commit "$PQ" code
+  "$HARNESS/install.sh" --stack python "$PQ" >/dev/null 2>&1
+  out="$("$PQ/.agents/bin/verify" --no-cache 2>&1 || true)"
+  t    "real pytest, no tests: INFRA, no tests ran" bash -c "printf '%s' \"\$1\" | head -1 | grep -qx 'INFRA verify turn' && printf '%s' \"\$1\" | grep -q '^infra: tests: no tests ran: pytest collected none'" _ "$out"
+else
+  echo "python stack: real ruff and pytest (skipped: needs python3, ruff, pytest)"; SKIP=$((SKIP + 1))
+fi
+}
+group grp_python_real
 
 grp_fdd() {
 if [ "$HAVE_PY" -eq 1 ]; then
