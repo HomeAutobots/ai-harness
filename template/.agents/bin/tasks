@@ -11,10 +11,12 @@
 #   tasks list [slug]                        all plans, or one plan's tasks
 #   tasks next <slug>                        the task to work on now (exit 1 when all done)
 #   tasks set <slug> <id> <todo|doing|done|blocked> [commit]
+#                                            (a ref like HEAD is recorded as the SHA it names)
 #   tasks ask <slug> <T-id> [--gate=plan|tests|impl] [--force] <question...>
 #                                            record a question for the human (task -> blocked,
 #                                            a done task stays done);
 #                                            refuses if the question was already answered
+#                                            (at the same gate, naming the same IDs)
 #   tasks answer <slug> <Q-id|T-id> <answer...>   record the answer; task resumes when none are open
 #   tasks questions [--open] [--plan=<slug>] [words...]   search questions and answers, all plans
 #   tasks link <slug> [branch]               record the plan's branch (default: current), for gitflow pr
@@ -129,10 +131,11 @@ all_questions() {
   done
 }
 
-# similar <text>: answered questions that ask roughly the same thing, best first.
+# similar <text> [gate]: answered questions that ask roughly the same thing, best first; with a
+# gate, only those asked at that gate.
 # Output: score<TAB>slug<TAB>id<TAB>answered<TAB>question<TAB>answer (score >= 0.5)
 similar() {
-  all_questions | awk -F '\t' -v q="$1" '
+  all_questions | awk -F '\t' -v q="$1" -v g="${2:-}" '
     BEGIN {
       n = split("the and for are was with this that should what when which does from into have has will would there their then than not but can its our you your how why who any all them they these those some just also", sw, " ")
       for (i = 1; i <= n; i++) STOP[sw[i]] = 1
@@ -152,9 +155,31 @@ similar() {
       }
       return k
     }
-    $5 == "answered" {
-      split("", A); split("", B)
+    # IDs and ticket keys (F-2, REQ-12, ARGH-7; REQ_12 counts as REQ-12) are too short for toks, so
+    # they are collected here, case-sensitive so utf-8 and x86-64 are not IDs.
+    function ids(s, arr,   k, t) {
+      k = 0
+      while (match(s, /[A-Z][A-Z0-9]*[-_][0-9]+/)) {
+        t = substr(s, RSTART, RLENGTH); gsub(/_/, "-", t)
+        if (!(t in arr)) { arr[t] = 1; k++ }
+        s = substr(s, RSTART + RLENGTH)
+      }
+      return k
+    }
+    $5 == "answered" && (g == "" || $4 == g) {
+      split("", A); split("", B); split("", IA); split("", IB)
       na = toks(q, A); nb = toks($9, B)
+      # When both name IDs, they must name the same ones: approve design F-2 is not F-3. A check-in
+      # (a gate) naming IDs is not one that names none, or the other way round.
+      ia = ids(q, IA); ib = ids($9, IB)
+      if (g != "" && (ia > 0) != (ib > 0)) next
+      if (ia > 0 && ib > 0) {
+        if (ia != ib) next
+        same = 1; for (w in IA) if (!(w in IB)) same = 0
+        if (!same) next
+        for (w in IA) { A["id:" w] = 1; B["id:" w] = 1 }
+        na += ia; nb += ib
+      }
       if (na == 0 || nb == 0) next
       inter = 0; for (w in A) if (w in B) inter++
       score = inter / (na + nb - inter)
@@ -290,6 +315,13 @@ PLAN
     id="${2:-}"; st="${3:-}"; commit="${4:-}"
     case "$st" in todo|doing|done|blocked) ;; *) die "status must be todo, doing, done, or blocked" ;; esac
     parse "$d/tasks.json" | awk -F '\t' -v OFS='\t' -v id="$id" '$1 == id { f = 1 } END { exit f ? 0 : 1 }' || die "no task '$id'"
+    # A ref (HEAD, a branch) moves, so it's recorded as the commit it names now; other text as given.
+    case "$commit" in
+      ''|-*) ;;
+      *[!0-9a-fA-F]*)
+        sha="$(git -C "$ROOT" rev-parse -q --verify "$commit^{commit}" 2>/dev/null)" &&
+          commit="$(git -C "$ROOT" rev-parse --short "$sha" 2>/dev/null || printf '%s' "$sha")" ;;
+    esac
     parse "$d/tasks.json" | awk -F '\t' -v OFS='\t' -v id="$id" -v st="$st" -v c="$commit" \
       '$1 == id { $2 = st; if (c != "") $3 = c } { print }' | write_tasks "$d/tasks.json"
     echo "$id -> $st${commit:+ ($commit)}"
@@ -304,8 +336,10 @@ PLAN
     [ $# -gt 0 ] || die "usage: tasks ask <slug> <T-id> [--gate=plan|tests|impl] [--force] <question...>"
     parse "$d/tasks.json" | awk -F '\t' -v id="$id" '$1 == id { f = 1 } END { exit f ? 0 : 1 }' || die "no task '$id'"
     text="$(clean "$*")"
+    # A check-in (--gate) is compared only with answers at the same gate: an inspection request
+    # is not the design request it reads like.
     if [ "$force" -eq 0 ]; then
-      hit="$(similar "$text" | awk -F '\t' '$1 >= 0.7' | head -1)"
+      hit="$(similar "$text" "$gate" | awk -F '\t' '$1 >= 0.7' | head -1)"
       if [ -n "$hit" ]; then
         printf '%s\n' "$hit" | awk -F '\t' '{ printf "already answered (%s %s, %s): %s\n  answer: %s\n", $2, $3, $4, $5, $6 }'
         echo "Use that answer. If something changed since, re-ask with --force and say what changed."

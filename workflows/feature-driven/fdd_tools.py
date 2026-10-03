@@ -164,6 +164,12 @@ def matches_any(path, globs):
     return any(glob_match(path, g) for g in globs.split())
 
 
+def scope_matches(root, globs):
+    """True when a file git tracks, or a new one it doesn't ignore, matches one of the globs."""
+    files = git(root, "ls-files", "-z", "--full-name", "--cached", "--others", "--exclude-standard").split("\0")
+    return any(f and matches_any(f, globs) for f in files)
+
+
 # ------------------------------------------------------------------ git
 
 def git(root, *args):
@@ -493,31 +499,50 @@ def ledger(root, conf):
     return rows
 
 
-def milestone(d, fid, conf, approvals, rows):
-    """(percent, label), cumulative: each milestone counts only once the ones before it are reached."""
+_COMMITS = {}
+
+
+def commit_found(root, c):
+    """True when c is a commit in this repo (git cat-file -e <c>^{commit}): a full or abbreviated
+    hex SHA of 7 or more, as the same-turn trace needs, not a ref name, which moves, or other text."""
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", c or ""):
+        return False
+    if (root, c) not in _COMMITS:
+        _COMMITS[(root, c)] = subprocess.run(["git", "-C", root, "cat-file", "-e", c + "^{commit}"],
+                                             capture_output=True).returncode == 0
+    return _COMMITS[(root, c)]
+
+
+def milestone(root, d, fid, conf, approvals, rows):
+    """(percent, label), cumulative: each milestone counts only once the ones before it are reached.
+    Built needs a done task with a commit git has; a recorded commit it can't find stops there."""
     ask = conf["FDD_ASK"].split()
     dp = design_path(d, fid)
+    done = [r[3] for r in rows if r[4] == fid and r[2] == "done" and r[3]]
+    built = any(commit_found(root, c) for c in done)
     reached = (
         os.path.isfile(dp),
         "design" not in ask or approval(approvals, "design", fid, sha(dp)) == "current",
-        any(r[4] == fid and r[2] == "done" and r[3] for r in rows),
+        built,
         "inspect" not in ask or approval(approvals, "inspect", fid) == "current",
     )
     pct, label = 0, "not started"
-    for ok, (weight, name) in zip(reached, MILESTONES):
+    for i, (ok, (weight, name)) in enumerate(zip(reached, MILESTONES)):
         if not ok:
+            if i == 2 and done:
+                label = "built (commit not found)"
             break
         pct, label = weight, name
     return pct, label
 
 
-def progress_lines(d, conf, feats, approvals, rows, only=None):
+def progress_lines(root, d, conf, feats, approvals, rows, only=None):
     sets = {}
     for f in feats.values():
         sets.setdefault(f.set or "(no feature set)", []).append(f)
     out = []
     for fset, fs in sets.items():
-        pcts = [milestone(d, f.id, conf, approvals, rows) for f in fs]
+        pcts = [milestone(root, d, f.id, conf, approvals, rows) for f in fs]
         if only is None:
             out.append("## %s: %d%%" % (fset, int(round(sum(p for p, _ in pcts) / float(len(pcts))))))
         for f, (p, label) in zip(fs, pcts):
@@ -579,6 +604,21 @@ def cmd_check(tier, root, files):
                                "name a feature from the approved list; a new feature needs a new list approval"))
     scoped = [p for p in sorted(added)
               if not os.path.join(root, p).startswith(inside) and matches_any(p, conf["FDD_SCOPE"])]
+    # A scope that matches nothing turns every gate below off. Said once there's a change outside
+    # FDD_DIR and .agents/ to judge, so a repo with a list and no code yet isn't held up.
+    if not scoped:
+        other = [p for p in added if not os.path.join(root, p).startswith(inside) and "/.agents/" not in "/" + p]
+        if other and not scope_matches(root, conf["FDD_SCOPE"]):
+            conf_rel = os.path.join(".agents", "harness.conf")
+            n = ([i for i, l in enumerate(read_lines(os.path.join(root, conf_rel)), 1)
+                  if re.match(r"\s*FDD_SCOPE=", l)] or [1])[-1]   # the last one is the one in effect
+            out.append(finding(conf_rel, n, "fdd-scope-empty",
+                               "FDD_SCOPE (%s) matches no file in the repo, so no change needs a feature or "
+                               "a design" % (conf["FDD_SCOPE"] or "empty"),
+                               "FDD_SCOPE is where the features' code lives (space-separated globs); "
+                               "harness-tailor fills it in, otherwise ask the human (tasks ask). Never point it "
+                               "at files the features don't change. If that code doesn't exist yet, the first "
+                               "file in scope settles this"))
     if scoped:
         if "list" in ask:
             state = approval(approvals, "list", "-", list_hash(d))
@@ -655,7 +695,7 @@ def write_report(root, d, conf, feats, approvals, rows):
             "From `%s`, with FDD's milestone weights: %s."
             % (shown(root, os.path.join(d, "features.md")), weights), ""]
     with open(os.path.join(cache, "fdd-progress.md"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(head + progress_lines(d, conf, feats, approvals, rows)) + "\n")
+        fh.write("\n".join(head + progress_lines(root, d, conf, feats, approvals, rows)) + "\n")
 
 
 def cmd_msg(root, path):
@@ -703,7 +743,7 @@ def cmd_status(root, only):
         return 1
     approvals, unrecorded, simulated = read_approvals(root, d, switch)
     print("list: %s" % list_state(d, approvals))
-    for line in progress_lines(d, conf, feats, approvals, ledger(root, conf), only):
+    for line in progress_lines(root, d, conf, feats, approvals, ledger(root, conf), only):
         print(line)
     for label, rows in (("not written by fdd approve", unrecorded),
                         ("made by a simulated human while the switch is off", simulated)):

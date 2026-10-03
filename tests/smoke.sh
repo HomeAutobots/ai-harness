@@ -993,10 +993,10 @@ EOF
   out="$("$X/.agents/bin/verify" || true)"
   t  "new warning in changed file fails" bash -c "printf '%s' \"\$1\" | grep -q 'unused variable'" _ "$out"
   t  "warning survives a rebuild"      bash -c "'$X/.agents/bin/verify' --no-cache | grep -q 'unused variable'"
-  if ! command -v clang-tidy >/dev/null 2>&1; then   # e.g. stock macOS: reported, then dropped like a project would
-    t "missing clang-tidy is infra"    bash -c "printf '%s' \"\$1\" | grep -q 'infra: clang-tidy not found'" _ "$out"
-    edit "$X/.agents/checks/turn.sh" '/^cpp_tidy_changed/d'
-  fi
+  if ! command -v clang-tidy >/dev/null 2>&1; then   # e.g. stock macOS (pilot 2 issue 6)
+    t "missing clang-tidy: the seeded turn tier skips it" bash -c "! printf '%s' \"\$1\" | grep -q 'clang-tidy not found'" _ "$out"
+    trc "...while an unguarded call is still infra (3)" 3 bash -c "cd '$X' && AGENTS_ROOT='$X' bash -c '. .agents/stacks/cpp-cmake/lib.sh && cpp_tidy_changed src/net/frame.cpp'"
+  else SKIP=$((SKIP + 1)); fi
   t  "update-baseline succeeds"        bash -c "cd '$X' && .agents/bin/verify --update-baseline"
   t  "baselined warning passes"        "$X/.agents/bin/verify"
   rm -rf "$X/.agents/baselines"; git -C "$X" checkout -q src/net/frame.cpp
@@ -1076,6 +1076,23 @@ t    "...and verify is ok"             bash -c "cd '$CN' && PATH='$WORK/cppstub'
 edit "$CN/.agents/harness.conf" '/^CPP_NO_TESTS=/d'
 trc  "CPP_NO_TESTS=ok in the tier script works too" 0 cppfn CPP_NO_TESTS=ok cpp_sanitize
 trc  "any other value still reports" 3 cppfn CPP_NO_TESTS=yes cpp_test_all
+echo "cpp-cmake: clang-tidy is optional in the seeded tiers"
+# The seeded tier scripts against a stand-in lib.sh, with a PATH that holds clang-tidy or nothing.
+FR="$WORK/cpptidy-root"; mkdir -p "$FR/.agents/stacks/cpp-cmake" "$WORK/tidy-yes" "$WORK/tidy-no"
+cat > "$FR/.agents/stacks/cpp-cmake/lib.sh" <<'EOF'
+cpp_build() { :; }; cpp_diagnose() { :; }; cpp_test_affected() { :; }; cpp_test_all() { :; }; cpp_sanitize() { :; }
+cpp_cppcheck() { :; }
+cpp_tidy_changed() { echo "src/x.cpp:1:1: warning: tidy ran [fake-check]"; return 1; }
+agents_worst_rc() { if [ "$1" -ge "$2" ]; then echo "$1"; else echo "$2"; fi; }
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$WORK/tidy-yes/clang-tidy"; chmod +x "$WORK/tidy-yes/clang-tidy"
+BASH_BIN="$(command -v bash)"
+for tier in turn full; do
+  trc "pilot 2: no clang-tidy, the $tier tier skips it" 0 env PATH="$WORK/tidy-no" AGENTS_ROOT="$FR" "$BASH_BIN" "$CN/.agents/checks/$tier.sh" src/x.cpp
+  out="$(env PATH="$WORK/tidy-yes" AGENTS_ROOT="$FR" "$BASH_BIN" "$CN/.agents/checks/$tier.sh" src/x.cpp)" && rc=0 || rc=$?
+  t   "clang-tidy installed: the $tier tier still runs it" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -q 'tidy ran'" _ "$out"
+done
+t    "the guard says how to make it mandatory" grep -q '^# Drop the guard to make clang-tidy mandatory' "$CN/.agents/checks/turn.sh"
 echo "cpp-cmake: CPP_* settings in harness.conf"
 CL="$WORK/ctest-conf.log"; CE="$(git -C "$CN" rev-parse --git-path info/exclude)"; case "$CE" in /*) ;; *) CE="$CN/$CE" ;; esac
 cp "$CE" "$WORK/cpp-exclude.before"
@@ -1652,6 +1669,122 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_fdd_simhuman
+
+grp_pilot2_small() {   # pilot 2 issues 5, 7, 10, 12 (roadmap rows 30, 32, 35, 37)
+echo "check-ins, deliberate red states, built commits, empty FDD_SCOPE"
+# Row 30: a check-in for F-3 isn't the answered one for F-2, and an inspection request isn't a design request.
+Q=$(repo checkins)
+"$HARNESS/install.sh" --team "$Q" >/dev/null 2>&1
+(cd "$Q" && .agents/bin/tasks new f-2 "F2" >/dev/null && .agents/bin/tasks add f-2 "F-2: count" >/dev/null && .agents/bin/tasks set f-2 T1 doing >/dev/null)
+(cd "$Q" && .agents/bin/tasks ask f-2 T1 --gate=plan 'Design ready. Please run: .agents/commands/fdd approve design F-2' >/dev/null && .agents/bin/tasks answer f-2 T1 'Approved (fdd approve design F-2)' >/dev/null)
+t    "pilot 2: another feature's check-in isn't similar" bash -c "cd '$Q' && test -z \"\$(.agents/bin/tasks similar 'Design ready. Please run: .agents/commands/fdd approve design F-3')\""
+t    "...so asking for it is recorded"  bash -c "cd '$Q' && .agents/bin/tasks ask f-2 T1 --gate=plan 'Design ready. Please run: .agents/commands/fdd approve design F-3' | grep -q '^Q2 recorded'"
+(cd "$Q" && .agents/bin/tasks answer f-2 T1 'Rejected: keep the order' >/dev/null)
+t    "an inspection request isn't the design request it reads like" bash -c "cd '$Q' && .agents/bin/tasks ask f-2 T1 --gate=impl 'Built. Please run: .agents/commands/fdd approve design F-3' | grep -q '^Q3 recorded'"
+(cd "$Q" && .agents/bin/tasks answer f-2 T1 'Inspected' >/dev/null)
+trc  "the same check-in at the same gate is still refused" 1 bash -c "cd '$Q' && .agents/bin/tasks ask f-2 T1 --gate=plan 'Design ready. Please run: .agents/commands/fdd approve design F-3'"
+out="$(cd "$Q" && .agents/bin/tasks ask f-2 T1 'Design ready. Please run: .agents/commands/fdd approve design F-3' || true)"
+t    "...and without a gate, so is the same question" hasl "$out" "already answered (f-2 Q2"
+t    "the same question with no IDs still matches" bash -c "cd '$Q' && .agents/bin/tasks ask f-2 T1 --gate=tests 'Should an empty flag name be an error?' >/dev/null && .agents/bin/tasks answer f-2 T1 'Yes' >/dev/null && .agents/bin/tasks similar 'Is an empty flag name an error?' | grep -qE 'f-2[[:space:]]Q4[[:space:]]'"
+(cd "$Q" && .agents/bin/tasks ask f-2 T1 'Does REQ-12 cover negative counts?' >/dev/null && .agents/bin/tasks answer f-2 T1 'No' >/dev/null)
+t    "req-driven: REQ-13 isn't REQ-12"  bash -c "cd '$Q' && test -z \"\$(.agents/bin/tasks similar 'Does REQ-13 cover negative counts?')\""
+t    "...REQ_12 is"                     bash -c "cd '$Q' && .agents/bin/tasks similar 'Does REQ_12 cover negative counts?' | grep -qE 'f-2[[:space:]]Q5[[:space:]]'"
+t    "...and lowercase words aren't IDs" bash -c "cd '$Q' && .agents/bin/tasks similar 'Does REQ-12 cover negative counts in utf-8?' | grep -qE 'f-2[[:space:]]Q5[[:space:]]'"
+(cd "$Q" && .agents/bin/tasks ask f-2 T1 --gate=impl 'Ready for your review, please approve?' >/dev/null && .agents/bin/tasks answer f-2 T1 'Approved' >/dev/null)
+t    "a check-in naming a feature isn't an answered one naming none" bash -c "cd '$Q' && .agents/bin/tasks ask f-2 T1 --gate=impl 'Ready for your review, please approve F-3?' | grep -q '^Q7 recorded'"
+# Row 32: the stop gate's block names the pause, and the pause holds a deliberate red state.
+R=$(repo redstate)
+"$HARNESS/install.sh" --team "$R" >/dev/null 2>&1
+printf '#!/usr/bin/env bash\nexit 0\n' > "$R/.agents/checks/full.sh"
+printf '#!/usr/bin/env bash\nif grep -q RED "$AGENTS_ROOT/README.md"; then echo "README.md:2: error: test fails"; exit 1; fi\nif grep -q POLICY "$AGENTS_ROOT/README.md"; then echo "README.md:2: error: policy"; exit 2; fi\n' > "$R/.agents/checks/turn.sh"
+commit "$R" harness
+hook "$R" turn-start claude '{"session_id":"r0"}' >/dev/null 2>&1
+printf 'RED\n' >> "$R/README.md"
+out="$(hook "$R" stop-gate claude '{"session_id":"r0"}' 2>&1)" && rc=0 || rc=$?
+t    "absence: no plan, the block doesn't offer a pause" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'stop gate ran' && ! printf '%s' \"\$1\" | grep -q -- '--gate=tests'" _ "$out"
+(cd "$R" && .agents/bin/tasks new red "Tests first" >/dev/null && .agents/bin/tasks add red "write the tests" >/dev/null && .agents/bin/tasks set red T1 doing >/dev/null)
+hook "$R" turn-start claude '{"session_id":"r1"}' >/dev/null 2>&1
+printf 'RED again\n' >> "$R/README.md"
+out="$(hook "$R" stop-gate claude '{"session_id":"r1"}' 2>&1)" && rc=0 || rc=$?
+t    "red state: the stop gate blocks"  test "$rc" = 2
+t    "...and says how to pause for a deliberate one" hasl "$out" ".agents/bin/tasks ask <slug> <T-id> --gate=tests '<question>'"
+(cd "$R" && .agents/bin/tasks ask red T1 --gate=tests 'Tests are in and failing; review them before the code?' >/dev/null)
+trc  "...and a tests check-in pauses it" 0 hook "$R" stop-gate claude '{"session_id":"r1"}'
+(cd "$R" && .agents/bin/tasks answer red T1 'Looks right' >/dev/null)
+edit "$R/README.md" 's/RED/POLICY/'
+hook "$R" turn-start claude '{"session_id":"r2"}' >/dev/null 2>&1
+printf 'more\n' >> "$R/README.md"
+out="$(hook "$R" stop-gate claude '{"session_id":"r2"}' 2>&1)" && rc=0 || rc=$?
+t    "a policy block blocks"           bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'README.md:2: error: policy'" _ "$out"
+tnot "...and doesn't offer the pause"  hasl "$out" "--gate=tests"
+t    "feature-driven skill names --gate=tests for tests first" grep -q -- "--gate=tests" "$HARNESS/workflows/feature-driven/skill/SKILL.md"
+if [ "$HAVE_PY" -eq 1 ]; then
+  # Row 37: pilot 2's argh, no src/, the default FDD_SCOPE="src/**".
+  G=$(repo scope-empty)
+  printf 'int f();\n' > "$G/argh.h"; commit "$G" base
+  "$HARNESS/install.sh" --team --workflow feature-driven "$G" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$G/.agents/checks/$tier.sh"; done
+  commit "$G" harness
+  GD="$G/.agents/fdd"; GX="$G/.agents/commands/fdd"; GL="$(line_of "$G/.agents/harness.conf" 'FDD_SCOPE=')"
+  echo '// x' >> "$G/argh.h"
+  t    "absence: no feature list, an empty scope stays quiet" "$G/.agents/bin/verify" --tier=full
+  git -C "$G" checkout -q argh.h
+  mkdir -p "$GD/designs"
+  printf '# Features\n\n## Parsing\n### FS-1 Options\n- F-1 Treat the arguments after a marker as positionals for the parser\n' > "$GD/features.md"
+  "$GX" approve list >/dev/null
+  (cd "$G" && .agents/bin/tasks new f-1 "F1" >/dev/null && .agents/bin/tasks add f-1 "F-1: marker" >/dev/null)
+  t    "a list and no code yet: the turn stays quiet" "$G/.agents/bin/verify"
+  echo '// x' >> "$G/argh.h"
+  out="$("$G/.agents/bin/verify" || true)"
+  t    "pilot 2: an edit with a scope that matches nothing is a finding" hasl "$out" ".agents/harness.conf:$GL: error: [fdd-scope-empty] FDD_SCOPE (src/**) matches no file in the repo"
+  trc  "...exit 1" 1                    "$G/.agents/bin/verify"
+  t    "...on the full tier too"       hasl "$("$G/.agents/bin/verify" --tier=full || true)" "[fdd-scope-empty]"
+  t    "...whose fix says not to point it elsewhere" hasl "$out" "Never point it at files the features don't change"
+  printf 'FDD_SCOPE="nothing/**"\n' >> "$G/.agents/harness.conf"
+  t    "...and names the FDD_SCOPE line in effect" hasl "$("$G/.agents/bin/verify" || true)" ".agents/harness.conf:$(wc -l < "$G/.agents/harness.conf" | tr -d ' '): error: [fdd-scope-empty] FDD_SCOPE (nothing/**)"
+  edit "$G/.agents/harness.conf" '$d'
+  git -C "$G" checkout -q argh.h
+  t    "a clean tree is quiet on the full tier" "$G/.agents/bin/verify" --tier=full
+  edit "$G/.agents/harness.conf" 's/^FDD_SCOPE=.*/FDD_SCOPE=""/'
+  echo '// x' >> "$G/argh.h"
+  t    "an empty FDD_SCOPE says so"    hasl "$("$G/.agents/bin/verify" || true)" "FDD_SCOPE (empty) matches no file"
+  git -C "$G" checkout -q argh.h
+  edit "$G/.agents/harness.conf" 's/^FDD_SCOPE=.*/FDD_SCOPE="src\/**"/'
+  mkdir -p "$G/src"; printf 'int g();\n' > "$G/src/new.cpp"
+  out="$("$G/.agents/bin/verify" || true)"
+  t    "a new file in scope counts, so the gates are on" hasl "$out" "[fdd-untraced]"
+  tnot "...with no scope finding"       hasl "$out" "fdd-scope-empty"
+  rm -rf "$G/src"
+  edit "$G/.agents/harness.conf" 's/^FDD_SCOPE=.*/FDD_SCOPE="argh.h"/'
+  echo '// x' >> "$G/argh.h"
+  out="$("$G/.agents/bin/verify" || true)"
+  t    "a tailored scope: the gates are back" hasl "$out" "[fdd-untraced]"
+  tnot "...and no scope finding"        hasl "$out" "fdd-scope-empty"
+  git -C "$G" checkout -q argh.h
+  # Row 35: a commit git doesn't have doesn't count as built.
+  printf '# F-1\nApproach: stop at the marker.\n' > "$GD/designs/F-1.md"
+  "$GX" approve design F-1 >/dev/null
+  (cd "$G" && .agents/bin/tasks set f-1 T1 "done" deadbeefdeadbeef >/dev/null)
+  t    "pilot 2: a fake SHA isn't built" bash -c "'$GX' status F-1 | grep -qx -- '- F-1 Treat the arguments after a marker as positionals for the parser: 44% built (commit not found)'"
+  "$G/.agents/bin/verify" --tier=full >/dev/null 2>&1
+  t    "...in the progress report too"  grep -q '44% built (commit not found)' "$G/.agents/cache/fdd-progress.md"
+  edit "$G/.agents/plans/f-1/tasks.json" 's/"commit":"[^"]*"/"commit":"HEAD"/'
+  t    "a ref name in the ledger isn't a commit record" bash -c "'$GX' status F-1 | grep -q '44% built (commit not found)'"
+  (cd "$G" && .agents/bin/tasks set f-1 T1 "done" "$(git rev-parse HEAD | cut -c1-5)" >/dev/null)
+  t    "...nor a SHA shorter than 7"    bash -c "'$GX' status F-1 | grep -q '44% built (commit not found)'"
+  t    "tasks set ... done HEAD records the SHA it names" bash -c "cd '$G' && .agents/bin/tasks set f-1 T1 done HEAD | grep -qx \"T1 -> done (\$(git rev-parse --short HEAD))\""
+  t    "a real commit is built"         bash -c "'$GX' status F-1 | grep -q ': 89% built$'"
+  "$GX" approve inspect F-1 >/dev/null
+  t    "...and inspected after that"    bash -c "'$GX' status F-1 | grep -q ': 100% inspected$'"
+  (cd "$G" && .agents/bin/tasks set f-1 T1 "done" deadbeefdeadbeef >/dev/null)
+  t    "an inspection doesn't make a fake SHA built" bash -c "'$GX' status F-1 | grep -q '44% built (commit not found)'"
+  # Absence: without the pack, a feature list and no FDD_SCOPE at all change nothing.
+  mkdir -p "$R/.agents/fdd"; cp "$GD/features.md" "$R/.agents/fdd/features.md"; printf 'x\n' >> "$R/LICENSE"
+  out="$("$R/.agents/bin/verify" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "absence: no pack, no FDD findings" bash -c "test $rc = 0 && ! printf '%s' \"\$1\" | grep -q fdd-" _ "$out"
+fi
+}
+group grp_pilot2_small
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

@@ -743,6 +743,11 @@ def stop_gate(tool, data, conf):
     reason = ("The stop gate ran .agents/bin/verify and it failed. Fix these, then finish:\n\n%s\n\n"
               "(Attempt %d of %d. If a finding is wrong or out of scope, say so plainly instead of "
               "suppressing it.)" % (out, blocks + 1, max_blocks))
+    import glob
+    # Not on a policy block (2), which is never a deliberate red state, nor without a plan to ask in.
+    if rc == 1 and glob.glob(os.path.join(ROOT, ".agents", "plans", "*", "tasks.json")):
+        reason += ("\nIf the red state is deliberate (tests first, waiting on the human), pause instead: "
+                   ".agents/bin/tasks ask <slug> <T-id> --gate=tests '<question>'.")
     if tool == "claude":
         sys.stderr.write(reason + "\n")
         return 2

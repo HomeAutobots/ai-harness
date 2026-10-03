@@ -7,8 +7,8 @@ with `install.sh --stack cpp-cmake <project>`; the pack runs from `.agents/built
 | Tier | When | What runs |
 |---|---|---|
 | edit | after every edit (hook) | clang-format check (if the repo has `.clang-format`), `-fsyntax-only` compile of edited sources with their real compile command: errors plus new warnings |
-| turn | stop gate, `verify` | incremental build, new warnings in changed files, clang-tidy on changed lines only, tests affected by the change |
-| full | commit gate, CI | the above, all tests, ASan+UBSan build with all tests, cppcheck (new findings only) |
+| turn | stop gate, `verify` | incremental build, new warnings in changed files, clang-tidy on changed lines only (when installed), tests affected by the change |
+| full | commit gate, CI | the above, all tests, ASan+UBSan build with all tests, cppcheck (new findings only, when installed) |
 
 Why this shape: execution and compiler feedback in the loop is where the evidence for agent
 gains is strongest (sanitizer-guided C/C++ repair especially), and findings limited to what
@@ -22,6 +22,10 @@ the agent changed keep it from wandering into pre-existing debt.
   `compile_commands.json` is symlinked at the install root for clangd.
 - **Changed lines only.** clang-tidy gets a `--line-filter` built from `git diff -U0`, so
   existing findings elsewhere in a file don't show up.
+- **Optional analyzers.** The seeded tier scripts run clang-tidy and cppcheck only when they're
+  installed (`if command -v ...`), so a machine without them skips those steps instead of
+  failing every turn that touches a source with `infra: clang-tidy not found`. To make one
+  mandatory, drop its guard: then a missing tool is a tooling problem (exit 3), as before.
 - **Affected tests.** CMake's file API maps changed sources to targets, then to everything
   that depends on them, then to the CTest tests those executables run. Header, CMake, or
   unknown changes run everything; so does a missing codemodel, or a selection that matches no
