@@ -18,7 +18,7 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `bin/eval` | harness | Replays real fixes to measure whether the harness helps |
 | `bin/gitflow` | harness | The repo's git workflow: branch, commit, update, push, PR, review, merge, checks |
 | `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, `agents_render.py` (per-tool agent renderer), hook adapter |
-| `builtin/` | harness | The built-in library: the harness's skills and its workflow and stack packs (e.g. req-driven, cpp-cmake), rebuilt on every install |
+| `builtin/` | harness | The built-in library: the harness's skills and its workflow and stack packs (e.g. req-driven, cpp-cmake, python), rebuilt on every install |
 | `library/` | project | Your library: `skills/`, `workflows/`, `stacks/`. Upgrades never touch it. Also searched: `LIBRARIES` in `harness.conf`, your personal `~/.config/ai-harness/` |
 | `skills/` | sync | Every resolved skill, rendered (links, or copies with `LINK_MODE=copy`). Don't edit here; a skill added by hand moves to `library/skills/` |
 | `commands/` | sync | One wrapper per `bin/<name>` command of each active workflow pack (e.g. `commands/fdd`); finds the pack at run time |
@@ -57,4 +57,5 @@ Exit codes everywhere: 0 ok, 1 findings, 2 policy block, 3 tooling problem, 124 
 - Turn hooks off for a session: `AGENTS_HOOKS=off`.
 - See this repo's git workflow: `.agents/bin/gitflow config`, then `gitflow status`. Any step's usage: `gitflow <step> --help` (it changes nothing).
 - cpp-cmake says `no tests ran`: CTest has no tests registered. Register them, or run the test binaries from `checks/turn.sh` and `checks/full.sh` (in full, from the sanitizer tree too: the commented `agents_step sanitizer-tests` line) and set `CPP_NO_TESTS=ok` there; a project with no tests sets it in `harness.conf`.
+- python says `no tests ran`: pytest collected nothing. Tests it can't run (unittest without pytest, a custom runner) go in `checks/turn.sh` and `checks/full.sh` (the commented `agents_step tests py_run ...` line) with `PY_NO_TESTS=ok` there; a project with no tests sets it in `harness.conf`. python says `<tool> not found (...), and the project configures it`: install it in the project's environment (or create the environment: `uv sync`, `poetry install`), point `PY_VENV` or `PY_RUN` at the one that has it, or turn that step off (`PY_LINT`, `PY_FORMAT`, `PY_TYPECHECK`).
 - CI (team mode only; local mode keeps the harness out of CI): `.agents/bin/sync --check && .agents/bin/verify --tier=full`.
