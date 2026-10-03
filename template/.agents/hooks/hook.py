@@ -9,9 +9,10 @@ Translates each tool's hook protocol into the harness's tool-agnostic checks:
                 after a question to the human, record the question and answer in the ledger
   session-start remind the agent of questions still waiting on the human; tell Codex when the
                 AGENTS.override.md sync wrote in local mode is out of date
-  turn-start    snapshot the working tree when a prompt arrives
+  turn-start    snapshot the working tree (and the simulated-human switch) when a prompt arrives
   stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
-                anything; block with the findings until it passes (bounded retries)
+                anything; block with the findings until it passes (bounded retries). A
+                simulated-human switch that appeared or changed during the turn is marked flagged
 
 Usage: hook.py <event> --tool=<claude|copilot|cursor|codex|gemini>   (JSON payload on stdin)
 
@@ -404,6 +405,9 @@ def policy_test(argv):
 
 def pre_tool(tool, data, conf):
     feats = conf.get("HOOKS", "").split()
+    # A simulated-human switch made earlier in this turn is flagged before the next tool call can
+    # act on it (a gitflow push that runs verify, say), not only at the stop.
+    switch_flagged(tool, session_key(data), "pre-tool")
     if is_question_tool(data):
         return question_pre(tool, data) if "questions" in feats else allow(tool, "pre-tool")
     if "policy" not in feats:
@@ -548,7 +552,65 @@ def turn_start(tool, data, conf):
         return allow(tool, "turn-start")
     write_file(os.path.join(CACHE, "turn-" + key), tree_state())
     write_file(os.path.join(CACHE, "head-" + key), refs_state())
+    token_in_session(tool, "turn-start")
+    write_file(os.path.join(CACHE, "human-" + key), switch_state()[1])
     return allow(tool, "turn-start")
+
+
+TOOL_NAMES = {"claude": "Claude Code", "copilot": "Copilot", "cursor": "Cursor", "codex": "Codex",
+              "gemini": "Gemini CLI"}
+
+
+def switch_state():
+    """(path, sha256 of its bytes or 'off') for the simulated-human switch in the git dir that
+    install.sh --simulated-human writes. Only a person turns it on, between sessions."""
+    gd = git("rev-parse", "--git-common-dir").decode(errors="replace").strip()
+    if not gd:
+        return None, "off"
+    path = os.path.join(ROOT, gd, "ai-harness", "simulated-human")
+    try:
+        with open(path, "rb") as fh:
+            return path, hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return path, "off"
+
+
+def flag_switch(tool, event, path, why):
+    """Mark the switch flagged, once, which turns it off (the feature-driven checks report it). A
+    switch that can't be written to is off too, so a failed write still counts."""
+    try:
+        with open(path, "rb") as fh:
+            text = fh.read()
+        if b"\nflagged\t" in b"\n" + text:
+            return
+        with open(path, "ab") as fh:
+            fh.write((b"" if text.endswith(b"\n") or not text else b"\n") + ("flagged\t%s\n" % why).encode("utf-8"))
+    except OSError:
+        pass
+    log_event(tool, event, "flagged", why)
+
+
+def switch_flagged(tool, key, event="stop-gate"):
+    """True when the switch appeared or changed since this turn started (checked before each tool
+    call and at the stop): it's flagged, and the stop gate runs verify. The snapshot stays as the
+    turn started, so the stop still sees a change the pre-tool hook flagged."""
+    before = read_file(os.path.join(CACHE, "human-" + key))
+    if not before:
+        return False
+    path, now = switch_state()
+    if now in ("off", before):
+        return False
+    flag_switch(tool, event, path, "turned on or changed during a %s agent turn" % TOOL_NAMES.get(tool, tool))
+    return True
+
+
+def token_in_session(tool, event):
+    """The simulated human's token belongs to whoever plays the person, never to an agent: when this
+    hook, which the agent's tool starts with its own environment, sees it, the switch is flagged."""
+    path, now = switch_state()
+    if now != "off" and os.environ.get("AGENTS_SIMULATED_HUMAN"):
+        flag_switch(tool, event, path, "exposed: its token was in a %s agent session's environment"
+                    % TOOL_NAMES.get(tool, tool))
 
 
 def refs_state():
@@ -598,10 +660,12 @@ def stop_gate(tool, data, conf):
     if (pending or before) and start and start != refs_state().split():
         since = commits_only(start)
 
-    # Only gate turns that changed the tree or the branches. Without a snapshot, gate any dirty tree.
+    # Only gate turns that changed the tree, the branches, or the simulated-human switch. Without a
+    # snapshot, gate any dirty tree.
+    flagged = switch_flagged(tool, key)
     now = tree_state()
     dirty = bool(git("status", "--porcelain").strip())
-    if not since and ((before and before == now) or (not before and not dirty)):
+    if not since and not flagged and ((before and before == now) or (not before and not dirty)):
         write_file(counter, "0")
         remove_file(pending_file)
         return finish_allow(tool)
@@ -801,6 +865,7 @@ def codex_copy_stale(conf):
 
 
 def session_start(tool, data, conf):
+    token_in_session(tool, "session-start")
     waiting = open_questions()
     lines = []
     if waiting:

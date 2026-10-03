@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # ai-harness installer. Installs or upgrades the harness in a project. Safe to re-run.
 #
-#   ./install.sh [--local | --team] [--stack <name>]... [--workflow <name>]... <project-dir>
+#   ./install.sh [--local | --team] [--stack <name>]... [--workflow <name>]... [--simulated-human] <project-dir>
+#
+# --simulated-human is for flows where an agent plays the person (a scratch repo, a pilot, a demo):
+# a shell holding the token it prints may approve feature-driven gates in this clone, even an
+# agent's shell, and every approval is marked simulated. Never in a real project. It's kept in the
+# git dir, so it's per clone; delete .git/ai-harness/simulated-human to turn it off.
 #
 # Harness-owned files are replaced on every run. Project-owned files are only created when
 # missing, so re-running is the upgrade and never touches tailoring. What the harness ships
@@ -16,13 +21,14 @@ SRC="$HARNESS/template"
 VERSION="$(cat "$HARNESS/VERSION")"
 
 usage() {
-  echo "usage: $0 [--local | --team] [--stack <name>]... [--workflow <name>]... <project-dir>" >&2
+  echo "usage: $0 [--local | --team] [--stack <name>]... [--workflow <name>]... [--simulated-human] <project-dir>" >&2
   echo "  stacks: $(ls "$HARNESS/stacks" | tr '\n' ' ')  workflows: $(ls "$HARNESS/workflows" | tr '\n' ' ')" >&2
   exit 2
 }
 NEW_STACKS=""
 NEW_WORKFLOWS=""
 NEW_MODE=""
+SIMULATED_HUMAN=0
 DEST=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,6 +38,7 @@ while [ $# -gt 0 ]; do
     --workflow=*) NEW_WORKFLOWS="$NEW_WORKFLOWS ${1#--workflow=}"; shift ;;
     --local) NEW_MODE=local; shift ;;
     --team) NEW_MODE=team; shift ;;
+    --simulated-human) SIMULATED_HUMAN=1; shift ;;
     -h|--help) usage ;;
     -*) echo "install: unknown option $1" >&2; usage ;;
     *) [ -z "$DEST" ] || usage; DEST="$1"; shift ;;
@@ -91,6 +98,20 @@ done
 for w in $NEW_WORKFLOWS; do
   known_pack workflows "$w" || { echo "install: unknown workflow '$w' (not shipped with the harness or in a library)" >&2; usage; }
 done
+# --simulated-human: checked before anything changes. It only affects feature-driven approvals and
+# lives in the git dir. A token the caller sets must be long enough that an agent can't guess it.
+if [ "$SIMULATED_HUMAN" -eq 1 ]; then
+  git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 \
+    || { echo "install: --simulated-human needs a git repo (it's kept in the git dir, per clone)" >&2; exit 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "install: --simulated-human needs python3" >&2; exit 3; }
+  case " $(sed -n 's/^WORKFLOWS="\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$DEST/.agents/harness.conf" 2>/dev/null | head -1) $NEW_WORKFLOWS " in
+    *" feature-driven "*) ;;
+    *) echo "install: --simulated-human only changes feature-driven approvals; add --workflow feature-driven" >&2; exit 2 ;;
+  esac
+  if [ -n "${AGENTS_SIMULATED_HUMAN:-}" ] && [ "${#AGENTS_SIMULATED_HUMAN}" -lt 16 ]; then
+    echo "install: AGENTS_SIMULATED_HUMAN is shorter than 16 characters; unset it to get a generated token" >&2; exit 2
+  fi
+fi
 
 PREV="$(cat "$DEST/.agents/HARNESS_VERSION" 2>/dev/null || true)"
 
@@ -615,10 +636,31 @@ if [ "$IN_GIT" -eq 1 ]; then
 fi
 # feature-driven: approvals count only when fdd approve recorded them in the git dir (0.3.0). The
 # first person-run install (or fdd approve) in a clone records what's already there, and lists it.
+# The simulated human (--simulated-human) goes on first, so this run can adopt with its token; on
+# every run, the summary says when a switch is there. A --simulated-human that couldn't be turned
+# on fails the install (exit 3, at the end), so a script that relies on it doesn't go on without it.
+SIM_FAILED=""
 case " $WORKFLOWS " in *" feature-driven "*)
   if [ "$IN_GIT" -eq 1 ] && command -v python3 >/dev/null 2>&1 && wp="$(agents_resolve workflows feature-driven)" \
      && grep -q '^def cmd_adopt' "$wp/fdd_tools.py" 2>/dev/null; then   # an older personal pack has no adopt
+    if grep -q '^def cmd_simulated_human' "$wp/fdd_tools.py" 2>/dev/null; then
+      sim_on=""
+      if [ "$SIMULATED_HUMAN" -eq 1 ]; then
+        [ -n "${AGENTS_SIMULATED_HUMAN:-}" ] \
+          || AGENTS_SIMULATED_HUMAN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+        export AGENTS_SIMULATED_HUMAN
+        sim_on=on
+      fi
+      sim_rc=0
+      sim_out="$(python3 "$wp/fdd_tools.py" simulated-human "$DEST" $sim_on 2>&1)" || sim_rc=$?
+      [ -z "$sim_out" ] || printf '%s\n' "$sim_out" | sed 's/^/install: /'
+      [ "$sim_rc" -eq 0 ] || [ "$SIMULATED_HUMAN" -eq 0 ] || SIM_FAILED="--simulated-human didn't turn the simulated human on (see above)"
+    elif [ "$SIMULATED_HUMAN" -eq 1 ]; then
+      SIM_FAILED="the feature-driven pack in $wp predates --simulated-human, so the simulated human is off"
+    fi
     { python3 "$wp/fdd_tools.py" adopt "$DEST" 2>&1 || true; } | sed 's/^/install: /'
+  elif [ "$SIMULATED_HUMAN" -eq 1 ]; then
+    SIM_FAILED="the feature-driven pack didn't resolve or predates the approval record, so the simulated human is off"
   fi ;;
 esac
 
@@ -672,4 +714,8 @@ elif [ "$PREV" != "$VERSION" ]; then
   say "upgraded $PREV -> $VERSION. Check CHANGELOG.md in the harness repo, review the diff, commit."
 else
   say "reinstalled $VERSION, no version change"
+fi
+if [ -n "$SIM_FAILED" ]; then
+  say "error: $SIM_FAILED" >&2
+  exit 3
 fi
