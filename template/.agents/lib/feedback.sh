@@ -32,6 +32,31 @@ agents_load_conf() {
   return 0
 }
 
+# agents_conf_import <PREFIX>: a stack's settings from .agents/harness.conf. verify loads that file
+# but doesn't export it, so a stack's lib.sh calls this (agents_conf_import CPP_) before its defaults.
+# The file is sourced in a subshell, as verify does, and each <PREFIX>* variable that sourcing
+# sets is copied here with its value, unless the caller already has it set: a value set in the
+# tier script before sourcing the lib, or one in its environment, wins. Set after sourcing, it
+# wins too. Not exported. Sourced rather than parsed so a value means what it means to verify.
+agents_conf_import() {
+  case "${1:-}" in
+    ""|[!A-Za-z]*|*[!A-Za-z0-9_]*) echo "infra: agents_conf_import: bad prefix '${1:-}'" >&2; return 3 ;;
+  esac
+  [ -f "$AGENTS_ROOT/.agents/harness.conf" ] || return 0
+  eval "$(
+    set +eu; unset IFS   # a tier script's strict mode or IFS must not change what's split here
+    _ac_had=" $(compgen -v "$1" 2>/dev/null | tr '\n' ' ')"
+    # shellcheck source=/dev/null
+    . "$AGENTS_ROOT/.agents/harness.conf" >/dev/null 2>&1
+    unset IFS
+    for _ac_k in $(compgen -v "$1" 2>/dev/null); do
+      [ "${_ac_had#* "$_ac_k" }" = "$_ac_had" ] || continue   # set before: no case here (bash 3.2 misparses one in $())
+      printf '%s=%q\n' "$_ac_k" "${!_ac_k}"
+    done
+    exit 0
+  )"
+}
+
 # agents_backup_dir: where local mode keeps its backup, inside this worktree's git dir
 # (git rev-parse --git-path ai-harness), where git clean, git stash -a, and checkouts never reach.
 # One per install prefix (backup-<prefix>, / turned into _), so subdirectory installs don't

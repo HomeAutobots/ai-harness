@@ -5,12 +5,22 @@
 #
 # Deterministic C/C++ feedback built from the compiler, CMake, CTest, and static analyzers.
 # Every function follows the feedback contract: silent on success, path:line findings on
-# failure, exit 0 clean / 1 findings / 3 tool missing or no tests ran. Override the settings
-# below in the check scripts (before calling). .agents/harness.conf doesn't reach them, except
-# CPP_NO_TESTS, which is read from there when the script leaves it unset.
+# failure, exit 0 clean / 1 findings / 3 tool missing or no tests ran.
+#
+# Settings: the CPP_* below. Put them in .agents/harness.conf, or in a check script (before or
+# after sourcing this file, before calling). The check script wins, then harness.conf, then the
+# defaults here. A variable already in the environment counts as set by the script, except that
+# verify loads harness.conf over it first.
 
 . "$AGENTS_ROOT/.agents/lib/feedback.sh"
 CPP_PACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # wherever this pack's library is
+# An older install's feedback.sh (with a newer copy of this pack in a library) has no import, so
+# only CPP_NO_TESTS comes from harness.conf there, as it did before.
+if command -v agents_conf_import >/dev/null 2>&1; then
+  agents_conf_import CPP_
+elif [ -z "${CPP_NO_TESTS+x}" ] && command -v agents_conf_get >/dev/null 2>&1; then
+  CPP_NO_TESTS="$(agents_conf_get "$AGENTS_ROOT/.agents/harness.conf" CPP_NO_TESTS)"
+fi
 
 : "${CPP_BUILD_DIR:=build-agent}"          # agent-owned build tree (never your own build dir)
 : "${CPP_SAN_DIR:=build-agent-asan}"       # sanitizer build tree
@@ -24,8 +34,7 @@ CPP_PACK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # wherever this pack'
 : "${CPP_CPPCHECK_ARGS:=}"                 # e.g. --addon=misra (MISRA needs the rule texts file)
 # CPP_NO_TESTS: when CTest has no tests in a build tree, the test steps report "no tests ran" as a
 # tooling problem (exit 3), never a silent ok. Set it to ok when the project has no tests, or runs
-# them from the tier scripts itself (agents_step tests ...). Read when a test step runs, so the
-# check script can set it after sourcing this file. Unset (existing installs): reported.
+# them from the tier scripts itself (agents_step tests ...). Unset (existing installs): reported.
 
 cpp_py() { python3 "$CPP_PACK/cpp_tools.py" "$@"; }
 
@@ -42,16 +51,24 @@ cpp_filter() {
   done
 }
 
-# Keep the agent build trees out of `git status` without touching the project's .gitignore.
-# Patterns there are relative to the repo top, so an install in a subdirectory prefixes them
-# (escaped like the harness block's entries).
+# _cpp_exclude <build dir>: keep the agent build trees out of `git status` without touching the
+# project's .gitignore. Patterns there are relative to the repo top, so an install in a
+# subdirectory prefixes them (escaped like the harness block's entries). A build dir that
+# build-agent* doesn't cover (CPP_BUILD_DIR=out/agent) gets a line of its own.
 _cpp_exclude() {
-  local ex pre l
+  local ex pre l d="${1%/}" lines
   ex="$(git -C "$AGENTS_ROOT" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   case "$ex" in /*) ;; *) ex="$AGENTS_ROOT/$ex" ;; esac
   pre="$(git -C "$AGENTS_ROOT" rev-parse --show-prefix 2>/dev/null | sed 's/[[*?\\]/\\&/g' || true)"
   mkdir -p "$(dirname "$ex")"
-  for l in "/${pre}build-agent*/" "/${pre}compile_commands.json"; do
+  lines=("/${pre}build-agent*/" "/${pre}compile_commands.json")
+  d="${d#./}"
+  case "$d" in
+    ""|/*|..|../*|*/..|*/../*|*"
+"*|build-agent*) ;;   # covered already, not inside the install, or not one line
+    *) lines+=("/${pre}$(printf '%s' "$d" | sed 's/[[*?\\]/\\&/g')/") ;;
+  esac
+  for l in "${lines[@]}"; do
     grep -qxF -- "$l" "$ex" 2>/dev/null || printf '%s\n' "$l" >> "$ex"
   done
 }
@@ -62,7 +79,7 @@ cpp_configure() {
   local dir="$1" b
   shift
   command -v cmake >/dev/null 2>&1 || { echo "infra: cmake not found"; return 3; }
-  _cpp_exclude
+  _cpp_exclude "$dir"
   b="$AGENTS_ROOT/$dir"
   mkdir -p "$b/.cmake/api/v1/query"
   if [ ! -f "$b/.cmake/api/v1/query/codemodel-v2" ]; then
@@ -176,16 +193,13 @@ _cpp_test_count() {
 # ran and returns 3 (a tooling problem: the check couldn't do its job), or 1 to skip quietly when
 # CPP_NO_TESTS=ok. ctest missing is 3 too.
 _cpp_tests_ready() {
-  local n how="${CPP_NO_TESTS:-}"
+  local n
   if [ -f "$AGENTS_ROOT/$2/CTestTestfile.cmake" ]; then
     command -v ctest >/dev/null 2>&1 || { echo "infra: ctest not found (needed for $1)"; return 3; }
   fi
   n="$(_cpp_test_count "$AGENTS_ROOT/$2")"
   [ "$n" = 0 ] || return 0   # tests, or a listing we can't read: run ctest and let it speak
-  if [ -z "$how" ] && command -v agents_conf_get >/dev/null 2>&1; then
-    how="$(agents_conf_get "$AGENTS_ROOT/.agents/harness.conf" CPP_NO_TESTS)"
-  fi
-  [ "$how" = ok ] && return 1
+  [ "${CPP_NO_TESTS:-}" = ok ] && return 1
   echo "infra: $1: no tests ran: CTest has none registered in $2. Register them with add_test(), or run them from .agents/checks/*.sh and set CPP_NO_TESTS=ok there; if the project has no tests, a person sets CPP_NO_TESTS=ok in .agents/harness.conf"
   return 3
 }
