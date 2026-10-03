@@ -1,4 +1,5 @@
 # feature-driven workflow
 deny-cmd .agents/builtin/workflows/feature-driven/bin/fdd approve   # approving FDD gates is a human decision
 deny-cmd .agents/commands/fdd approve   # approving FDD gates is a human decision
-deny-regex ^(?![ \t]*(?:[\w./-]*/)?(?:tasks[ \t]+ask|echo|printf)\b(?:[ \t]+(?:[^\s'"$`\;&|<>()]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*\Z)[\s\S]*(^|[\s/;&|("'`])fdd(_tools\.py)?['"]?\s+['"]?(?:approve|adopt)\b   # approving FDD gates is a human decision (this catches the usual ways to run fdd approve; fdd itself also refuses in an agent shell, and only approvals it records count). A plain one-line tasks ask, echo, or printf that only names it is fine.
+deny-regex ^(?![ \t]*(?:[\w./-]*/)?(?:tasks[ \t]+ask|echo|printf)\b(?:[ \t]+(?:[^\s'"$`\;&|<>()]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*\Z)[\s\S]*(^|[\s/;&|("'`])fdd(_tools\.py)?['"]?\s+['"]?(?:approve|adopt|simulated-human)\b   # approving FDD gates is a human decision (this catches the usual ways to run fdd approve; fdd itself also refuses in an agent shell, and only approvals it records count). A plain one-line tasks ask, echo, or printf that only names it is fine.
+deny-regex (^|[\s;&|("'`])--simulated-human\b   # only a person turns on the simulated human (install.sh --simulated-human), and never in a real project

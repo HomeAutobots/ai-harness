@@ -35,6 +35,8 @@ inspection records the commit and is final.
 | edit, turn, full | `fdd-leak` | a feature ID from your list appears in a changed line of shared code, tests, or docs |
 | edit (when the list is edited), full | `fdd-format` | duplicate ID, feature outside a set, name or ticket in the wrong shape |
 | edit (when `approvals` is edited), turn, full | `fdd-approval-unrecorded` | a line in `approvals` that `fdd approve` didn't record; it doesn't count, and it's a policy block (exit 2) |
+| edit (when `approvals` is edited), turn, full | `fdd-approval-simulated` | an approval a simulated human made, while the switch is off; it doesn't count, and it's a policy block |
+| turn, full | `fdd-simulated-human` | a simulated-human switch that `install.sh --simulated-human` didn't write, or that appeared or changed during an agent turn; it's off, and it's a policy block |
 | turn, full | `fdd-not-local` | `FDD_DIR` is in the repo but git tracks files in it or doesn't ignore it |
 | turn, full | `fdd-list-missing` | the approved list was deleted |
 | turn, full | `fdd-list-unapproved` | in-scope code changed while the list isn't approved, or changed since |
@@ -58,6 +60,25 @@ The full tier writes `.agents/cache/fdd-progress.md`, FDD's parking lot: each fe
   `fdd-approval-unrecorded` (exit 2) until you delete it. `fdd status` lists such lines as "not
   counted". The lines already there when a clone first runs `install.sh` or `fdd approve` from your
   terminal (an upgrade from before the record, a copied-in FDD dir) are recorded once and listed.
+- **When an agent plays you.** In a scratch repo, a pilot, or a demo, the "person" at the check-ins
+  can itself be an agent, say a Claude Code session driving `claude -p` sessions in the repo. Install
+  with `install.sh --workflow feature-driven --simulated-human <repo>`. It turns on a switch for
+  that clone (`.git/ai-harness/simulated-human`) and prints a token once:
+  `install: simulated human: to approve from an agent's shell, set AGENTS_SIMULATED_HUMAN=<token> on
+  that one command`. With the token set, `fdd approve` works in an agent's shell
+  (`AGENTS_SIMULATED_HUMAN=<token> .agents/commands/fdd approve design F-1`), and so does install's
+  adoption. The agents working in the repo don't have the token, so they're refused exactly as
+  without the switch. Keep it that way: never export the token in a shell that starts an agent.
+  The hooks see it in that agent's environment and turn the switch off. Every approval
+  made or adopted while it's on is marked simulated: `approved design F-1 (simulated human)`, a
+  who field ending in `(simulated human)` in `approvals`, or a `#simulated` line in the record for
+  adopted ones. `fdd status` starts with `simulated human: on (...)`, `verify` adds a `note:` line,
+  and every `install.sh` run says so. Simulated approvals count only while the switch is on: delete
+  the file to turn it off, and they become `fdd-approval-simulated`. Running `install.sh
+  --simulated-human` again writes a new token; it's the only way to turn the switch back on after
+  the hooks flag it (it appeared or changed during an agent turn, or its token was in an agent's
+  environment). Set `AGENTS_SIMULATED_HUMAN` yourself (16 characters or more) before that run to
+  pick the token. Never use it in a real project.
 - **Commits in the same turn.** The stop gate runs `verify --since=<sha>` for `HEAD` and each
   branch tip the turn started from, so the trace, design, and leak checks see what an agent
   committed during the turn, whether through `git commit`, `gitflow commit`, skipped git hooks, or
@@ -67,7 +88,10 @@ The full tier writes `.agents/cache/fdd-progress.md`, FDD's parking lot: each fe
 - **Known gaps.** This makes self-approval visible, not impossible. Codex and Copilot mark no agent
   shell, so there an approve spelled in a way the policy doesn't match still runs, and anywhere an
   agent can unset the marker (`env -u CLAUDECODE`) or write both `approvals` and the record on
-  purpose. Review `fdd status` before trusting it. Commits made outside an agent turn aren't judged
+  purpose. The same goes for the simulated-human switch: one written by hand, or that appears during
+  an agent turn, is off and reported, but an agent that writes the switch and its record on purpose
+  outside a hooked turn gets one that works (its approvals are still marked simulated, and status
+  says the switch is on). Review `fdd status` before trusting it. Commits made outside an agent turn aren't judged
   by the turn gates; `verify --since=<rev>` judges a range by hand.
   Private IDs can also reach shared places the checks don't read: a branch summary
   (`gitflow start PROJ-123 <summary>`), a plan title that ends up in a PR body, or code committed

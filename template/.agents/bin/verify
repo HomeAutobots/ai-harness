@@ -4,7 +4,7 @@
 #   .agents/bin/verify [--tier=edit|turn|full] [--json] [--no-cache] [--update-baseline] [--since=<rev>] [files...]
 #
 # Runs the guard, the project's checks for a tier (.agents/checks/<tier>.sh, project-owned), and
-# each active workflow pack's checks (<library>/workflows/<name>/checks/<tier>.sh, run in place), then shapes the result: one line when green, capped findings when not, full log on disk.
+# each active workflow pack's checks (<library>/workflows/<name>/checks/<tier>.sh, run in place), then shapes the result: one line when green, capped findings when not, full log on disk. A pack's "note: " lines show under the status line either way.
 #   edit  per-file checks on the given files (the post-edit hook, or `check <files>`)
 #   turn  the default; what the stop hook runs: build, affected tests, lint on changed code
 #   full  commit gate and CI: everything, including slow checks
@@ -79,22 +79,26 @@ elif [ "$TIER" != edit ]; then
   while IFS= read -r f; do [ -n "$f" ] && FILES+=("$f"); done < <(agents_changed_files)
 fi
 
-emit() {  # emit <status-word> <rc> <shaped-file> <log-path>
-  local word="$1" rc="$2" shaped="$3" log="$4"
+emit() {  # emit <status-word> <rc> <shaped-file> <log-path>; pack notes from $NOTES, if any
+  local word="$1" rc="$2" shaped="$3" log="$4" notes="${NOTES:-}"
+  [ -n "$notes" ] && [ -s "$notes" ] || notes=/dev/null
   if [ "$JSON" -eq 1 ]; then
-    awk -v tier="$TIER" -v rc="$rc" -v word="$word" -v logp="$log" '
+    # "notes" only when there are some, so the shape is unchanged without them.
+    nf="$notes" awk -v tier="$TIER" -v rc="$rc" -v word="$word" -v logp="$log" '
       function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, "\\t", s); gsub(/[\001-\037]/, " ", s); return s }
       { a[++n] = "\"" esc($0) "\"" }
       END {
         printf "{\"tool\":\"verify\",\"tier\":\"%s\",\"status\":\"%s\",\"exit\":%d,\"findings\":[", tier, tolower(word), rc
         for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), a[i]
-        printf "],\"log\":\"%s\"}\n", esc(logp)
+        printf "]"
+        while ((getline l < ENVIRON["nf"]) > 0) if (!(l in seen)) { seen[l] = 1; nl = nl (nl == "" ? "" : ",") "\"" esc(l) "\"" }
+        if (nl != "") printf ",\"notes\":[%s]", nl
+        printf ",\"log\":\"%s\"}\n", esc(logp)
       }' "$shaped"
   else
-    if [ "$rc" -eq 0 ]; then
-      echo "$word verify $TIER"
-    else
-      echo "$word verify $TIER"
+    echo "$word verify $TIER"
+    awk '!seen[$0]++' "$notes"
+    if [ "$rc" -ne 0 ]; then
       cat "$shaped"
       [ -n "$log" ] && echo "full log: $log"
     fi
@@ -120,8 +124,8 @@ if [ "$CACHE" -eq 1 ]; then
   fi
 fi
 
-RAW="$(mktemp)"; SHAPED="$(mktemp)"
-trap 'rm -f "$RAW" "$SHAPED" "$RAW.part"' EXIT
+RAW="$(mktemp)"; SHAPED="$(mktemp)"; NOTES="$RAW.notes"
+trap 'rm -f "$RAW" "$SHAPED" "$RAW.part" "$NOTES"' EXIT
 
 # 1. Guard: new suppressions, skipped or deleted tests. Cheap, always first.
 GUARD_RC=0
@@ -259,7 +263,8 @@ for wf in ${WORKFLOWS:-}; do
   [ -f "$WS" ] || continue
   rc=0
   agents_budget_run "$BUDGET" "$RAW.part" bash "$WS" ${FILES[@]+"${FILES[@]}"} || rc=$?
-  cat "$RAW.part" >> "$RAW"
+  # A pack's "note: " lines aren't findings: emit shows them under the status line, pass or fail.
+  n="$NOTES" awk '/^note: / { print >> ENVIRON["n"]; next } { print }' "$RAW.part" >> "$RAW"
   WF_RC="$(agents_worst_rc "$WF_RC" "$rc")"
 done
 set +f

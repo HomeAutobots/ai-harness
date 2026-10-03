@@ -9,7 +9,7 @@ WORK="$(mktemp -d)"
 trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
-unset CLAUDECODE GEMINI_CLI CURSOR_AGENT   # the suite plays the human: fdd approve refuses in an agent's shell
+unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
 
 PASS=0; FAIL=0; SKIP=0
 ok()  { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
@@ -1513,6 +1513,145 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_fdd_bypass
+
+grp_fdd_simhuman() {   # roadmap row 40: install.sh --simulated-human, for flows where an agent plays the person
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "feature-driven: simulated human"
+  has(){ printf '%s' "$1" | grep -qF -- "$2"; }
+  feats(){ mkdir -p "$1/.agents/fdd/designs"; printf '# Features\n\n## Sales\n### FS-1 Making a sale\n- F-1 Calculate the total of a sale\n' > "$1/.agents/fdd/features.md"; }
+  stub(){ for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$1/.agents/checks/$tier.sh"; done; commit "$1" harness; }
+  # Misuse is refused before anything changes.
+  P=$(repo simh-plain)
+  out="$("$HARNESS/install.sh" --simulated-human "$P" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human without feature-driven is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes feature-driven approvals; add --workflow feature-driven'" _ "$out"
+  tnot "...before anything is installed" test -e "$P/.agents"
+  mkdir -p "$WORK/simh-nogit"
+  out="$("$HARNESS/install.sh" --workflow feature-driven --simulated-human "$WORK/simh-nogit" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human outside git is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'needs a git repo' && test ! -e '$WORK/simh-nogit/.agents'" _ "$out"
+  out="$(AGENTS_SIMULATED_HUMAN=short "$HARNESS/install.sh" --workflow feature-driven --simulated-human "$P" 2>&1)" && rc=0 || rc=$?
+  t    "a token the caller sets must have 16 characters or more" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'shorter than 16 characters'" _ "$out"
+  tnot "...nothing installed"         test -e "$P/.agents"
+  # On: installed from an agent's shell, the way /scratch and pilots run it.
+  M=$(repo simh); mkdir -p "$M/src"; printf 'int a;\n' > "$M/src/a.cpp"; commit "$M" base
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow feature-driven --simulated-human "$M" 2>&1)"
+  TOK="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
+  MS="$M/.git/ai-harness/simulated-human"; MR="$M/.git/ai-harness/fdd-approvals"; MD="$M/.agents/fdd"; MX="$M/.agents/commands/fdd"
+  t    "install says it's on, and how it was turned on" has "$out" "install: simulated human: on (install.sh --simulated-human, run from a Claude Code shell); approvals made here are marked simulated"
+  t    "...and prints a generated token" test "${#TOK}" = 32
+  t    "the switch holds the token's hash, not the token" bash -c "grep -q '^on	[0-9a-f]\{64\}	install.sh --simulated-human' '$MS' && ! grep -q '$TOK' '$MS'"
+  t    "...and the record holds the same hash" bash -c "grep -qx \"#simulated-human	\$(sed -n 's/^on	\([0-9a-f]*\)	.*/\1/p' '$MS')\" '$MR'"
+  stub "$M"; feats "$M"
+  out="$(cd "$M" && CLAUDECODE=1 "$MX" approve list 2>&1)" && rc=0 || rc=$?
+  t    "an agent shell without the token is still refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'started by Claude Code (CLAUDECODE is set)' && ! printf '%s' \"\$1\" | grep -q AGENTS_SIMULATED_HUMAN" _ "$out"
+  out="$(cd "$M" && CLAUDECODE=1 AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 "$MX" approve list 2>&1)" && rc=0 || rc=$?
+  t    "a wrong token is refused, and says so" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"doesn't match this clone's simulated-human token\"" _ "$out"
+  tnot "...and writes nothing"        test -e "$MD/approvals"
+  out="$(cd "$M" && CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOK" "$MX" approve list 2>&1)" && rc=0 || rc=$?
+  t    "the token approves from an agent's shell" bash -c "test $rc = 0 && test \"\$1\" = 'approved list (simulated human)'" _ "$out"
+  t    "...marked simulated in the approvals line" grep -q '^list	-	[^	]* (simulated human)	' "$MD/approvals"
+  t    "...and recorded"              grep -qxF "$(tail -1 "$MD/approvals")" "$MR"
+  t    "a person's terminal approval is marked simulated too" has "$(printf '# F-1\nAdd.\n' > "$MD/designs/F-1.md"; "$MX" approve design F-1)" "approved design F-1 (simulated human)"
+  t    "status says it's on, first" bash -c "'$MX' status | head -1 | grep -q '^simulated human: on (install.sh --simulated-human, run from a Claude Code shell)'"
+  t    "...and the approvals count"   bash -c "'$MX' status | grep -qx 'list: approved' && '$MX' status F-1 | grep -q 'F-1 Calculate the total of a sale: 44% design approved'"
+  out="$("$M/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+  t    "verify passes, with a note under the status line" bash -c "test $rc = 0 && test \"\$(printf '%s\n' \"\$1\" | sed -n 1p)\" = 'ok verify turn' && printf '%s\n' \"\$1\" | sed -n 2p | grep -q '^note: simulated human is on in this clone (install.sh --simulated-human, run from a Claude Code shell)'" _ "$out"
+  t    "verify --json carries it as a note, not a finding" bash -c "\"\$1\"/.agents/bin/verify --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"findings\"] == [] and d[\"notes\"][0].startswith(\"note: simulated human is on\")'" _ "$M"
+  printf 'list\t-\tx\t2026-10-03\tforged\n' >> "$MD/approvals"
+  out="$("$M/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+  t    "on a fail, the note sits between the status line and the findings" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | sed -n 1p | grep -qx 'BLOCK verify turn' && printf '%s\n' \"\$1\" | sed -n 2p | grep -q '^note: simulated human' && printf '%s\n' \"\$1\" | sed -n 3p | grep -qF '[fdd-approval-unrecorded]'" _ "$out"
+  edit "$MD/approvals" '$d'
+  out="$("$HARNESS/install.sh" --team "$M" 2>&1)"
+  t    "a later install's summary says it's on" has "$out" "install: simulated human: on (install.sh --simulated-human, run from a Claude Code shell)"
+  tnot "...without a new token"       has "$out" "AGENTS_SIMULATED_HUMAN="
+  # Off: delete the switch, and what was approved under it stops counting.
+  mv "$MS" "$WORK/simh.switch"
+  out="$("$M/.agents/bin/verify" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "switch off: simulated approvals are a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '.agents/fdd/approvals:1: error: [fdd-approval-simulated] this list approval was made by a simulated human'" _ "$out"
+  tnot "...and verify has no note"    has "$out" "note: simulated human"
+  t    "status lists them as not counted" bash -c "'$MX' status | grep -qx 'not counted, made by a simulated human while the switch is off: .agents/fdd/approvals:1 list, .agents/fdd/approvals:2 design F-1'"
+  tnot "...and has no switch line"    bash -c "'$MX' status | grep -q '^simulated human'"
+  out="$(hook "$M" post-edit claude "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$MD/approvals\"}}" 2>&1)" && rc=0 || rc=$?
+  t    "...and an edit to approvals reports them right away" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '[fdd-approval-simulated]'" _ "$out"
+  out="$(cd "$M" && CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOK" "$MX" approve design F-1 2>&1)" && rc=0 || rc=$?
+  t    "the token does nothing without the switch" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'this clone has no simulated human'" _ "$out"
+  # Tamper: a switch written any way but install.sh --simulated-human is off, and reported.
+  printf 'on\t%s\tinstall.sh --simulated-human, run from a terminal\n' "$(python3 -c 'import hashlib; print(hashlib.sha256(b"agent-made-token-1234").hexdigest())')" > "$MS"
+  out="$("$M/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+  trc  "a hand-written switch is a policy block" 0 test "$rc" = 2
+  t    "...reported where it is"      has "$out" ".git/ai-harness/simulated-human:1: error: [fdd-simulated-human] this simulated-human switch wasn't written by install.sh --simulated-human, so it's off"
+  t    "...its approvals don't count"  has "$out" "[fdd-approval-simulated]"
+  t    "...status says it's off and why" bash -c "'$MX' status | head -1 | grep -qx \"simulated human: off, .git/ai-harness/simulated-human wasn't written by install.sh --simulated-human\""
+  trc  "...and its token approves nothing" 2 env CLAUDECODE=1 AGENTS_SIMULATED_HUMAN=agent-made-token-1234 "$MX" approve design F-1
+  t    "...the install summary flags it too" has "$("$HARNESS/install.sh" --team "$M" 2>&1)" "install: simulated human: off, .git/ai-harness/simulated-human wasn't written by install.sh --simulated-human"
+  echo on > "$MS"
+  t    "a one-word switch is flagged the same way" has "$("$M/.agents/bin/verify" 2>&1 || true)" "[fdd-simulated-human] this simulated-human switch wasn't written by install.sh --simulated-human"
+  cp "$WORK/simh.switch" "$MS"
+  trc  "the switch install.sh wrote is back: verify passes" 0 "$M/.agents/bin/verify"
+  # A switch that appears or changes during an agent turn is flagged by the stop gate, even when
+  # the turn changed nothing else.
+  hook "$M" turn-start claude '{"session_id":"sh1"}' >/dev/null 2>&1
+  (cd "$M" && AGENTS_SIMULATED_HUMAN=agent-chosen-token-5678 python3 .agents/builtin/workflows/feature-driven/fdd_tools.py simulated-human "$M" on >/dev/null 2>&1)
+  out="$(hook "$M" stop-gate claude '{"session_id":"sh1"}' 2>&1)" && rc=0 || rc=$?
+  t    "a switch turned on mid-turn: the stop gate blocks" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \"[fdd-simulated-human] this simulated-human switch was turned on or changed during a Claude Code agent turn, so it's off\"" _ "$out"
+  t    "...and marks the file"        grep -qx 'flagged	turned on or changed during a Claude Code agent turn' "$MS"
+  trc  "...so its token approves nothing" 2 env CLAUDECODE=1 AGENTS_SIMULATED_HUMAN=agent-chosen-token-5678 "$MX" approve design F-1
+  hook "$M" turn-start claude '{"session_id":"sh2"}' >/dev/null 2>&1
+  trc  "a turn that leaves the switch alone isn't gated by it" 0 hook "$M" stop-gate claude '{"session_id":"sh2"}'
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --simulated-human "$M" 2>&1)"
+  t    "re-running install.sh --simulated-human turns it back on, with a new token" bash -c "printf '%s' \"\$1\" | grep -q 'install: simulated human: on' && ! grep -q '^flagged' '$MS'" _ "$out"
+  trc  "...and the approvals count again" 0 "$M/.agents/bin/verify" --tier=full
+  TOK="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
+  cp "$MS" "$WORK/simh.switch2"
+  # The token in an agent session's environment (exported where the agent started) turns it off.
+  AGENTS_SIMULATED_HUMAN="$TOK" hook "$M" turn-start claude '{"session_id":"sh3"}' >/dev/null 2>&1
+  t    "a token in an agent session's environment flags the switch" grep -qx "flagged	exposed: its token was in a Claude Code agent session's environment" "$MS"
+  trc  "...so the token approves nothing" 2 env CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOK" "$MX" approve design F-1
+  t    "...and status says why"       bash -c "'$MX' status | head -1 | grep -q \"^simulated human: off, .git/ai-harness/simulated-human was exposed: its token was in a Claude Code agent session\""
+  hook "$M" stop-gate claude '{"session_id":"sh3"}' >/dev/null 2>&1 || true
+  # A switch made mid-turn is flagged before the next tool call, not only at the stop.
+  cp "$WORK/simh.switch2" "$MS"
+  hook "$M" turn-start claude '{"session_id":"sh4"}' >/dev/null 2>&1
+  (cd "$M" && AGENTS_SIMULATED_HUMAN=agent-chosen-token-9012 python3 .agents/builtin/workflows/feature-driven/fdd_tools.py simulated-human "$M" on >/dev/null 2>&1)
+  hook "$M" pre-tool claude '{"session_id":"sh4","tool_name":"Bash","tool_input":{"command":"ls"}}' >/dev/null 2>&1
+  t    "the next tool call flags a switch made mid-turn" grep -qx 'flagged	turned on or changed during a Claude Code agent turn' "$MS"
+  t    "...so a gate run later in the turn already sees it" has "$("$M/.agents/bin/verify" --tier=full 2>&1 || true)" "[fdd-simulated-human] this simulated-human switch was turned on or changed during a Claude Code agent turn"
+  t    "...flagged once"              test "$(grep -c '^flagged' "$MS")" = 1
+  trc  "...and the stop still blocks on it" 2 hook "$M" stop-gate claude '{"session_id":"sh4"}'
+  # A switch that can't be written to can't be flagged, so it's off.
+  cp "$WORK/simh.switch2" "$MS"; chmod a-w "$MS"
+  if [ "$(id -u)" -eq 0 ]; then ok "a read-only switch is off (skipped as root, which can write it anyway)"; else
+  t    "a read-only switch is off"    has "$("$M/.agents/bin/verify" 2>&1 || true)" "[fdd-simulated-human] this simulated-human switch isn't writable, so the hooks can't flag it"
+  fi
+  out="$("$HARNESS/install.sh" --team --simulated-human "$M" 2>&1)" && rc=0 || rc=$?
+  t    "...and install.sh --simulated-human replaces it" bash -c "test $rc = 0 && test -w '$MS' && printf '%s' \"\$1\" | grep -q 'install: simulated human: on (install.sh --simulated-human, run from a terminal)'" _ "$out"
+  trc  "...so the approvals count again" 0 "$M/.agents/bin/verify" --tier=full
+  trc  "the policy blocks --simulated-human for agents"   2 policy "$M" test "../ai-harness/install.sh --simulated-human ."
+  trc  "...and the fdd_tools.py subcommand"               2 policy "$M" test "python3 .agents/builtin/workflows/feature-driven/fdd_tools.py simulated-human . on"
+  # Adoption from an agent's shell: an install from before the record, upgraded with the switch.
+  A=$(repo simh-adopt); mkdir -p "$A/src"; printf 'int a;\n' > "$A/src/a.cpp"; commit "$A" base
+  "$HARNESS/install.sh" --team --workflow feature-driven "$A" >/dev/null 2>&1; stub "$A"; feats "$A"
+  "$A/.agents/commands/fdd" approve list >/dev/null
+  rm -f "$A/.git/ai-harness/fdd-approvals"
+  out="$(CLAUDECODE=1 AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 "$HARNESS/install.sh" --team "$A" 2>&1)"
+  t    "absence: a token without the switch doesn't adopt from an agent's shell" bash -c "printf '%s' \"\$1\" | grep -q 'the 1 FDD approvals in .agents/fdd/approvals aren.t recorded yet' && test ! -e '$A/.git/ai-harness/simulated-human'" _ "$out"
+  trc  "...so they don't count"       2 "$A/.agents/bin/verify" --tier=full
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --simulated-human "$A" 2>&1)"
+  t    "with --simulated-human, the same agent shell adopts them, as simulated" has "$out" "install: recorded the 1 FDD approvals already in .agents/fdd/approvals as simulated (the simulated human is on): list. Delete any line you didn't approve."
+  t    "...in the record"             grep -q '^#simulated	list	-	[^	]*	' "$A/.git/ai-harness/fdd-approvals"
+  trc  "...so they count"             0 "$A/.agents/bin/verify" --tier=full
+  rm -f "$A/.git/ai-harness/simulated-human"
+  t    "...and count only while the switch is on" has "$("$A/.agents/bin/verify" --tier=full 2>&1 || true)" ".agents/fdd/approvals:1: error: [fdd-approval-simulated]"
+  # Absence: a plain install has no switch, no note, and no switch line.
+  Z=$(repo simh-none); "$HARNESS/install.sh" --team --workflow feature-driven "$Z" >/dev/null 2>&1; stub "$Z"; feats "$Z"
+  tnot "absence: a plain install writes no switch" test -e "$Z/.git/ai-harness/simulated-human"
+  t    "absence: verify says only ok" test "$("$Z/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  t    "absence: verify --json has no notes key" bash -c "'$Z/.agents/bin/verify' --json | python3 -c 'import json,sys; assert \"notes\" not in json.load(sys.stdin)'"
+  t    "absence: status has no switch line" bash -c "'$Z/.agents/commands/fdd' status | head -1 | grep -qx 'list: not approved'"
+  trc  "absence: an agent shell with a token is refused" 2 env CLAUDECODE=1 AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 "$Z/.agents/commands/fdd" approve list
+  tnot "...and writes nothing"        test -e "$Z/.agents/fdd/approvals"
+fi
+}
+group grp_fdd_simhuman
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

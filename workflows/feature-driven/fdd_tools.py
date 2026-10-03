@@ -5,7 +5,9 @@ Classic Feature-Driven Development with local artifacts that are never committed
 FDD_DIR: model.md, features.md, designs/<ID>.md, and approvals (written only by `fdd approve`).
 `fdd approve` also records each line it writes in the git dir (ai-harness/fdd-approvals); a line in
 approvals without that record doesn't count and is a finding. It refuses in a shell an agent tool
-started (CLAUDECODE, GEMINI_CLI, CURSOR_AGENT). Settings come from .agents/harness.conf
+started (CLAUDECODE, GEMINI_CLI, CURSOR_AGENT), unless install.sh --simulated-human turned on the
+simulated human for this clone and the shell has its token (AGENTS_SIMULATED_HUMAN); approvals made
+then are marked simulated and count only while it's on. Settings come from .agents/harness.conf
 (environment variables override):
 
   FDD_DIR           where the artifacts live, repo-relative or absolute (default .agents/fdd)
@@ -22,6 +24,8 @@ started (CLAUDECODE, GEMINI_CLI, CURSOR_AGENT). Settings come from .agents/harne
   fdd_tools.py status <root> [ID]                         approvals and milestones, no dates
   fdd_tools.py adopt <root>                               install.sh: record the approvals already in
                                                           FDD_DIR while the git dir has none for it
+  fdd_tools.py simulated-human <root> [on]                install.sh: say whether the simulated human
+                                                          is on; 'on' (--simulated-human) turns it on
 Exit: 0 clean, 1 findings, 2 usage or an approval fdd approve didn't record, 3 tooling problem (e.g.
 a pattern that isn't a valid regex).
 """
@@ -334,30 +338,103 @@ def recorded(root):
     return None if path is None else set(read_lines(path))
 
 
-def read_approvals(root, d):
-    """({(kind, id): value}, [(line no, kind, id)]): the latest recorded line for each wins; lines
-    fdd approve didn't record (written by hand or by an agent) don't count and come back second."""
+# The simulated human: for flows where an agent plays the person (a scratch repo, a pilot, a demo).
+# install.sh --simulated-human writes SWITCH next to the record, holding a hash of a token, and
+# records that hash. While it's on, a shell that has the token (AGENTS_SIMULATED_HUMAN) may approve
+# even if an agent tool started it, and every approval made or adopted is marked simulated: the who
+# field ends in SIMULATED, or the record holds "#simulated<TAB><line>". A simulated approval counts
+# only while the switch is on. A switch whose hash isn't recorded, that the hooks flagged (it
+# appeared during an agent turn, or its token was in an agent's environment), or that can't be
+# written to (so it can't be flagged) is off and is a finding.
+SWITCH = "simulated-human"
+SIMULATED = " (simulated human)"
+SIM_REC = "#simulated\t"
+SWITCH_REC = "#simulated-human\t"
+TOKEN_VAR = "AGENTS_SIMULATED_HUMAN"
+
+
+class Switch:
+    """The simulated-human switch: state 'off' (no file), 'on', or 'void' (a file that doesn't
+    count, why says so)."""
+
+    def __init__(self, root):
+        self.state, self.how, self.why, self.hash = "off", "", "", ""
+        rec_path = record_file(root)
+        self.path = os.path.join(os.path.dirname(rec_path), SWITCH) if rec_path else None
+        if not self.path or not os.path.isfile(self.path):
+            return
+        lines = read_lines(self.path)
+        ons = [l.split("\t") for l in lines if l.startswith("on\t")]
+        flags = [l.split("\t", 1)[1] for l in lines if l.startswith("flagged\t")]
+        if len(ons) != 1 or len(ons[0]) != 3 or SWITCH_REC + ons[0][1] not in recorded(root):
+            self.state, self.why = "void", "wasn't written by install.sh --simulated-human"
+        elif flags:
+            self.state, self.why = "void", "was " + flags[0]
+        elif not os.access(self.path, os.W_OK):   # the stop gate couldn't flag it
+            self.state, self.why = "void", "isn't writable, so the hooks can't flag it"
+        else:
+            self.state, self.hash, self.how = "on", ons[0][1], ons[0][2]
+
+    def token_ok(self):
+        tok = os.environ.get(TOKEN_VAR, "")
+        return self.state == "on" and bool(tok) and token_hash(tok) == self.hash
+
+
+def token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def is_simulated(line, rec):
+    return line.split("\t")[2].endswith(SIMULATED) or (rec is not None and SIM_REC + line in rec)
+
+
+def read_approvals(root, d, switch=None):
+    """({(kind, id): value}, [(line no, kind, id)], [(line no, kind, id)]): the latest recorded
+    line for each wins. Lines fdd approve didn't record (written by hand or by an agent) don't
+    count and come back second; simulated ones don't count while the switch is off and come back
+    third."""
     rec = recorded(root)
-    out, unrecorded = {}, []
+    on = (switch or Switch(root)).state == "on"
+    out, unrecorded, simulated = {}, [], []
     for n, line in enumerate(read_lines(os.path.join(d, "approvals")), 1):
         parts = line.split("\t")
         if len(parts) != 5:
             continue
-        if rec is not None and line not in rec:
+        if rec is not None and line not in rec and SIM_REC + line not in rec:
             unrecorded.append((n, parts[0], parts[1]))
             continue
+        if not on and is_simulated(line, rec):
+            simulated.append((n, parts[0], parts[1]))
+            continue
         out[(parts[0], parts[1])] = parts[4]
-    return out, unrecorded
+    return out, unrecorded, simulated
 
 
-def unrecorded_findings(root, d, unrecorded):
+def what(kind, fid):
+    return kind if fid == "-" else "%s %s" % (kind, fid)
+
+
+def unrecorded_findings(root, d, unrecorded, simulated=()):
     path = shown(root, os.path.join(d, "approvals"))
     return [finding(path, n, "fdd-approval-unrecorded",
-                    "this %s approval wasn't written by fdd approve, so it doesn't count"
-                    % (kind if fid == "-" else "%s %s" % (kind, fid)),
+                    "this %s approval wasn't written by fdd approve, so it doesn't count" % what(kind, fid),
                     "only the human approves: ask them to run %s %s, and delete this line if they didn't write it"
-                    % (approve_cmd(root), kind if fid == "-" else "%s %s" % (kind, fid)))
-            for n, kind, fid in unrecorded]
+                    % (approve_cmd(root), what(kind, fid)))
+            for n, kind, fid in unrecorded] + \
+           [finding(path, n, "fdd-approval-simulated",
+                    "this %s approval was made by a simulated human (install.sh --simulated-human), and that "
+                    "switch is off in this clone, so it doesn't count" % what(kind, fid),
+                    "only the human approves: ask them to run %s %s" % (approve_cmd(root), what(kind, fid)))
+            for n, kind, fid in simulated]
+
+
+def switch_findings(root, switch):
+    if switch.state != "void":
+        return []
+    return [finding(shown(root, switch.path), 1, "fdd-simulated-human",
+                    "this simulated-human switch %s, so it's off" % switch.why,
+                    "only a person turns it on, with install.sh --simulated-human between agent turns; "
+                    "ask them, and delete this file if they didn't")]
 
 
 def sha(*paths):
@@ -455,12 +532,18 @@ def cmd_check(tier, root, files):
     conf = load_conf(root)
     d = fdd_dir(root, conf)
     fpath = os.path.join(d, "features.md")
-    approvals, unrecorded = read_approvals(root, d)
+    switch = Switch(root)
+    approvals, unrecorded, simulated = read_approvals(root, d, switch)
     ask = conf["FDD_ASK"].split()
     edited = {os.path.normpath(os.path.join(root, f)) for f in files}
     # Forged approvals first, on every tier that looks: the edit tier when approvals itself was edited.
-    blocked = unrecorded_findings(root, d, unrecorded) \
+    blocked = unrecorded_findings(root, d, unrecorded, simulated) \
         if tier != "edit" or os.path.join(d, "approvals") in edited else []
+    if tier != "edit":
+        blocked = switch_findings(root, switch) + blocked
+        if switch.state == "on":   # verify shows a pack's note lines even when it passes
+            print("note: simulated human is on in this clone (%s): a shell with its token can approve FDD "
+                  "gates, and each approval made here is marked simulated" % switch.how)
     out = []
     if not os.path.isfile(fpath):
         if tier != "edit" and ("list", "-") in approvals:
@@ -594,10 +677,23 @@ def cmd_msg(root, path):
     return emit(out)
 
 
+def switch_line(root, switch):
+    """How fdd status and install.sh describe the switch; '' when there's none."""
+    if switch.state == "on":
+        return ("simulated human: on (%s); approvals made here are marked simulated, and count only while "
+                "it's on" % switch.how)
+    if switch.state == "void":
+        return "simulated human: off, %s %s" % (shown(root, switch.path), switch.why)
+    return ""
+
+
 def cmd_status(root, only):
     conf = load_conf(root)
     d = fdd_dir(root, conf)
     fpath = os.path.join(d, "features.md")
+    switch = Switch(root)
+    if switch_line(root, switch):
+        print(switch_line(root, switch))
     if not os.path.isfile(fpath):
         print("list: none yet (%s)" % shown(root, fpath))
         return 0
@@ -605,14 +701,16 @@ def cmd_status(root, only):
     if only and only not in feats:
         print("fdd: %s is not in %s" % (only, shown(root, fpath)), file=sys.stderr)
         return 1
-    approvals, unrecorded = read_approvals(root, d)
+    approvals, unrecorded, simulated = read_approvals(root, d, switch)
     print("list: %s" % list_state(d, approvals))
     for line in progress_lines(d, conf, feats, approvals, ledger(root, conf), only):
         print(line)
-    if unrecorded:
-        print("not counted, not written by fdd approve: %s" % ", ".join(
-            "%s:%d %s" % (shown(root, os.path.join(d, "approvals")), n, kind if fid == "-" else kind + " " + fid)
-            for n, kind, fid in unrecorded))
+    for label, rows in (("not written by fdd approve", unrecorded),
+                        ("made by a simulated human while the switch is off", simulated)):
+        if rows:
+            print("not counted, %s: %s" % (label, ", ".join(
+                "%s:%d %s" % (shown(root, os.path.join(d, "approvals")), n, what(kind, fid))
+                for n, kind, fid in rows)))
     return 0
 
 
@@ -622,9 +720,16 @@ def cmd_approve(root, args):
         print("usage: fdd approve list | design <ID> | inspect <ID>", file=sys.stderr)
         return 2
     shell = agent_shell()
-    if shell:
+    switch = Switch(root)
+    if shell and not switch.token_ok():
         print("fdd: approving is the human's step, and this shell was started by %s (%s is set). "
               "Run it in your own terminal." % (shell[1], shell[0]), file=sys.stderr)
+        if os.environ.get(TOKEN_VAR):   # only someone who set it hears why it didn't help
+            print("fdd: %s doesn't help: %s" % (TOKEN_VAR, {
+                "on": "it doesn't match this clone's simulated-human token",
+                "off": "this clone has no simulated human (install.sh --simulated-human)",
+                "void": "this clone's simulated-human switch %s, so it's off" % switch.why}[switch.state]),
+                file=sys.stderr)
         return 2
     conf = load_conf(root)
     d = fdd_dir(root, conf)
@@ -656,12 +761,15 @@ def cmd_approve(root, args):
             return 1
     who = (git(root, "config", "user.name").strip() or os.environ.get("USER", "unknown"))
     who = who.replace("\t", " ").replace("\n", " ")
+    sim = switch.state == "on"
+    if sim:
+        who += SIMULATED   # in the line itself, so a copy of approvals carries it anywhere
     line = "\t".join((kind, fid, who, datetime.date.today().isoformat(), value))
-    earlier = adopt(root, d)  # an upgrade's approvals, if install.sh couldn't take them in
+    earlier = adopt(root, d, sim)  # an upgrade's approvals, if install.sh couldn't take them in
     record(root, [line])   # first, so a line in approvals is never left without its record
     with open(os.path.join(d, "approvals"), "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
-    print("approved %s" % (kind if fid == "-" else "%s %s" % (kind, fid)))
+    print("approved %s%s" % (what(kind, fid), SIMULATED if sim else ""))
     if earlier:
         print("also " + earlier)
     return 0
@@ -681,30 +789,32 @@ def record(root, lines):
 ADOPTED = "#adopted"   # in the record: this clone has taken in its earlier approvals, once
 
 
-def adopt(root, d):
+def adopt(root, d, simulated=False):
     """The first time a person runs fdd approve or install.sh in this clone: approvals written
     before fdd kept a record (an upgrade), or copied in with the directory, are recorded as they
-    are. Never again after that, so a line written later can't be adopted.
-    Returns a sentence listing them for the human, or ''."""
+    are, or as simulated while the simulated human is on. Never again after that, so a line
+    written later can't be adopted. Returns a sentence listing them for the human, or ''."""
     path = record_file(root)
     if path is None:
         return ""
     rec = recorded(root)
     if ADOPTED in rec:
         return ""
-    lines = [l for l in read_lines(os.path.join(d, "approvals")) if len(l.split("\t")) == 5 and l not in rec]
-    record(root, [ADOPTED] + lines)
+    lines = [l for l in read_lines(os.path.join(d, "approvals"))
+             if len(l.split("\t")) == 5 and l not in rec and SIM_REC + l not in rec]
+    record(root, [ADOPTED] + [SIM_REC + l if simulated else l for l in lines])
     if not lines:
         return ""
-    return ("recorded the %d FDD approvals already in %s as yours: %s. Delete any line you didn't approve."
+    return ("recorded the %d FDD approvals already in %s as %s: %s. Delete any line you didn't approve."
             % (len(lines), shown(root, os.path.join(d, "approvals")),
-               ", ".join(l.split("\t")[0] + ("" if l.split("\t")[1] == "-" else " " + l.split("\t")[1]) for l in lines)))
+               "simulated (the simulated human is on)" if simulated else "yours",
+               ", ".join(what(*l.split("\t")[:2]) for l in lines)))
 
 
 def cmd_adopt(root):
-    """install.sh: adopt() earlier approvals, never in an agent's shell. With no approvals file yet
-    there's nothing to adopt, so the clone is marked adopted: a line an agent writes before your
-    first fdd approve can't ride along with it."""
+    """install.sh: adopt() earlier approvals, never in an agent's shell unless it has the
+    simulated human's token. With no approvals file yet there's nothing to adopt, so the clone is
+    marked adopted: a line an agent writes before your first fdd approve can't ride along with it."""
     conf = load_conf(root)
     d = fdd_dir(root, conf)
     if not os.path.isfile(os.path.join(d, "approvals")):
@@ -713,17 +823,52 @@ def cmd_adopt(root):
             record(root, [ADOPTED])
         return 0
     shell = agent_shell()
-    if shell:
+    switch = Switch(root)
+    if shell and not switch.token_ok():
         path = record_file(root)
-        n = len(read_approvals(root, d)[1])
+        n = len(read_approvals(root, d, switch)[1])
         if path is not None and ADOPTED not in read_lines(path) and n:
             print("the %d FDD approvals in %s aren't recorded yet, so they don't count, and this shell was started "
                   "by %s; run install.sh again from your own terminal to keep them"
                   % (n, shown(root, os.path.join(d, "approvals")), shell[1]))
         return 0
-    msg = adopt(root, d)
+    msg = adopt(root, d, switch.state == "on")
     if msg:
         print(msg)
+    return 0
+
+
+def cmd_simulated_human(root, turn_on):
+    """install.sh: with 'on' (install.sh --simulated-human), turn the simulated human on for this
+    clone with the token in AGENTS_SIMULATED_HUMAN, replacing any earlier switch. Either way, say
+    when a switch is there, for the install summary."""
+    if turn_on:
+        token = os.environ.get(TOKEN_VAR, "")
+        path = record_file(root)
+        if path is None or len(token) < 16:
+            print("error: --simulated-human needs a git repo and a token of 16 or more characters", file=sys.stderr)
+            return 2
+        shell = agent_shell()
+        h = token_hash(token)
+        record(root, [SWITCH_REC + h])   # first, so the switch is never left without its record
+        sw = os.path.join(os.path.dirname(path), SWITCH)
+        if os.path.lexists(sw):   # a fresh file: not through a link, and writable again
+            os.remove(sw)
+        with open(sw, "w", encoding="utf-8") as fh:
+            fh.write("# ai-harness simulated human, for flows where an agent plays the person. Written by "
+                     "install.sh --simulated-human;\n# delete this file to turn it off. Edited or written any "
+                     "other way, it's off and verify reports it.\n")
+            fh.write("on\t%s\tinstall.sh --simulated-human, run from %s\n"
+                     % (h, "a %s shell" % shell[1] if shell else "a terminal"))
+    switch = Switch(root)
+    if switch_line(root, switch):
+        print(switch_line(root, switch))
+    if turn_on and switch.state != "on":
+        return 3
+    if turn_on:
+        print("simulated human: to approve from an agent's shell, set %s=%s on that one command; never "
+              "export it where an agent starts, or the hooks turn the switch off. Never use this in a "
+              "real project." % (TOKEN_VAR, os.environ[TOKEN_VAR]))
     return 0
 
 
@@ -750,6 +895,8 @@ def dispatch(a):
         return cmd_status(os.path.abspath(a[1]), a[2] if len(a) == 3 else None)
     if len(a) == 2 and a[0] == "adopt":
         return cmd_adopt(os.path.abspath(a[1]))
+    if len(a) in (2, 3) and a[0] == "simulated-human" and a[2:] in ([], ["on"]):
+        return cmd_simulated_human(os.path.abspath(a[1]), a[2:] == ["on"])
     print(__doc__.strip(), file=sys.stderr)
     return 2
 
