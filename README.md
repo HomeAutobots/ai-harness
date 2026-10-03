@@ -242,7 +242,9 @@ Pack scripts run from wherever the pack lives. Find the pack's own files from th
 
 `install.sh --stack <name>` adds the stack to `STACKS` and seeds the tier scripts if they're still stubs. Tailored tier scripts are never replaced. The pack runs from its library (shipped ones from `.agents/builtin/stacks/<name>`); `.agents/stacks/<name>/lib.sh` is a small harness-owned shim that tier scripts source, which loads the pack from wherever it resolves.
 
-- **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only, affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. When CTest has no tests registered, the test steps print `no tests ran` and exit 3 (`INFRA verify turn`), never a quiet `ok`; set `CPP_NO_TESTS=ok` for a project with no tests, or one whose tier scripts run its test binaries themselves. See `stacks/cpp-cmake/README.md`.
+A stack's settings go in `.agents/harness.conf` (every tier) or in a tier script (that tier). A value the tier script sets wins over `harness.conf`, which wins over the stack's default. A stack's `lib.sh` picks its keys up with `agents_conf_import <PREFIX>` (from `.agents/lib/feedback.sh`), since `verify` reads `harness.conf` without passing it on.
+
+- **cpp-cmake**: agent-owned build trees, syntax-only compiles with each file's real compile command, new warnings in changed files, clang-tidy on changed lines only, affected-test selection through the CMake file API, an ASan+UBSan tier, and cppcheck with baselines. When CTest has no tests registered, the test steps print `no tests ran` and exit 3 (`INFRA verify turn`), never a quiet `ok`; set `CPP_NO_TESTS=ok` for a project with no tests, or one whose tier scripts run its test binaries themselves. Settings are `CPP_*` (`CPP_BUILD_DIR`, `CPP_JOBS`, `CPP_TEST_TIMEOUT`, and so on). See `stacks/cpp-cmake/README.md`.
 
 ## Workflow packs
 

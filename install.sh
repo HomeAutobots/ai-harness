@@ -195,6 +195,18 @@ build_builtin() {
   find "$b" -name __pycache__ -type d -prune -exec rm -rf {} +   # from a dev checkout
   find "$b" -type f \( -name '*.sh' -o -path '*/bin/*' \) -exec chmod +x {} +
 }
+# One-time note: cpp-cmake used to ignore its CPP_* settings in harness.conf (all but CPP_NO_TESTS,
+# and export lines, which verify passed on), and now applies them. Said while the installed copy
+# is one from before that, so only once; only when cpp-cmake is in STACKS.
+for f in "$DEST/.agents/builtin/stacks/cpp-cmake/lib.sh" "$DEST/.agents/stacks/cpp-cmake/lib.sh"; do
+  if [ ! -f "$f" ] || grep -qF 'ai-harness: stack shim' "$f"; then continue; fi
+  if grep -qF 'agents_conf_import CPP_' "$f"; then break; fi
+  case " $(agents_conf_get "$DEST/.agents/harness.conf" STACKS) " in *" cpp-cmake "*) ;; *) break ;; esac
+  keys="$(sed -n 's/^[[:space:]]*\(CPP_[A-Za-z0-9_]*\)=.*/\1/p' "$DEST/.agents/harness.conf" 2>/dev/null \
+    | grep -vx CPP_NO_TESTS | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//' || true)"
+  [ -n "$keys" ] && say "note: .agents/harness.conf sets $keys, which the cpp-cmake stack used to ignore there; they apply now (a value the tier scripts set still wins). Review those lines."
+  break
+done
 build_builtin
 
 seed AGENTS.md

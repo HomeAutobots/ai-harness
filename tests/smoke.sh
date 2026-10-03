@@ -1076,6 +1076,73 @@ t    "...and verify is ok"             bash -c "cd '$CN' && PATH='$WORK/cppstub'
 edit "$CN/.agents/harness.conf" '/^CPP_NO_TESTS=/d'
 trc  "CPP_NO_TESTS=ok in the tier script works too" 0 cppfn CPP_NO_TESTS=ok cpp_sanitize
 trc  "any other value still reports" 3 cppfn CPP_NO_TESTS=yes cpp_test_all
+echo "cpp-cmake: CPP_* settings in harness.conf"
+CL="$WORK/ctest-conf.log"; CE="$(git -C "$CN" rev-parse --git-path info/exclude)"; case "$CE" in /*) ;; *) CE="$CN/$CE" ;; esac
+cp "$CE" "$WORK/cpp-exclude.before"
+rm -f "$CL"; trc "no CPP_* lines: tests run" 0 cppfn STUB_TESTS=2 STUB_LOG="$CL" cpp_test_all
+t    "...with the default timeout"     grep -qF -- '--timeout 120 ' "$CL"
+out="$(cd "$CN" && PATH="$WORK/cppstub:$PATH" .agents/bin/verify --no-cache 2>&1 || true)"
+t    "...and verify uses build-agent"  bash -c "printf '%s' \"\$1\" | grep -q 'none registered in build-agent\.'" _ "$out"
+t    "...with no new exclude lines"    cmp -s "$CE" "$WORK/cpp-exclude.before"
+cp "$CN/.agents/harness.conf" "$WORK/cpp-conf.before"
+printf 'CPP_TEST_TIMEOUT="77"\n' >> "$CN/.agents/harness.conf"
+rm -f "$CL"; trc "CPP_TEST_TIMEOUT in harness.conf: tests run" 0 cppfn STUB_TESTS=2 STUB_LOG="$CL" cpp_test_all
+t    "...with its timeout"             grep -qF -- '--timeout 77 ' "$CL"
+rm -f "$CL"; trc "an environment value run directly" 0 cppfn STUB_TESTS=2 STUB_LOG="$CL" CPP_TEST_TIMEOUT=55 cpp_test_all
+t    "...beats harness.conf"           grep -qF -- '--timeout 55 ' "$CL"
+printf 'CPP_TEST_TIMEOUT=44\n. .agents/stacks/cpp-cmake/lib.sh\ncpp_test_all\n' > "$WORK/cpp-before.sh"
+rm -f "$CL"; trc "set in the script before sourcing lib.sh" 0 cppfn STUB_TESTS=2 STUB_LOG="$CL" bash "$WORK/cpp-before.sh"
+t    "...beats harness.conf"           grep -qF -- '--timeout 44 ' "$CL"
+printf 'int g();\n' > "$CN/x.h"   # a changed header: the turn tier runs every test
+cp "$CN/.agents/checks/turn.sh" "$WORK/cpp-turn.before"
+edit "$CN/.agents/checks/turn.sh" 's|^\(\. .*cpp-cmake/lib\.sh"\)$|\1\
+CPP_TEST_TIMEOUT=33|'
+rm -f "$CL"; trc "verify: tests run"  0 bash -c "cd '$CN' && PATH='$WORK/cppstub':\$PATH STUB_TESTS=2 STUB_LOG='$CL' .agents/bin/verify --no-cache"
+t    "...and the tier script's value beats harness.conf" bash -c "grep -qF -- '--timeout 33 ' '$CL' && ! grep -qF -- '--timeout 77 ' '$CL'"
+cp "$WORK/cpp-turn.before" "$CN/.agents/checks/turn.sh"
+rm -f "$CL"; trc "verify without it: tests run"  0 bash -c "cd '$CN' && PATH='$WORK/cppstub':\$PATH STUB_TESTS=2 STUB_LOG='$CL' .agents/bin/verify --no-cache"
+t    "...with harness.conf's value"    grep -qF -- '--timeout 77 ' "$CL"
+printf 'CPP_BUILD_DIR="out/agent"   # where the agent builds\n' >> "$CN/.agents/harness.conf"
+out="$(cd "$CN" && PATH="$WORK/cppstub:$PATH" .agents/bin/verify --no-cache 2>&1 || true)"
+t    "CPP_BUILD_DIR in harness.conf: verify builds there" bash -c "printf '%s' \"\$1\" | grep -q 'none registered in out/agent\.'" _ "$out"
+t    "...and keeps it out of git status" grep -qxF '/out/agent/' "$CE"
+t    "...as git sees it"               bash -c "mkdir -p '$CN/out/agent' && : > '$CN/out/agent/x.o' && test -z \"\$(git -C '$CN' status --porcelain -- out)\""
+t    "...the default lines stay"       grep -qxF '/build-agent*/' "$CE"
+printf '. .agents/stacks/cpp-cmake/lib.sh\n_cpp_exclude "$(printf '"'"'x\\n/src'"'"')"\n' > "$WORK/cpp-nl.sh"
+cp "$CE" "$WORK/cpp-exclude.nl"
+t    "a build dir holding a newline adds no exclude line" bash -c "cd '$CN' && AGENTS_ROOT='$CN' bash '$WORK/cpp-nl.sh' && cmp -s '$CE' '$WORK/cpp-exclude.nl'"
+printf 'CPP_CMAKE_ARGS="-DA=1 -DB='"'x y'"' -DC=$HOME"\nexport CPP_JOBS=3\nCPP_SAN_DIR=""\nOTHER_SETTING=1\nCPP_BUILD_TYPE=Release CPP_TIDY_ARGS="--quiet"\nif true; then CPP_SANITIZERS=address; fi\n' >> "$CN/.agents/harness.conf"
+printf '. .agents/lib/feedback.sh\nagents_conf_import CPP_\nprintf "%%s|" "$CPP_CMAKE_ARGS" "$CPP_JOBS" "${CPP_SAN_DIR-unset}" "${OTHER_SETTING-unset}" "${HOOKS-unset}" "$CPP_BUILD_TYPE" "$CPP_TIDY_ARGS" "$CPP_SANITIZERS"\n' > "$WORK/cpp-import.sh"
+t    "values arrive as the shell reads them; other keys stay out" bash -c "test \"\$(cd '$CN' && AGENTS_ROOT='$CN' bash '$WORK/cpp-import.sh')\" = \"-DA=1 -DB='x y' -DC=\$HOME|3||unset|unset|Release|--quiet|address|\""
+printf 'set -euo pipefail\nIFS=$'"'"'\\n\\t'"'"'\n. .agents/stacks/cpp-cmake/lib.sh\nprintf "%%s|" "$CPP_TEST_TIMEOUT" "$CPP_BUILD_DIR" "$CPP_TIDY_ARGS"\n' > "$WORK/cpp-strict.sh"
+t    "a tier script in strict mode with its own IFS gets them too" bash -c "test \"\$(cd '$CN' && AGENTS_ROOT='$CN' bash '$WORK/cpp-strict.sh')\" = '77|out/agent|--quiet|'"
+out="$(cd "$CN" && AGENTS_ROOT="$CN" bash -c '. .agents/lib/feedback.sh; agents_conf_import CPP-' 2>&1; echo "rc=$?")"
+t    "a bad prefix is a tooling problem, said" bash -c "printf '%s' \"\$1\" | grep -qF \"infra: agents_conf_import: bad prefix 'CPP-'\" && printf '%s' \"\$1\" | grep -qx 'rc=3'" _ "$out"
+# A newer pack from a library on an install whose feedback.sh predates the import: CPP_NO_TESTS still reads harness.conf.
+cp "$CN/.agents/lib/feedback.sh" "$WORK/cpp-feedback.before"
+edit "$CN/.agents/lib/feedback.sh" '/^agents_conf_import() {/,/^}/d'
+printf 'CPP_NO_TESTS="ok"\n' >> "$CN/.agents/harness.conf"
+trc  "older feedback.sh: CPP_NO_TESTS from harness.conf still works" 0 cppfn CPP_BUILD_DIR=build-agent cpp_test_all
+cp "$WORK/cpp-feedback.before" "$CN/.agents/lib/feedback.sh"
+cp "$WORK/cpp-conf.before" "$CN/.agents/harness.conf"; rm -rf "$CN/x.h" "$CN/out"
+# Upgrade: a cpp-cmake from before this change ignored these lines, so install says once that they apply.
+CU=$(repo cppconf-up)
+"$HARNESS/install.sh" --stack cpp-cmake "$CU" >/dev/null 2>&1
+edit "$CU/.agents/builtin/stacks/cpp-cmake/lib.sh" '/agents_conf_import CPP_/d'
+printf 'CPP_NO_TESTS="ok"\n' >> "$CU/.agents/harness.conf"
+out="$("$HARNESS/install.sh" "$CU" 2>&1)"
+tnot "upgrade with only CPP_NO_TESTS: no note" bash -c "printf '%s' \"\$1\" | grep -q 'cpp-cmake stack used to ignore'" _ "$out"
+edit "$CU/.agents/builtin/stacks/cpp-cmake/lib.sh" '/agents_conf_import CPP_/d'
+printf 'CPP_JOBS="4"\nexport CPP_BUILD_DIR=out\n' >> "$CU/.agents/harness.conf"
+out="$("$HARNESS/install.sh" "$CU" 2>&1)"
+t    "upgrade with CPP_* lines: names them" bash -c "printf '%s' \"\$1\" | grep -qF 'install: note: .agents/harness.conf sets CPP_JOBS, which the cpp-cmake stack used to ignore there'" _ "$out"
+tnot "...but not export lines, which verify passed on" bash -c "printf '%s' \"\$1\" | grep -q 'sets.*CPP_BUILD_DIR'" _ "$out"
+out="$("$HARNESS/install.sh" "$CU" 2>&1)"
+tnot "...once"                         bash -c "printf '%s' \"\$1\" | grep -q 'cpp-cmake stack used to ignore'" _ "$out"
+edit "$CU/.agents/builtin/stacks/cpp-cmake/lib.sh" '/agents_conf_import CPP_/d'
+edit "$CU/.agents/harness.conf" 's/^STACKS=.*/STACKS=""/'
+out="$("$HARNESS/install.sh" "$CU" 2>&1)"
+tnot "...and not without cpp-cmake in STACKS" bash -c "printf '%s' \"\$1\" | grep -q 'cpp-cmake stack used to ignore'" _ "$out"
 if [ "$HAVE_PY" -eq 1 ] && command -v cmake >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
   # The pilot's case for real: a failing test binary CTest doesn't know about.
   CR=$(repo cppnone-real)

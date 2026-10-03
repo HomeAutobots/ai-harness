@@ -15,8 +15,9 @@ gains is strongest (sanitizer-guided C/C++ repair especially), and findings limi
 the agent changed keep it from wandering into pre-existing debt.
 
 ## How it works
-- **Own build trees.** `build-agent/` and `build-agent-asan/` (Ninja and ccache when present,
-  compile database exported). Your own build directories are never touched. Both are added to
+- **Own build trees.** `build-agent/` and `build-agent-asan/` by default (`CPP_BUILD_DIR`,
+  `CPP_SAN_DIR`; Ninja and ccache when present, compile database exported). Your own build
+  directories are never touched, as long as these don't name one. Both are added to
   `.git/info/exclude` (under the install's subdirectory when the harness lives in one), and
   `compile_commands.json` is symlinked at the install root for clangd.
 - **Changed lines only.** clang-tidy gets a `--line-filter` built from `git diff -U0`, so
@@ -50,11 +51,32 @@ the agent changed keep it from wandering into pre-existing debt.
   bug-finding checks, no style checks.
 
 ## Settings
-Set in the check scripts: `CPP_BUILD_DIR`, `CPP_SAN_DIR`, `CPP_BUILD_TYPE`, `CPP_CMAKE_ARGS`,
-`CPP_JOBS`, `CPP_TIDY_CONFIG`, `CPP_TIDY_ARGS`, `CPP_SANITIZERS`, `CPP_TEST_TIMEOUT`,
-`CPP_CPPCHECK_ARGS`, `CPP_NO_TESTS`. See the top of `lib.sh`. `verify` reads
-`.agents/harness.conf` but doesn't pass its settings on to the check scripts, so of these only
-`CPP_NO_TESTS` also works there (unset means "no tests ran" is reported; `ok` turns that off).
+`CPP_BUILD_DIR`, `CPP_SAN_DIR`, `CPP_BUILD_TYPE`, `CPP_CMAKE_ARGS`, `CPP_JOBS`,
+`CPP_TIDY_CONFIG`, `CPP_TIDY_ARGS`, `CPP_SANITIZERS`, `CPP_TEST_TIMEOUT`, `CPP_CPPCHECK_ARGS`,
+`CPP_NO_TESTS`. See the top of `lib.sh` for defaults. Set them in `.agents/harness.conf` or in
+the check scripts:
+
+```sh
+# .agents/harness.conf: every tier
+CPP_JOBS="8"
+CPP_TEST_TIMEOUT="300"
+
+# .agents/checks/full.sh: this tier only, after sourcing lib.sh
+CPP_TEST_TIMEOUT=900
+```
+
+Which one wins:
+1. A value the check script sets, before or after it sources `lib.sh`.
+2. `.agents/harness.conf`. `lib.sh` reads it when sourced, the same way `verify` does.
+3. The default in `lib.sh`.
+
+A variable in your shell's environment counts as set by the check script when you run that
+script directly. Under `verify` it doesn't beat `harness.conf`, since `verify` loads the file
+over it first, as it does for every `harness.conf` setting.
+
+`CPP_NO_TESTS` unset means "no tests ran" is reported; `ok` turns that off. A `CPP_BUILD_DIR` or
+`CPP_SAN_DIR` outside `build-agent*` gets its own line in `.git/info/exclude` the first time it's
+configured.
 
 ## Notes
 - **Cross compiling** (embedded targets): the syntax check uses each file's real compile
