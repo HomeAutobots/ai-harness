@@ -39,6 +39,10 @@ EDIT_TOOLS = {
 SHELL_TOOLS = {"bash", "shell", "run_shell_command", "powershell", "terminal", "run_in_terminal"}
 READ_TOOLS = {"read", "view", "read_file", "grep", "glob", "search"}
 QUESTION_TOOLS = {"askuserquestion", "ask_user", "askuser"}
+# Tools a hook may see that need no rule here: Copilot CLI's other built-ins (its hooks reference,
+# "Tool names for hook matching"). Copilot hooks have no matcher, so they see every tool call.
+OTHER_TOOLS = {"web_fetch", "web_search", "update_todo", "task"}
+KNOWN_TOOLS = EDIT_TOOLS | SHELL_TOOLS | READ_TOOLS | QUESTION_TOOLS | OTHER_TOOLS
 
 
 # ---------------------------------------------------------------- config
@@ -91,7 +95,32 @@ def log_event(tool, event, decision, detail=""):
         os.makedirs(CACHE, exist_ok=True)
         with open(os.path.join(CACHE, "hook-events.log"), "a", encoding="utf-8") as fh:
             fh.write("%d\t%s\t%s\t%s\t%s\n" % (time.time(), tool, event, decision, detail[:200].replace("\n", " ")))
+        return True
     except OSError:
+        return False
+
+
+def note_unknown(tool, event, data):
+    """A tool name none of the tables above knows goes to hook-events.log as unknown-tool, once per
+    session and event (and again once the log is deleted), so an edit or shell tool the hooks miss
+    shows up. The name only, never the tool's input, cut to 64 safe characters. MCP tools
+    (mcp__x__y, mcp_x_y) aren't unknown. Never changes what the hook decides."""
+    try:
+        name = tool_name(data)
+        if name.lower() in KNOWN_TOOLS or name.lower().startswith("mcp_"):
+            return
+        safe = re.sub(r"[^A-Za-z0-9_.:@/+-]", "?", name[:64]) + ("..." if len(name) > 64 else "")
+        key = "%s\t%s\t%s" % (tool, event, safe or "(none)")
+        seen = os.path.join(CACHE, "tools-" + session_key(data))
+        log = os.path.join(CACHE, "hook-events.log")
+        lines = read_file(seen).split("\n")   # the log's inode, then the keys logged into it
+        same = os.path.exists(log) and lines[0] == str(os.stat(log).st_ino)
+        if same and key in lines[1:]:
+            return
+        if log_event(tool, event, "unknown-tool", safe or "(none)"):
+            with open(seen, "a" if same else "w", encoding="utf-8") as fh:
+                fh.write(key + "\n" if same else "%d\n%s\n" % (os.stat(log).st_ino, key))
+    except Exception:  # logging only: never wedge the hook
         pass
 
 
@@ -422,6 +451,7 @@ def pre_tool(tool, data, conf):
         elif ev == "beforeReadFile":
             kind, value = "read", data.get("file_path", "")
     else:
+        note_unknown(tool, "pre-tool", data)
         name = tool_name(data).lower()
         args = tool_args(data)
         if name in SHELL_TOOLS:
@@ -521,6 +551,8 @@ def post_edit(tool, data, conf):
         return question_post(tool, data) if "questions" in feats else 0
     if "edit" not in feats:
         return 0
+    if tool != "cursor":   # cursor's afterFileEdit names no tool
+        note_unknown(tool, "post-edit", data)
     files = edited_files(tool, data)
     if not files:
         return 0

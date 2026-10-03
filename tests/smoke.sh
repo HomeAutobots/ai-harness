@@ -3954,6 +3954,97 @@ fi
 }
 group grp_codexgemini
 
+grp_unknowntools() {   # roadmap row 6: tool names the hooks don't recognize go to hook-events.log
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "hooks: unknown tool names"
+  UT=$(repo unknowntools)
+  "$HARNESS/install.sh" --team "$UT" >/dev/null 2>&1
+  UL="$UT/.agents/cache/hook-events.log"
+  run(){ local ev="$1" tool="$2" payload="$3"; printf '%s' "$payload" | (cd "$UT" && .agents/hooks/run "$ev" --tool="$tool") 2>&1; }
+  unk(){ cat "$UL" 2>/dev/null | grep -c "	unknown-tool	" || true; }   # unknown-tool lines so far
+  sok(){ python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert $2" "$1"; }   # sok <json text> <expr>
+  out="$(run pre-tool copilot '{"sessionId":"u1","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}')
+$(run pre-tool copilot '{"sessionId":"u1","toolName":"view","toolArgs":"{\"path\":\"README.md\"}"}')
+$(run pre-tool copilot '{"sessionId":"u1","toolName":"web_fetch","toolArgs":"{\"url\":\"https://example.com\"}"}')
+$(run post-edit copilot '{"sessionId":"u1","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}')
+$(run pre-tool claude '{"session_id":"u1","tool_name":"Read","tool_input":{"file_path":"README.md"}}')
+$(run pre-tool codex '{"session_id":"u1","tool_name":"mcp__docs__search","tool_input":{}}')
+$(run pre-tool gemini '{"session_id":"u1","tool_name":"mcp_docs_search","tool_input":{}}')"
+  t    "absence: known tools leave the log alone" test ! -e "$UL"
+  t    "...and say nothing new"           test "$out" = "$(printf '\n\n\n\n\n\n{}')"
+  run pre-tool cursor '{"conversation_id":"u1","hook_event_name":"beforeShellExecution","command":"ls"}' >/dev/null
+  run post-edit cursor '{"conversation_id":"u1","hook_event_name":"afterFileEdit","file_path":"README.md"}' >/dev/null
+  t    "absence: cursor's per-action events name no tool" test "$(unk)" = 0
+  P1='{"sessionId":"u2","toolName":"replace_string_in_file","toolArgs":"{\"filePath\":\"README.md\",\"newString\":\"SECRET-INPUT-42\"}"}'
+  out="$(run pre-tool copilot "$P1")" && rc=0 || rc=$?
+  t    "copilot: an unknown tool is still allowed, quietly" test "$rc:$out" = "0:"
+  t    "...and logged by name and event"  grep -q "	copilot	pre-tool	unknown-tool	replace_string_in_file$" "$UL"
+  tnot "...never with its input"          grep -q SECRET-INPUT "$UL"
+  run pre-tool copilot "$P1" >/dev/null
+  t    "...once per session"              test "$(unk)" = 1
+  out="$(run post-edit copilot "$P1")" && rc=0 || rc=$?
+  t    "post-edit: an unknown tool is quiet" test "$rc:$out" = "0:"
+  t    "...and logged once for its own event" test "$(unk)" = 2
+  t    "...as post-edit"                  grep -q "	copilot	post-edit	unknown-tool	replace_string_in_file$" "$UL"
+  run pre-tool copilot "$(printf '%s' "$P1" | sed 's/u2/u3/')" >/dev/null
+  t    "a new session logs it again"      test "$(unk)" = 3
+  out="$(run pre-tool claude '{"session_id":"u2","tool_name":"Monitor","tool_input":{"command":"tail -f log"}}')" && rc=0 || rc=$?
+  t    "claude: an unknown tool is allowed, quietly" test "$rc:$out" = "0:"
+  t    "...and logged"                    grep -q "	claude	pre-tool	unknown-tool	Monitor$" "$UL"
+  out="$(run pre-tool codex '{"session_id":"u2","tool_name":"local_shell","tool_input":{"command":["ls"]}}')" && rc=0 || rc=$?
+  t    "codex: an unknown tool is allowed, quietly" test "$rc:$out" = "0:"
+  t    "...and logged"                    grep -q "	codex	pre-tool	unknown-tool	local_shell$" "$UL"
+  out="$(run pre-tool gemini '{"session_id":"u2","tool_name":"read_many_files","tool_input":{"paths":["x"]}}')" && rc=0 || rc=$?
+  t    "gemini: an unknown tool still answers {}" test "$rc:$out" = "0:{}"
+  t    "...and is logged"                 grep -q "	gemini	pre-tool	unknown-tool	read_many_files$" "$UL"
+  out="$(run post-edit gemini '{"session_id":"u2","tool_name":"save_memory","tool_input":{"fact":"x"}}')"
+  t    "gemini: post-edit still answers {}" test "$out" = "{}"
+  out="$(run pre-tool copilot '{"sessionId":"u2","toolName":"bash","toolArgs":"{\"command\":\"git push\"}"}')" && rc=0 || rc=$?
+  t    "a known tool's decision is unchanged (deny)" sok "$out" "d['permissionDecision'] == 'deny'"
+  t    "...with its exit code"            test "$rc" = 2
+  n="$(wc -l < "$UL" | tr -d ' ')"
+  LONG="$(python3 -c 'import json; print(json.dumps({"sessionId":"u2","toolName":"bad name\n\tx;$(rm)\u00e9" + "A" * 300}))')"
+  run pre-tool copilot "$LONG" >/dev/null
+  last="$(tail -1 "$UL" | cut -f5)"
+  t    "an odd name stays one log line"   test "$(wc -l < "$UL" | tr -d ' ')" = $((n + 1))
+  t    "...cut to 64 characters"          test "${#last}" = 67
+  t    "...with unsafe characters replaced" test "$last" = "$(python3 -c 'print("bad?name??x???rm??" + "A" * 46 + "...")')"
+  run pre-tool copilot '{"sessionId":"u2","tool_input":{"command":"ls"}}' >/dev/null
+  t    "a payload with no tool name is logged as (none)" grep -q "	copilot	pre-tool	unknown-tool	(none)$" "$UL"
+  key="$(python3 -c 'import hashlib; print(hashlib.sha1(b"u4").hexdigest()[:12])')"
+  mkdir -p "$UT/.agents/cache/tools-$key"
+  out="$(run pre-tool copilot '{"sessionId":"u4","toolName":"mystery","toolArgs":"{}"}')" && rc=0 || rc=$?
+  t    "a dedupe file that can't be written changes nothing" test "$rc:$out" = "0:"
+  out="$(run pre-tool copilot '{"sessionId":"u4","toolName":"bash","toolArgs":"{\"command\":\"git push\"}"}')" || true
+  t    "...and policy still denies"       sok "$out" "d['permissionDecision'] == 'deny'"
+  NS='{"toolName":"report_intent","toolArgs":"{\"intent\":\"x\"}","cwd":"'"$UT"'"}'   # no sessionId, as in a recorded Copilot CLI shape
+  run pre-tool copilot "$NS" >/dev/null; run pre-tool copilot "$NS" >/dev/null
+  t    "no session id: logged once"       test "$(grep -c "	report_intent$" "$UL")" = 1
+  mv "$UL" "$WORK/ut.old"
+  run pre-tool copilot "$NS" >/dev/null
+  t    "...and again once the log is deleted" test "$(grep -c "	report_intent$" "$UL")" = 1
+  run pre-tool copilot "$P1" >/dev/null
+  t    "...in every session"              grep -q "	copilot	pre-tool	unknown-tool	replace_string_in_file$" "$UL"
+  cat "$WORK/ut.old" "$UL" > "$WORK/ut.both" && mv "$WORK/ut.both" "$UL"
+  cp "$UL" "$WORK/ut.log"
+  for ev in pre-tool post-edit; do
+    printf '%s' '{"sessionId":"u5","toolName":"mystery2"}' | (cd "$UT" && AGENTS_HOOKS=off .agents/hooks/run "$ev" --tool=copilot) >/dev/null 2>&1
+  done
+  t    "absence: hooks off logs nothing"  cmp -s "$UL" "$WORK/ut.log"
+  edit "$UT/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="turn questions"/'
+  run pre-tool copilot '{"sessionId":"u5","toolName":"mystery2"}' >/dev/null
+  run post-edit copilot '{"sessionId":"u5","toolName":"mystery2"}' >/dev/null
+  t    "absence: policy and edit off log nothing" cmp -s "$UL" "$WORK/ut.log"
+  edit "$UT/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy edit turn questions"/'
+  rm -f "$UL"; mkdir "$UL"
+  out="$(run pre-tool copilot '{"sessionId":"u6","toolName":"mystery3"}')" && rc=0 || rc=$?
+  t    "a log that can't be written changes nothing" test "$rc:$out" = "0:"
+  out="$(run pre-tool gemini '{"session_id":"u6","tool_name":"mystery3"}')" && rc=0 || rc=$?
+  t    "...gemini still answers {}"       test "$rc:$out" = "0:{}"
+fi
+}
+group grp_unknowntools
+
 # The sections from here on run in the foreground while the groups above finish.
 # A new section can go anywhere below as is; wrap it in a group (see "groups" at the top) to run it in parallel.
 exec 3>&1 4>&2 >"$SMOKE_GD/tail.out" 2>&1; SMOKE_TAIL=1
