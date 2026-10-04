@@ -32,7 +32,9 @@ tiers. Installed with `install.sh --stack python <project>`; the pack runs from
   - Format: ruff format when the project configures ruff and formats with it (a
     `[tool.ruff.format]` or ruff.toml `[format]` section, or `ruff format` / `ruff-format` in
     `.pre-commit-config.yaml`, a Makefile, justfile, tox, nox, `pyproject.toml`, or a GitHub
-    workflow); black when `pyproject.toml` has `[tool.black]`; otherwise none.
+    workflow); black when `pyproject.toml` has `[tool.black]`; otherwise none. On the full tier
+    the formatter finds the files itself. black reads `.gitignore` but not `.git/info/exclude`,
+    where local mode hides the harness, so its findings for files git ignores are dropped.
   - Lint: ruff with the project's config when it has one (`ruff.toml`, `.ruff.toml`,
     `[tool.ruff]`). Without one, an installed ruff checks only syntax errors and undefined names
     (`--isolated --select=E9,F63,F7,F82`), so the findings don't depend on whose ruff, or whose

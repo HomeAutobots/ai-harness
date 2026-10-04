@@ -1448,6 +1448,18 @@ printf -- '--- app.py\t2026-01-01 10:00:00.000000+00:00\n+++ app.py\t2026-01-01 
 out="$(pyedit "$PV" STUB_FMT_DIFF="$WORK/py-black.diff" 2>&1 || true)"
 t    "[tool.black]: black checks the format" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
 tnot "...and its diff's timestamps stay out" hasl "$out" '2026-01-01'
+# black reads .gitignore but not .git/info/exclude, where local mode hides the harness's own files.
+printf -- '--- .agents/lib/approvals.py\t2026-01-01 10:00:00.000000+00:00\n+++ .agents/lib/approvals.py\t2026-01-01 10:00:01.000000+00:00\n@@ -1,1 +1,1 @@\n-x=1\n+x = 1\n' > "$WORK/py-black-harness.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-harness.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+tnot "local mode: black's whole-project run leaves out what git ignores (the harness's own files)" hasl "$out" '.agents/lib/approvals.py:1: error: not formatted'
+tnot "...and isn't a failure for it" hasl "$out" 'black-format (exit'
+cat "$WORK/py-black.diff" "$WORK/py-black-harness.diff" > "$WORK/py-black-both.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-both.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...a project file in the same run still counts" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
+sed "s|^\([-+][-+][-+]\) |\1 $(cd "$PV" && pwd -P)/|" "$WORK/py-black-both.diff" > "$WORK/py-black-abs.diff"   # real black names files by absolute path
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-abs.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...named by absolute path too: the project file counts, as a repo path" bash -c "printf '%s' \"\$1\" | grep -q '^app.py:1: error: not formatted the way black formats it'" _ "$out"
+tnot "...and the harness file doesn't" hasl "$out" 'approvals.py:1: error'
 git -C "$PV" checkout -q pyproject.toml
 printf 'def add(a, b):\n    return a + b + 0\n' > "$PV/app.py"
 out="$(pyv "$PV" STUB_MYPY_OUT='other.py:2: error: Returning Any  [no-any-return]' .agents/bin/verify --no-cache 2>&1 || true)"
