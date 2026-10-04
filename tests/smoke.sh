@@ -3710,6 +3710,70 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_guard_shapes
+grp_debug_run() {   # debug run: secrets masked in what it captures, and its time limit
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug run: secrets masked"
+  R=$(repo debugrun)
+  "$HARNESS/install.sh" --team --workflow debug "$R" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$R/.agents/checks/$tier.sh"; done
+  commit "$R" harness
+  RX="$R/.agents/commands/debug"; RE="$R/.agents/debug/sessions/bug-1/evidence"
+  "$RX" start bug '#1' >/dev/null
+  printf 'key %s here\nexport API_TOKEN=9f8e7d6c5b4a39281706\nplain line\n' "$FAKE_GH" > "$WORK/debugrun-secrets.txt"
+  out="$("$RX" run gather-evidence -- cat "$WORK/debugrun-secrets.txt" 2>&1)" && rc=0 || rc=$?
+  t    "a secret guard knows is masked in the log" bash -c "grep -qx 'key \[masked\] here' '$RE/E-1.log' && grep -qx 'export API_TOKEN=\[masked\]' '$RE/E-1.log' && grep -qx 'plain line' '$RE/E-1.log'"
+  t    "...and in the entry's tail"      bash -c "grep -qx 'key \[masked\] here' '$RE/E-1.md' && grep -qx 'export API_TOKEN=\[masked\]' '$RE/E-1.md'"
+  tnot "...none of it left in either file" grep -qF -e "$FAKE_GH" -e 9f8e7d6c5b4a39281706 "$RE/E-1.log" "$RE/E-1.md"
+  t    "...the entry counts them"        grep -qx 'masked: 2 possible secrets' "$RE/E-1.md"
+  t    "...and run says so, right after the entry line" bash -c "test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qx 'masked: 2 possible secrets'" _ "$out"
+  tnot "...printing none of it"         hasl "$out" "$FAKE_GH"
+  out="$("$RX" run gather-evidence -- echo "id $FAKE_AWS" 2>&1)"
+  t    "a secret in the command line is masked in the entry too" bash -c "grep -qxF \"command: echo 'id [masked]'\" '$RE/E-2.md' && grep -qx 'id \[masked\]' '$RE/E-2.log' && grep -qx 'masked: 2 possible secrets' '$RE/E-2.md'"
+  tnot "...and nowhere in either file"  grep -qF "$FAKE_AWS" "$RE/E-2.log" "$RE/E-2.md"
+  printf '%s\nMIIEowIBAAKCAQEA\n' "$FAKE_PEM" > "$WORK/debugrun-pem.txt"
+  "$RX" run gather-evidence -- cat "$WORK/debugrun-pem.txt" >/dev/null
+  t    "one masked: 'possible secret'"  bash -c "grep -qx 'masked: 1 possible secret' '$RE/E-3.md' && test \"\$(sed -n 1p '$RE/E-3.log')\" = '[masked]'"
+  printf 'id %s\r\nnext\n' "$FAKE_AWS" > "$WORK/debugrun-crlf.txt"; printf 'id [masked]\r\nnext\n' > "$WORK/debugrun-crlf.want"
+  "$RX" run gather-evidence -- cat "$WORK/debugrun-crlf.txt" >/dev/null
+  t    "a key at the end of a CRLF line: the line ending stays" cmp -s "$WORK/debugrun-crlf.want" "$RE/E-4.log"
+  printf 'password = "your-password-1234"\nnothing\377here\r\nno newline at the end' > "$WORK/debugrun-plain.txt"
+  out="$("$RX" run gather-evidence -- cat "$WORK/debugrun-plain.txt" 2>&1)"
+  t    "absence: no secret, the log is byte for byte what the command wrote" cmp -s "$WORK/debugrun-plain.txt" "$RE/E-5.log"
+  tnot "...no masked: line in the entry" grep -q '^masked:' "$RE/E-5.md"
+  tnot "...nor in what run printed"     hasl "$out" "masked:"
+  { seq 1 200000; printf 'id %s\n' "$FAKE_AWS"; seq 1 3; } > "$WORK/debugrun-big.txt"
+  out="$("$RX" run gather-evidence -- cat "$WORK/debugrun-big.txt" 2>&1)"
+  n="$(printf '%s\n' "$out" | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
+  t    "a log past 1 MiB: a secret near its end is masked, the rest kept" bash -c "test \$(wc -l < '$RE/E-$n.log') -eq 200004 && grep -qx 'id \[masked\]' '$RE/E-$n.log' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  printf 'secret\tacme_[a-z0-9]{16}\tAcme key: remove it\n' > "$R/.agents/guard.patterns"
+  "$RX" run gather-evidence -- echo acme_k8hq2mzx7lp4wd9r >/dev/null
+  t    "the project's own secret rules count too" grep -qx '\[masked\]' "$RE/E-7.log"
+  rm -f "$R/.agents/guard.patterns"
+  mv "$R/.agents/lib/guard_shapes.py" "$WORK/debugrun.guard_shapes.py"
+  out="$("$RX" run gather-evidence -- true 2>&1)" && rc=0 || rc=$?
+  t    "no .agents/lib/guard_shapes.py: infra (3), re-run install.sh" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qxF \"infra: this project's harness has no .agents/lib/guard_shapes.py, so debug run can't mask secrets; re-run install.sh\"" _ "$out"
+  tnot "...and nothing run or recorded" test -e "$RE/E-8.log"
+  t    "...while status still works"    bash -c "'$RX' status | grep -qxF 'session: bug-1 (bug, #1), open'"
+  mv "$WORK/debugrun.guard_shapes.py" "$R/.agents/lib/guard_shapes.py"
+  out="$("$RX" run gather-evidence -- sh -c 'echo key; rm -f .agents/debug/sessions/bug-1/evidence/E-*.log' 2>&1)" && rc=0 || rc=$?
+  t    "a log that can't be masked: deleted, nothing recorded, infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q \"^infra: couldn't mask secrets in E-8.log, so it's deleted and nothing was recorded\" && test ! -e '$RE/E-8.log' && test ! -e '$RE/E-8.md'" _ "$out"
+  rn(){ "$RX" run gather-evidence -- "$@" 2>&1 | sed -n '1s/^E-\([0-9]*\) .*/\1/p'; }   # rn <cmd...>: its entry's number
+  printf 'DB_Password = "s3cr3tValue99xyz"\n' > "$WORK/debugrun-case.txt"
+  n="$(rn cat "$WORK/debugrun-case.txt")"
+  t    "a rule that ignores case masks any case" grep -qx 'DB_Password = "\[masked\]"' "$RE/E-$n.log"
+  keys=""; i=0; while [ "$i" -lt 60 ]; do keys="$keys $FAKE_AWS"; i=$((i + 1)); done
+  printf 'ids:%s\n' "$keys" > "$WORK/debugrun-many.txt"
+  n="$(rn cat "$WORK/debugrun-many.txt")"
+  t    "60 secrets on one line: every one masked" bash -c "grep -qx 'masked: 60 possible secrets' '$RE/E-$n.md' && ! grep -qF '$FAKE_AWS' '$RE/E-$n.log'"
+  s0=$SECONDS
+  n="$(rn python3 -c 'import sys; sys.stdout.write("\n" * 1000000 + "x\n")')"
+  t    "a million blank lines mask in seconds" bash -c "test -n '$n' && test $((SECONDS - s0)) -lt 20 && test \$(wc -l < '$RE/E-$n.log') -eq 1000001"
+  n="$(rn sh -c '(sleep 1; echo late) & echo now')"
+  sleep 2
+  t    "what a process left running writes later isn't in the log" bash -c "grep -qx now '$RE/E-$n.log' && ! grep -q late '$RE/E-$n.log'"
+fi
+}
+group grp_debug_run
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

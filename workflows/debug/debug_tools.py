@@ -26,7 +26,9 @@ simulated one while the switch is off; a simulated-human switch that doesn't cou
 .agents/policy.conf blocks), 3 tooling problem or an unknown option. debug run exits with
 its command's exit code, so its 2 or 3 can come from the command too: a run that happened prints its
 "E-<n> (...)" line first. Its command gets no stdin (/dev/null) and has no time limit, and E-<n>.log
-keeps all of its output with no size cap; only the entry (E-<n>.md) is cut to the last lines.
+keeps all of its output with no size cap; only the entry (E-<n>.md) is cut to the last lines. What
+guard's secret rules match in the output and the command line is masked in both files ([masked],
+through the harness's .agents/lib/guard_shapes.py).
 """
 import fnmatch
 import hashlib
@@ -77,6 +79,7 @@ def gate_key():
 
 KEY = gate_key()   # the record in the git dir, ai-harness/<KEY>-approvals
 ap = None          # the harness's .agents/lib/approvals.py, loaded by use_lib() once the project is known
+gs = None          # the harness's .agents/lib/guard_shapes.py, loaded by use_shapes() when debug run needs it
 
 
 def use_lib(root):
@@ -92,6 +95,21 @@ def use_lib(root):
             raise ConfError("this project's harness has no .agents/lib/approvals.py; re-run install.sh")
         ap = approvals
     return ap
+
+
+def use_shapes(root):
+    """guard's secret rules for Python, from the project this runs for (like use_lib). Only debug run
+    needs them, and it refuses to run without them, so nothing is ever captured unmasked."""
+    global gs
+    if gs is None:
+        use_lib(root)   # the project's .agents/lib on sys.path
+        try:
+            import guard_shapes
+        except ImportError:
+            raise ConfError("this project's harness has no .agents/lib/guard_shapes.py, so debug run can't mask "
+                            "secrets; re-run install.sh")
+        gs = guard_shapes
+    return gs
 
 
 # ------------------------------------------------------------------ config and files
@@ -1483,6 +1501,35 @@ def tail_lines(path, n=TAIL):
     return [l if len(l) <= 1000 else l[:1000] + " ..." for l in lines]
 
 
+def mask_log(log):
+    """Mask what guard's secret rules match in E-<n>.log, line by line: the text decoded as UTF-8, with
+    bytes that aren't kept as they were (surrogateescape). How many it masked. The file is always
+    replaced, byte for byte the same when nothing matched, so a process the command left running
+    writes on into the old one, which nothing reads. A log it can't read or rewrite is deleted
+    (ConfError): nothing unmasked is left behind or recorded."""
+    n, tmp = 0, log + ".masking"
+    try:
+        with open(log, "rb") as src, open(tmp, "wb") as dst:
+            while True:
+                block = src.read(1 << 20)
+                if not block:
+                    break
+                block += src.readline(16 << 20)   # whole lines: the rest of the last one, up to 16 MiB
+                text, k = gs.mask_lines(block.decode("utf-8", "surrogateescape"))
+                n += k
+                dst.write(text.encode("utf-8", "surrogateescape"))
+        os.replace(tmp, log)
+    except OSError as e:
+        for p in (tmp, log):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise ConfError("couldn't mask secrets in %s, so it's deleted and nothing was recorded: %s"
+                        % (os.path.basename(log), e.strerror or e))
+    return n
+
+
 def new_entry(sdir):
     """(n, fd of evidence/E-<n>.log, created with O_EXCL): the next number after every E-<n>.md and
     E-<n>.log there, reserved before the command runs, so two runs at once never share one. A log
@@ -1504,6 +1551,7 @@ def cmd_run(root, words, opts, after):
     if len(words) != 1 or not after or (attempt is not None and attempt not in ATTEMPTS):
         return bad("run")
     conf = load_conf(root)
+    use_shapes(root)   # before anything runs: without the rules, nothing is captured
     switch = ap.Switch(root)
     cur = current_session(root, conf, switch)
     if not cur:
@@ -1536,10 +1584,13 @@ def cmd_run(root, words, opts, after):
         except KeyboardInterrupt:
             rc = 130
     rc = rc if rc >= 0 else 128 - rc   # killed by a signal
+    masked = mask_log(log)   # before the tail is read and anything is printed
     tail = tail_lines(log)
-    shown_cmd = one_line(cmdline).encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    shown_cmd, k = gs.mask(one_line(cmdline).encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
+    masked += k
+    notes = ["masked: %d possible secret%s" % (masked, "" if masked == 1 else "s")] if masked else []
     header = ["# E-%d" % n, "step: " + step] + (["attempt: " + attempt] if attempt else []) + \
-             ["command: " + shown_cmd, "exit: %d" % rc, "head: " + head]
+             ["command: " + shown_cmd, "exit: %d" % rc, "head: " + head] + notes
     write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
                              ["", "Full output: E-%d.log" % n]) + "\n")
     st = read_state(sdir)   # fresh: the session may have been closed while the command ran
@@ -1547,7 +1598,7 @@ def cmd_run(root, words, opts, after):
         st["step"] = step
         write_state(sdir, st)
     print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
-    for l in tail:
+    for l in notes + tail:
         print(l)
     if attempt:
         print("record the outcome: %s outcome E-%d reproduced|partial|not-reproduced" % (debug_cmd(root), n))
