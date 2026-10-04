@@ -1324,9 +1324,10 @@ def cmd_close(root, words, opts, after):
             return 1
     text = reason + (": " + note if note else "")
     # Marked simulated only when it took the human (the token got it past refused); otherwise an
-    # agent's close would reopen once the switch goes off. In an agent's shell without the token,
-    # it's a close-agent line, which stops counting if the root cause comes to wait on the human.
-    by_agent = ap.blocked_shell(switch) is not None
+    # agent's close would reopen once the switch goes off. Any other close in an agent's shell, with
+    # the token or without, is a close-agent line, which stops counting if the root cause comes to
+    # wait on the human.
+    by_agent = ap.agent_shell() is not None and not waits
     kind = "close-agent" if by_agent else "close"
     line, sim = ap.new_line(root, kind, slug, text, switch if waits and ap.agent_shell() else OFF)
     ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record

@@ -3022,6 +3022,9 @@ except d.ConfError as e:
   mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
   t    "...so it stays closed once the switch is off" bash -c "'$SMX' status bug-2 | grep -qxF 'session: bug-2 (bug, #2), closed (abandoned)'"
   cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
+  "$SMX" start bug '#3' >/dev/null
+  CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKS" "$SMX" close bug-3 abandoned >/dev/null
+  t    "...an agent with the token closing what doesn't wait on the human: still an agent's close" bash -c "tail -1 '$SM/.agents/debug/sessions/bug-3/approvals' | grep -q '^close-agent	bug-3	[^	]*[^)]	[^	]*	abandoned$'"
   "$CX" start bug '#13' >/dev/null
   trc  "close needs a reason it knows"  2 "$CX" close bug-13 fixed
   out="$("$CX" close nosuch reviewed 2>&1)" && rc=0 || rc=$?
