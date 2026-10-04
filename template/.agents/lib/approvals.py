@@ -27,7 +27,11 @@ import sys
 # Bash tool, Gemini CLI sets GEMINI_CLI=1 for run_shell_command, Cursor sets CURSOR_AGENT. Codex
 # and Copilot document none (README, Known gaps).
 AGENT_SHELLS = (("CLAUDECODE", "Claude Code"), ("GEMINI_CLI", "Gemini CLI"), ("CURSOR_AGENT", "Cursor"))
-KEY = re.compile(r"[a-z0-9][a-z0-9-]*")
+KEY = re.compile(r"[a-z0-9][a-z0-9-]*")   # a record key; never "on", which main() reads as the switch
+
+
+def valid_key(k):
+    return bool(KEY.fullmatch(k)) and k != "on"
 
 
 def agent_shell():
@@ -84,7 +88,18 @@ def recorded(root, key):
 
 
 def record(root, key, lines):
-    """Append lines to the pack's record (no-op outside git)."""
+    """Append approvals lines to the pack's record (no-op outside git). Only approvals lines: five
+    tab-separated fields on one line, not starting with "#". The record's markers (adopted,
+    simulated, the switch's hash) are this library's to write, so a pack can't write one by
+    mistake. Raises ValueError, writing nothing, for any other line."""
+    for l in lines:
+        if "\n" in l or "\r" in l or l.startswith("#") or len(l.split("\t")) != 5:
+            raise ValueError("not an approvals line (five tab-separated fields, not a # marker): %r" % l)
+    _append(root, key, lines)
+
+
+def _append(root, key, lines):
+    """Append lines, markers included, to the pack's record (no-op outside git). This library only."""
     path = record_file(root, key)
     if path is None:
         return
@@ -199,11 +214,19 @@ def classify(root, key, path, switch=None):
     return counted, unrecorded, simulated
 
 
+def may_act(switch):
+    """Whether this shell may take a human's step: None when it may (a person's terminal, or an
+    agent's shell with the simulated human's token), else the (variable, tool) of the agent shell
+    that stops it."""
+    shell = agent_shell()
+    return None if not shell or switch.token_ok() else shell
+
+
 def refused(prog, doing, switch):
     """True, after saying why on stderr, when this runs in a shell an agent tool started and the
     shell doesn't have the simulated human's token. doing names the step, e.g. 'approving'."""
-    shell = agent_shell()
-    if not shell or switch.token_ok():
+    shell = may_act(switch)
+    if not shell:
         return False
     print("%s: %s is the human's step, and this shell was started by %s (%s is set). "
           "Run it in your own terminal." % (prog, doing, shell[1], shell[0]), file=sys.stderr)
@@ -219,12 +242,13 @@ def refused(prog, doing, switch):
 def new_line(root, kind, ident, value, switch):
     """(approvals line, simulated?). who is git's user.name, else $USER, and ends in SIMULATED while
     the simulated human is on: in the line itself, so a copy of the file carries it anywhere."""
-    who = (git(root, "config", "user.name").strip() or os.environ.get("USER", "unknown"))
-    who = who.replace("\t", " ").replace("\n", " ")
+    def field(t):   # one field: no tab or line break can split the line
+        return t.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    who = field(git(root, "config", "user.name").strip() or os.environ.get("USER", "unknown"))
     sim = switch.state == "on"
     if sim:
         who += SIMULATED
-    return "\t".join((kind, ident, who, datetime.date.today().isoformat(), value)), sim
+    return "\t".join((field(kind), field(ident), who, datetime.date.today().isoformat(), field(value))), sim
 
 
 def human_cmd(root, pack, name):
@@ -257,7 +281,7 @@ def adopt(root, key, path, simulated=False):
     if rec is None or ADOPTED in rec:
         return []
     lines = [l for l in read_lines(path) if len(l.split("\t")) == 5 and l not in rec and SIM_REC + l not in rec]
-    record(root, key, [ADOPTED] + [SIM_REC + l if simulated else l for l in lines])
+    _append(root, key, [ADOPTED] + [SIM_REC + l if simulated else l for l in lines])
     return lines
 
 
@@ -271,13 +295,13 @@ def cmd_simulated_human(root, turn_on, keys):
         if d is None or len(token) < 16:
             print("error: --simulated-human needs a git repo and a token of 16 or more characters", file=sys.stderr)
             return 2
-        if not keys or not all(KEY.fullmatch(k) for k in keys):
+        if not keys or not all(valid_key(k) for k in keys):
             print("error: --simulated-human needs the record key of a workflow pack with human gates", file=sys.stderr)
             return 2
         shell = agent_shell()
         h = token_hash(token)
         for k in keys:
-            record(root, k, [SWITCH_REC + h])   # first, so the switch is never left without its record
+            _append(root, k, [SWITCH_REC + h])   # first, so the switch is never left without its record
         sw = os.path.join(d, SWITCH)
         if os.path.lexists(sw):   # a fresh file: not through a link, and writable again
             os.remove(sw)

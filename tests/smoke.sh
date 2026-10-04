@@ -2549,7 +2549,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "--simulated-human works with any pack that has a human-gates file" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q 'install: simulated human: on (install.sh --simulated-human, run from a Claude Code shell)'" _ "$out"
   QS="$Q/.git/ai-harness/simulated-human"
   t    "...its hash goes in that pack's record" bash -c "grep -qx \"#simulated-human	\$(sed -n 's/^on	\([0-9a-f]*\)	.*/\1/p' '$QS')\" '$Q/.git/ai-harness/gated-approvals'"
-  tnot "...and no other pack's"          test -e "$Q/.git/ai-harness/fdd-approvals"
+  t    "...and no other pack's (gated is the only active one)" test "$(cd "$Q/.git/ai-harness" && ls -- *-approvals)" = gated-approvals
   TOKQ="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
   t    "the lib reports the switch to install.sh" bash -c "cd '$Q' && python3 .agents/lib/approvals.py simulated-human . | grep -q '^simulated human: on (install.sh --simulated-human'"
   lib(){ (cd "$Q" && python3 -c "import sys; sys.path.insert(0, '.agents/lib'); import approvals as a; $1"); }
@@ -2559,14 +2559,34 @@ if [ "$HAVE_PY" -eq 1 ]; then
   trc  "refused(): a person's terminal is never refused" 1 bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; sys.exit(0 if a.refused(\"gated\", \"approving\", a.Switch(\".\")) else 1)'"
   lib 'l, s = a.new_line(".", "gate", "x-1", "v", a.Switch(".")); a.record(".", "gated", [l]); open("approvals", "a").write(l + "\n" + "gate\tx-2\tme\t2026-10-03\tv\n")'
   t    "new_line() marks a simulated approval in the line" grep -q '^gate	x-1	[^	]* (simulated human)	' "$Q/approvals"
+  t    "new_line(): a tab or line break in a field can't split the line" test "$(lib 'l, s = a.new_line(".", "ga\tte", "x\n1", "v\tw\r", a.Switch(".")); print(len(l.split("\t")), "\n" in l or "\r" in l)')" = "5 False"
+  out="$(lib 'a.record(".", "gated", ["#simulated-human\tx"])' 2>&1 || true)"
+  t    "record() refuses a marker line, and writes nothing" bash -c "printf '%s' \"\$1\" | grep -q 'ValueError: not an approvals line' && ! grep -q '^#simulated-human	x\$' '$Q/.git/ai-harness/gated-approvals'" _ "$out"
+  trc  "record() refuses a line without five fields" 1 bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; a.record(\".\", \"gated\", [\"gate\\tx-3\\tme\"])'"
   t    "classify(): a recorded line counts, a forged one doesn't" test "$(lib 'c, u, s = a.classify(".", "gated", "approvals"); print(len(c), [p[1] for _, p in u], len(s))')" = "1 ['x-2'] 0"
   mv "$QS" "$WORK/ah.switch"
   t    "classify(): with the switch off, a simulated line doesn't count" test "$(lib 'c, u, s = a.classify(".", "gated", "approvals"); print(len(c), len(u), [p[1] for _, p in s])')" = "0 1 ['x-1']"
   cp "$WORK/ah.switch" "$QS"; rm -f "$Q/approvals"
+  out="$(python3 "$Q/.agents/lib/approvals.py" 2>&1)" && rc=0 || rc=$?
+  t    "approvals.py: no command prints the usage (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'approvals.py simulated-human <root> \[on\] \[key...\]'" _ "$out"
+  for k in Bad_Key on; do
+    out="$(cd "$Q" && AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 python3 .agents/lib/approvals.py simulated-human . on "$k" 2>&1)" && rc=0 || rc=$?
+    t    "approvals.py: record key '$k' is refused (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'needs the record key of a workflow pack with human gates'" _ "$out"
+  done
+  out="$(cd "$Q" && AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 python3 .agents/lib/approvals.py simulated-human . on 2>&1)" && rc=0 || rc=$?
+  t    "approvals.py: turning it on without a key is refused (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'needs the record key'" _ "$out"
+  t    "...and the switch is the one install.sh wrote" cmp -s "$QS" "$WORK/ah.switch"
   # A clone switched on before the shared lib has the hash in fdd-approvals only: it still counts.
   F2=$(repo ah-old)
   "$AH/install.sh" --team --workflow feature-driven --workflow gated --simulated-human "$F2" >/dev/null 2>&1
   t    "with two gated packs, both records hold the hash" bash -c "grep -q '^#simulated-human	' '$F2/.git/ai-harness/fdd-approvals' && grep -q '^#simulated-human	' '$F2/.git/ai-harness/gated-approvals'"
+  trc  "the policy blocks approvals.py simulated-human" 2 policy "$F2" test "python3 .agents/lib/approvals.py simulated-human . on fdd"
+  tnot "fdd_tools leaves no bytecode in .agents/lib" test -e "$F2/.agents/lib/__pycache__"
+  mv "$F2/.agents/lib/approvals.py" "$WORK/ah.approvals.py"
+  out="$(cd "$F2" && python3 .agents/builtin/workflows/feature-driven/fdd_tools.py status . 2>&1)" && rc=0 || rc=$?
+  t    "fdd_tools without .agents/lib/approvals.py: infra (3), re-run install.sh" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: this project's harness has no .agents/lib/approvals.py; re-run install.sh\"" _ "$out"
+  trc  "...while an unknown command still gets the usage (2)" 2 bash -c "cd '$F2' && python3 .agents/builtin/workflows/feature-driven/fdd_tools.py bogus ."
+  mv "$WORK/ah.approvals.py" "$F2/.agents/lib/approvals.py"
   edit "$F2/.git/ai-harness/gated-approvals" '/^#simulated-human/d'
   t    "a hash in any pack's record keeps the switch on (an older clone)" bash -c "cd '$F2' && python3 .agents/lib/approvals.py simulated-human . | grep -q '^simulated human: on'"
   edit "$F2/.git/ai-harness/fdd-approvals" '/^#simulated-human/d'
@@ -2579,6 +2599,12 @@ if [ "$HAVE_PY" -eq 1 ]; then
   UG="$AH/workflows/ungated"; mkdir -p "$UG/skill"
   printf -- '---\nname: ungated\ndescription: No human gate.\n---\n' > "$UG/skill/SKILL.md"
   trc  "a pack without a human-gates file doesn't count" 2 "$AH/install.sh" --team --workflow ungated --simulated-human "$Z"
+  BG="$AH/workflows/badgate"; mkdir -p "$BG/skill"
+  printf -- '---\nname: badgate\ndescription: A human-gates file with no key.\n---\n' > "$BG/skill/SKILL.md"
+  printf '# no key here\nBad Key\non\n' > "$BG/human-gates"
+  out="$("$AH/install.sh" --team --workflow badgate --simulated-human "$Z" 2>&1)" && rc=0 || rc=$?
+  t    "a human-gates file that names no key ('on' isn't one) fails (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q 'badgate/human-gates names no record key'" _ "$out"
+  tnot "...before anything is installed" test -e "$Z/.agents"
   # Absence: no gated pack, no switch and no record.
   "$HARNESS/install.sh" --team "$Z" >/dev/null 2>&1
   t    "absence: no gated pack, no record and no switch" bash -c "! ls '$Z'/.git/ai-harness/*-approvals >/dev/null 2>&1 && test ! -e '$Z/.git/ai-harness/simulated-human'"

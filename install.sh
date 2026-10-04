@@ -102,11 +102,19 @@ done
 # --simulated-human: checked before anything changes. It only affects the approvals of workflow
 # packs with human gates (a pack with a human-gates file) and lives in the git dir. A token the
 # caller sets must be long enough that an agent can't guess it.
+gate_key() {  # gate_key <pack dir>: the record key its human-gates file names (the first line that's a key, not "on"); empty without one
+  [ -f "$1/human-gates" ] || return 0
+  sed -n '/^[[:space:]]*\([a-z0-9][a-z0-9-]*\)[[:space:]]*$/{s//\1/;/^on$/d;p;q;}' "$1/human-gates"
+}
 gated_pack() {  # gated_pack <name>: the pack that will run has human gates (a library's copy, else the one shipped here)
   local p
   p="$(agents_resolve workflows "$1" 2>/dev/null)" || p=""
   case "$p" in ""|"$DEST/.agents/builtin/"*) p="$HARNESS/workflows/$1" ;; esac   # builtin/ is rebuilt below
-  [ -f "$p/human-gates" ]
+  [ -f "$p/human-gates" ] || return 1
+  if [ -z "$(gate_key "$p")" ]; then
+    echo "install: $p/human-gates names no record key (a line of lowercase letters, digits, and dashes, not 'on'); fix the pack" >&2
+    exit 3
+  fi
 }
 if [ "$SIMULATED_HUMAN" -eq 1 ]; then
   git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 \
@@ -661,8 +669,7 @@ SIM_FAILED=""
 HUMAN_GATE_KEYS=""
 for w in $WORKFLOWS; do
   wp="$(agents_resolve workflows "$w" 2>/dev/null)" || continue
-  [ -f "$wp/human-gates" ] || continue
-  k="$(sed -n 's/^[[:space:]]*\([a-z0-9][a-z0-9-]*\)[[:space:]]*$/\1/p' "$wp/human-gates" | head -n 1)"
+  k="$(gate_key "$wp")"
   [ -z "$k" ] || HUMAN_GATE_KEYS="$HUMAN_GATE_KEYS $k"
 done
 if [ -n "$HUMAN_GATE_KEYS" ] && [ "$IN_GIT" -eq 1 ] && command -v python3 >/dev/null 2>&1; then

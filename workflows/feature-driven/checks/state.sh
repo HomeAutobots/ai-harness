@@ -4,13 +4,14 @@
 d="$(sed -n "s/^[[:space:]]*FDD_DIR=[\"']\{0,1\}\([^\"'#]*\)[\"']\{0,1\}.*/\1/p" "$AGENTS_ROOT/.agents/harness.conf" 2>/dev/null | tail -1 | sed 's/[[:space:]]*$//')"
 d="${d:-.agents/fdd}"
 case "$d" in /*) ;; *) d="$AGENTS_ROOT/$d" ;; esac
-# The record of what fdd approve wrote, in the git dir: an approval counts only when it's there.
-# The simulated-human switch (install.sh --simulated-human) sits next to it.
+# The records in the git dir (fdd approve writes fdd-approvals; an approval counts only when it's
+# there) and the simulated-human switch next to them (install.sh --simulated-human), which counts
+# when any pack's record holds its hash, so every record goes in.
 gd="$(git -C "$AGENTS_ROOT" rev-parse --git-common-dir 2>/dev/null)"
 case "$gd" in
   "") ;;
-  /*) cat "$gd/ai-harness/fdd-approvals" "$gd/ai-harness/simulated-human" 2>/dev/null ;;
-  *) cat "$AGENTS_ROOT/$gd/ai-harness/fdd-approvals" "$AGENTS_ROOT/$gd/ai-harness/simulated-human" 2>/dev/null ;;
+  /*) cat "$gd"/ai-harness/*-approvals "$gd/ai-harness/simulated-human" 2>/dev/null ;;
+  *) cat "$AGENTS_ROOT/$gd"/ai-harness/*-approvals "$AGENTS_ROOT/$gd/ai-harness/simulated-human" 2>/dev/null ;;
 esac
 # The wrong-branch check reads the current branch, each plan's Branch: line (tasks link), and git.conf.
 git -C "$AGENTS_ROOT" symbolic-ref -q HEAD 2>/dev/null

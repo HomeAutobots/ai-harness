@@ -45,8 +45,24 @@ DEFAULT_TICKET = r"[A-Z][A-Z0-9]+-[0-9]+"
 # FDD's milestone weights, cumulative: walkthrough + design, design inspection, code, code inspection + promote.
 MILESTONES = ((41, "designed"), (44, "design approved"), (89, "built"), (100, "inspected"))
 PACK = os.path.dirname(os.path.abspath(__file__))
-KEY = "fdd"   # the record in the git dir, ai-harness/fdd-approvals (human-gates says so too)
-ap = None     # the harness's .agents/lib/approvals.py, loaded by use_lib() once the project is known
+
+
+def gate_key():
+    """The pack's record key, from its human-gates file (the one install.sh reads; the first line
+    that's a key, not "on"), so the two can't drift; fdd when the file can't be read or names none."""
+    try:
+        with open(os.path.join(PACK, "human-gates"), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = re.fullmatch(r"\s*([a-z0-9][a-z0-9-]*)\s*", line)
+                if m and m.group(1) != "on":
+                    return m.group(1)
+    except OSError:
+        pass
+    return "fdd"
+
+
+KEY = gate_key()   # the record in the git dir, ai-harness/<KEY>-approvals
+ap = None          # the harness's .agents/lib/approvals.py, loaded by use_lib() once the project is known
 
 
 def use_lib(root):
@@ -54,6 +70,7 @@ def use_lib(root):
     and in every install, wherever this pack's library is."""
     global ap
     if ap is None:
+        sys.dont_write_bytecode = True   # no .agents/lib/__pycache__ left in the project
         sys.path.insert(0, os.path.join(root, ".agents", "lib"))
         try:
             import approvals
@@ -864,13 +881,11 @@ def cmd_adopt(root):
     conf = load_conf(root)
     d = fdd_dir(root, conf)
     if not os.path.isfile(os.path.join(d, "approvals")):
-        rec = recorded(root)
-        if rec is not None and ap.ADOPTED not in rec:
-            ap.record(root, KEY, [ap.ADOPTED])
+        ap.adopt(root, KEY, os.path.join(d, "approvals"))   # no lines: only marks the clone adopted
         return 0
-    shell = ap.agent_shell()
     switch = ap.Switch(root)
-    if shell and not switch.token_ok():
+    shell = ap.may_act(switch)
+    if shell:
         path = record_file(root)
         n = len(read_approvals(root, d, switch)[1])
         if path is not None and ap.ADOPTED not in read_lines(path) and n:
@@ -884,6 +899,7 @@ def cmd_adopt(root):
     return 0
 
 
+# Kept as a thin wrapper over the shared switch: tests, scripts, and the CHANGELOG name this subcommand.
 def cmd_simulated_human(root, turn_on):
     """The shared switch (ap.cmd_simulated_human) for this pack's record alone; install.sh turns it
     on for every pack with human gates at once."""
@@ -903,23 +919,24 @@ def main(argv):
 
 
 def dispatch(a):
-    at = 2 if a[:1] == ["check"] else 1   # where the project root is in the arguments
-    if len(a) > at:
-        use_lib(os.path.abspath(a[at]))
-    if len(a) >= 3 and a[0] == "check" and a[1] in ("edit", "turn", "full"):
-        return cmd_check(a[1], os.path.abspath(a[2]), a[3:])
-    if len(a) == 3 and a[0] == "msg":
+    if len(a) == 3 and a[0] == "msg":   # the commit-msg check needs no approvals library
         return cmd_msg(os.path.abspath(a[1]), a[2])
-    if len(a) >= 2 and a[0] == "approve":
-        return cmd_approve(os.path.abspath(a[1]), a[2:])
-    if len(a) in (2, 3) and a[0] == "status":
-        return cmd_status(os.path.abspath(a[1]), a[2] if len(a) == 3 else None)
-    if len(a) == 2 and a[0] == "adopt":
-        return cmd_adopt(os.path.abspath(a[1]))
-    if len(a) in (2, 3) and a[0] == "simulated-human" and a[2:] in ([], ["on"]):
-        return cmd_simulated_human(os.path.abspath(a[1]), a[2:] == ["on"])
-    print(__doc__.strip(), file=sys.stderr)
-    return 2
+    if len(a) >= 3 and a[0] == "check" and a[1] in ("edit", "turn", "full"):
+        root, run = a[2], lambda r: cmd_check(a[1], r, a[3:])
+    elif len(a) >= 2 and a[0] == "approve":
+        root, run = a[1], lambda r: cmd_approve(r, a[2:])
+    elif len(a) in (2, 3) and a[0] == "status":
+        root, run = a[1], lambda r: cmd_status(r, a[2] if len(a) == 3 else None)
+    elif len(a) == 2 and a[0] == "adopt":
+        root, run = a[1], cmd_adopt
+    elif len(a) in (2, 3) and a[0] == "simulated-human" and a[2:] in ([], ["on"]):
+        root, run = a[1], lambda r: cmd_simulated_human(r, a[2:] == ["on"])
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    root = os.path.abspath(root)
+    use_lib(root)   # once a command matched, so a bad one still gets the usage
+    return run(root)
 
 
 if __name__ == "__main__":
