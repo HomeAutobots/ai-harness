@@ -2872,6 +2872,26 @@ if [ "$HAVE_PY" -eq 1 ]; then
   edit "$C/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="**"/'
   git -C "$C" reset -q -- src; git -C "$C" checkout -q src; rm -rf "$C/src/new.c" "$C/dbg"
   t    "...and none once they're gone"  hasl "$("$CX" status)" "experiments in the tree: none"
+  printf 'one\ntwo\n' > "$C/src/a\"b.c"; commit "$C" quoted
+  edit "$C/src/a\"b.c" 's/^two$/two probe/'
+  t    "...a file name git quotes is listed too" hasl "$("$CX" status)" "experiments in the tree: src/a\"b.c:2"
+  git -C "$C" checkout -q src
+  UQ="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print(d.c_unquote('\"src/a\\\\\"b\\\\tc\\\\303\\\\251.c\" rest') == 'src/a\"b\\tc\\u00e9.c', d.c_unquote('\"open'))"
+  t    "c_unquote: escapes, octal UTF-8 bytes, and an unclosed token" test "$(python3 -B -c "$UQ" "$GP" 2>&1)" = "True None"
+  BR="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d
+try:
+    d.changed_lines(sys.argv[2]); print('clean')
+except d.ConfError as e:
+    print('conf')"
+  t    "changed_lines in a repo git can't read: a tooling problem, not a clean tree" test "$(GIT_DIR="$WORK/no-such.git" python3 -B -c "$BR" "$GP" "$C" 2>&1)" = conf
+  printf '## H-1: a\n#12 says so\n#include <x>\n- status: confirmed\n## H-2: b\n### Notes\n- status: confirmed\n' > "$WORK/hyp.md"
+  HY="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print(d.hypotheses(sys.argv[2]))"
+  t    "hypotheses: only a markdown heading ends a section" test "$(python3 -B -c "$HY" "$GP" "$WORK/hyp.md" 2>&1)" = "[(1, 1, 'confirmed'), (2, 5, 'open')]"
+  NC="$WORK/debugnocommit"; mkdir -p "$NC"; git -C "$NC" init -q
+  "$HARNESS/install.sh" --team --workflow debug "$NC" >/dev/null 2>&1
+  mkdir -p "$NC/src"; printf 'x\n' > "$NC/src/a.c"; git -C "$NC" add src/a.c
+  "$NC/.agents/commands/debug" start bug '#1' >/dev/null
+  t    "a repo with no commits yet: status lists a staged file" bash -c "'$NC/.agents/commands/debug' status | grep -q '^experiments in the tree: .*src/a\.c:1'"
   edit "$CS/bug-12/state" 's/^kind: bug$/kind: crash/'
   t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no crash workflow"
   edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'

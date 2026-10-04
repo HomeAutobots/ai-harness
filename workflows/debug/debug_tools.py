@@ -825,8 +825,8 @@ def hypotheses(path):
     """[(n, line no, status)] for each '## H-<n>: <claim>' section in hypotheses.md, in file order (an
     id written twice is there twice). status is the first word of the section's first '- status:'
     line, any case, with *, _ or backticks around it allowed: open, confirmed, ruled (ruled out), or
-    unclear for any other word or none; open when there's no status line. Any other heading ends a
-    section."""
+    unclear for any other word or none; open when there's no status line. Any other markdown heading
+    (1 to 6 #, then a space) ends a section; a line like '#12 says' or '#include' doesn't."""
     out, cur = [], None
     for n, line in enumerate(read_lines(path), 1):
         m = re.match(r"^## H-([0-9]+)\b", line)
@@ -834,7 +834,7 @@ def hypotheses(path):
             cur = [int(m.group(1)), n, "open", False]
             out.append(cur)
             continue
-        if line.startswith("#"):
+        if re.match(r"#{1,6}\s", line):
             cur = None
             continue
         s = re.match(r"^\s*[-*]\s+[*_`]*status[*_`]*\s*:(.*)$", line, re.I)
@@ -899,36 +899,57 @@ def diff_path(rest):
     return p if p and rest == "a/%s b/%s" % (p, p) else None
 
 
+def git_run(root, *args):
+    """git's (exit code, stdout as text, stderr), newlines untouched (a carriage return in a path or
+    a line stays one). ConfError when git can't run at all."""
+    try:
+        p = subprocess.run(["git", "-C", root, "-c", "core.quotePath=false"] + list(args), capture_output=True)
+    except OSError as e:
+        raise ConfError("can't run git: %s" % (e.strerror or e))
+    return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+
+
 def git_raw(root, *args):
-    """git's stdout as text, newlines untouched (a carriage return in a path or a line stays one)."""
-    return subprocess.run(["git", "-C", root, "-c", "core.quotePath=false"] + list(args),
-                          capture_output=True).stdout.decode("utf-8", "replace")
+    """git's stdout as text, newlines untouched; ConfError when git fails, so a broken repo is a
+    tooling problem, never a clean tree."""
+    rc, out, err = git_run(root, *args)
+    if rc != 0:
+        raise ConfError("git %s failed: %s" % (args[0], one_line(err)[:300] or "exit %d" % rc))
+    return out
+
+
+DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--no-renames")
 
 
 def diff_first_lines(root, *rev):
-    """{path: first changed line} from one 'git diff -U0' (rev: 'HEAD', '--cached', ...): the new
-    side's start of each file's first hunk, 1 for a change with no hunk (binary, mode, an empty
-    file). Paths are relative to root; the user's diff settings (external tools, textconv,
-    renames, prefixes) can't change the output."""
-    out, cur = {}, None
-    text = git_raw(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
-                   "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", *rev)
+    """{path: first changed line} for one 'git diff' (rev: 'HEAD', '--cached', ...). The paths come
+    from 'git diff --name-only -z', so a file the patch parser can't name still counts (line 1); the
+    line is the new side's start of the file's first hunk in 'git diff -U0', 1 for a change with no
+    hunk (binary, mode, an empty file). Paths are relative to root; the user's diff settings
+    (external tools, textconv, renames, prefixes) can't change the output."""
+    names = [p for p in git_raw(root, "diff", "--name-only", "-z", *(DIFF_OPTS + rev)).split("\0") if p]
+    first, cur = {}, None
+    text = git_raw(root, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", *(DIFF_OPTS + rev))
     for line in text.split("\n"):
         if line.startswith("diff --git "):
             cur = diff_path(line[len("diff --git "):])
-            if cur is not None and cur not in out:
-                out[cur] = 0
-        elif cur is not None and out[cur] == 0 and line.startswith("@@ "):
+            if cur is not None and cur not in first:
+                first[cur] = 0
+        elif cur is not None and first[cur] == 0 and line.startswith("@@ "):
             m = re.match(r"@@ -\S+ \+(\d+)", line)
-            out[cur] = max(int(m.group(1)), 1) if m else 1
-    return {p: n or 1 for p, n in out.items()}
+            first[cur] = max(int(m.group(1)), 1) if m else 1
+    return {p: first.get(p) or 1 for p in names}
 
 
 def changed_lines(root):
     """{path: first changed line} for every uncommitted change, relative to root: the working tree
     and the index against HEAD (a change only staged counts too; the working tree's line wins), and
     new files git doesn't ignore (line 1). In a repo with no commits yet, every staged file counts.
-    Three git processes, however many files changed."""
+    Call it once per run: up to seven git processes, however many files changed. ConfError when git
+    can't read the repo."""
+    rc, _, err = git_run(root, "rev-parse", "--is-inside-work-tree")
+    if rc != 0:
+        raise ConfError("git can't read the repo at %s: %s" % (root, one_line(err)[:300] or "exit %d" % rc))
     got = {}
     if git(root, "rev-parse", "-q", "--verify", "HEAD").strip():
         got.update(diff_first_lines(root, "--cached", "HEAD"))
@@ -939,11 +960,6 @@ def changed_lines(root):
         if p:
             got.setdefault(p, 1)
     return got
-
-
-def first_changed_line(root, path):
-    """The first changed line of one repo-relative path (1 when it has none)."""
-    return changed_lines(root).get(path, 1)
 
 
 def changed_in_scope(root, conf):
