@@ -25,12 +25,14 @@ the check-in).
 
 ## 1. intake
 - The failure goes into `report.md` through the ref: a ticket key, `'#<n>'` for an issue (quoted,
-  or the shell reads a comment), or `-` with the failing test's id, the CI run's URL, and the log
-  on stdin or in a file (`--file=<path>`).
+  or the shell reads a comment), or `-` with the failing test's id and the CI run's URL on stdin or
+  in a file (`--file=<path>`). Not the whole CI log: `report.md` is kept as given, unmasked, and CI
+  logs often print tokens.
 - With a binding (`gh run view <run-id> --log-failed`, or the CI tool the playbook names), fetch
-  the failed job's log through `debug run intake -- ...`, so the log is evidence too. If the
-  binding fails (the tool is missing, you aren't logged in), don't install or log in: the failed
-  run is the record. Ask the human to paste the log, and name the gap in your report.
+  the failed job's log through `debug run intake -- ...`, so the log is evidence and what guard's
+  secret rules match in it is masked. If the binding fails (the tool is missing, you aren't logged
+  in), don't install or log in: the failed run is the record. Ask the human for the log as a file
+  and record it with `debug run intake -- cat <file>`, and name the gap in your report.
 - Pull out, under "As received" or next to it: the test's id exactly as the runner names it, the
   CI job or run, the commit it ran on, and the failure message. Expected is that it passes;
   Actual is how it fails. Anything unclear goes under "Unclear" and to the human
@@ -89,9 +91,12 @@ the check-in).
   out that commit's `.agents/`, or none. For a flaky test, `<test>` runs it several times and fails
   if any run fails, or the bisect lands on noise. `git bisect run` gives up on an exit code of 128
   or more (a crash), so `<test>` turns any failure into 1, and a test that can hang gets its own
-  limit: `timeout -k 5 60 <command>; rc=$?; [ "$rc" -eq 0 ] || exit 1` (`gtimeout` on macOS with
-  Homebrew's coreutils). A limit on the whole `debug run` stops it before `git bisect reset`. If
-  HEAD is ever left mid-bisect (`git status` says so), run `git bisect reset` first.
+  limit:
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -ne 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
+  (`gtimeout` on macOS with Homebrew's coreutils). Exit 127 means `timeout` or the command wasn't
+  found; 255 stops the bisect, where 1 would call every commit bad. A limit on the whole
+  `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect (`git status`
+  says so), run `git bisect reset` first.
 - At the first red commit, check what changed: the test, the code it tests, or neither (a
   dependency, the CI config): `debug run isolate -- git show --stat <commit>`.
 - Order and shared state: run the test alone, then with the tests that ran before it in CI, and

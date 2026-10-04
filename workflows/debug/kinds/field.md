@@ -80,16 +80,18 @@ workflow they're for); what's below is the fallback when none fit, and the rule 
 - Test against the evidence first: does the hypothesis explain every log line in the window, and
   the requests that didn't fail? Then here: a test with the reconstructed input, a smaller case, a
   bisect between the version that worked and the one that didn't.
-- To bisect, with no tracked changes at all (`git status --untracked-files=no` prints nothing),
-  run the whole bisect inside one entry, so HEAD is back on the branch when it ends:
+- To bisect, with no tracked changes at all (`git status --untracked-files=no` prints nothing), run
+  the whole bisect inside one entry, so HEAD is back on the branch when it ends:
   `debug run isolate --timeout=0 -- bash -c 'git bisect start <bad> <good> && git bisect run <test>; rc=$?; git bisect reset; exit $rc'`.
   Keep `<test>` out of the project tree (a script in the session dir works: git ignores it and
   `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
-  out that commit's `.agents/`, or none. `git bisect run` gives up on an exit code of 128 or
-  more (a crash), so `<test>` turns any failure into 1, and one that can hang gets its own limit:
-  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -eq 0 ] || exit 1` (`gtimeout` on macOS with
-  Homebrew's coreutils). A limit on the whole `debug run` stops it before `git bisect reset`. If
-  HEAD is ever left mid-bisect (`git status` says so), run `git bisect reset` first.
+  out that commit's `.agents/`, or none. `git bisect run` gives up on an exit code of 128 or more
+  (a crash), so `<test>` turns any failure into 1, and one that can hang gets its own limit:
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -ne 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
+  (`gtimeout` on macOS with Homebrew's coreutils). Exit 127 means `timeout` or the command wasn't
+  found; 255 stops the bisect, where 1 would call every commit bad. A limit on the whole
+  `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect (`git status`
+  says so), run `git bisect reset` first.
 - Experiments happen here, in this repo, never on the field system. They're fine until
   `root-cause.md` exists; keep track of them so you can revert them. Don't put one in a file that
   already had uncommitted changes. If you must, undo your own lines by hand; never `git checkout`
