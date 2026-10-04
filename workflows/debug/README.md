@@ -234,9 +234,11 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
   on its own: `env 'DB_PASSWORD=[masked]' make test`), the way guard redacts a line it prints:
   `export API_TOKEN=[masked]`. A private key is masked from its `BEGIN` line through its `END`
   line, or from `BEGIN` to `END` when it's on one line (JSON's `\n`), as one secret. The entry then
-  says
-  `masked: <n> possible secrets`, and so does `debug run`. Placeholders guard skips (`${TOKEN}`,
-  `your-key`) stay. With nothing matched, the log is byte for byte what the command wrote.
+  says `masked: <n> possible secrets`, and so does `debug run`. Placeholders guard skips (`${TOKEN}`,
+  `your-key`) stay. With nothing matched, the log is byte for byte what the command wrote. A
+  rule in your `.agents/guard.patterns` that can't be turned into a Python regex (`[[:punct:]]`,
+  say) isn't used for masking, and the entry and `debug run` say so:
+  `not masked: 1 secret rule debug run can't use (<what>)`.
   Customer data (ids, emails) isn't a secret shape: scrub it in the playbook's `gather-evidence`
   binding (`run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub`, run as
   `bash -c 'set -o pipefail; <line>'` so errors are scrubbed and a failed pull isn't exit 0). A
@@ -273,6 +275,8 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
     in it gets through unless the value has a shape guard knows. The output sits unmasked in
     `E-<n>.log` while the command runs, until `debug run` rewrites it; a `debug run` killed before
     then (SIGKILL) leaves it that way until the next `debug run` in that session deletes it.
+  - Like guard, a value after a key name counts as a secret only when it mixes letters and
+    digits, so `DB_PASSWORD=correcthorsebatterystaple` or an all-digit PIN isn't masked.
   - Masking a huge log takes time after the command ends (about 1 second per 12 MB, slower with
     text that isn't ASCII). An agent tool whose own timeout kills `debug run` while it masks
     leaves the raw log (as SIGKILL does, above). `E-<n>.log` has no size cap yet (roadmap row 66).
@@ -312,3 +316,5 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
     `debug-no-repro-attempt`), and always at `debug approve` and `close reviewed`, which refuse on
     any finding.
 - **python3.** The checks and the command need it; a missing python3 is a tooling problem.
+  `debug run` also needs a POSIX system (process groups): on a Python without them (native
+  Windows) it refuses with exit 3, and the checks and the other commands still work.
