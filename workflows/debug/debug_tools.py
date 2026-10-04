@@ -1103,16 +1103,17 @@ def checkin_questions(root, slug):
     return got
 
 
-def finish_plan(root, slug, answer, done):
+def finish_plan(root, slug, answer, done, tool="human"):
     """The session's plan: answer its open check-in questions, and set T1 done when the session is
-    over, or back in progress when it isn't. Credited to the person (AGENTS_TOOL=human). A missing
-    plan changes nothing; a step that fails on a plan that's there is a note on stderr."""
+    over, or back in progress when it isn't. Credited to the person (AGENTS_TOOL=human) by default;
+    tool=None leaves AGENTS_TOOL as the caller set it (debug close, which an agent may run). A
+    missing plan changes nothing; a step that fails on a plan that's there is a note on stderr."""
     plan = os.path.join(".agents", "plans", slug)
     if not os.path.isfile(tasks_path(root)) or not os.path.isdir(os.path.join(root, plan)):
         return
     steps = [("answer", slug, q, answer) for q in checkin_questions(root, slug)]
     for step in steps + [("set", slug, "T1", "done" if done else "doing")]:
-        err = tasks_cli(root, *step, tool="human")
+        err = tasks_cli(root, *step, tool=tool)
         if err:
             print("note: couldn't update the plan %s: %s" % (plan, err), file=sys.stderr)
             return
@@ -1221,6 +1222,45 @@ def cmd_reject(root, words, opts, after):
     finish_plan(root, slug, "rejected: " + why, False)
     print("rejected %s%s: root-cause.md is now root-cause.rejected-%d.md, and the reason is in hypotheses.md"
           % (slug, ap.SIMULATED if sim else "", k))
+    return 0
+
+
+@command("close", "debug close <slug> abandoned|duplicate|reviewed [note...]")
+def cmd_close(root, words, opts, after):
+    """End a session. abandoned or duplicate: no root cause, refused while experiments are in the
+    tree. reviewed: a root cause the agent reviewed, only when DEBUG_ASK lacks rootcause, after the
+    check-in set passes. Not a human step: an agent may run it (debug approve stays the human's)."""
+    if len(words) < 2 or words[1] not in CLOSE_REASONS:
+        return bad("close")
+    reason, note = words[1], one_line(" ".join(words[2:] + (after or [])))
+    conf = load_conf(root)
+    switch = ap.Switch(root)
+    if reason == "reviewed":
+        if "rootcause" in conf["DEBUG_ASK"].split():
+            print("debug: DEBUG_ASK has rootcause, so the human approves this root cause: ask them to run %s "
+                  "approve %s" % (debug_cmd(root), words[0][:64]), file=sys.stderr)
+            return 1
+        session = judged_session(root, conf, switch, words[0], "review")
+        if isinstance(session, int):
+            return session
+        if not checkin(root, session, "closing"):
+            return 1
+    else:
+        session = find_session(root, conf, words[0])
+        why = not_open(root, *session, switch) if session else "not a session here"
+        if why:
+            print("debug: %s is %s" % (words[0][:64], why), file=sys.stderr)
+            return 1
+        left = changed_in_scope(root, conf)
+        if left:
+            print("debug: revert the experiments before closing %s: %s (if they're the human's own work, ask "
+                  "them to commit or stash it)" % (session[0], ", ".join("%s:%d" % x for x in left)), file=sys.stderr)
+            return 1
+    slug, sdir, st = session
+    st.update(status="closed", note=reason + (": " + note if note else ""))
+    write_state(sdir, st)
+    finish_plan(root, slug, "closed: " + st["note"], True, tool=None)
+    print("closed %s (%s)" % (slug, st["note"]))
     return 0
 
 

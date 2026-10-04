@@ -3013,6 +3013,36 @@ except d.ConfError as e:
   "$SMX" run isolate -- true >/dev/null
   t    "...and run still moves the step of an approval that doesn't count" grep -qx 'step: isolate' "$SMS/state"
   cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
+  "$CX" start bug '#13' >/dev/null
+  trc  "close needs a reason it knows"  2 "$CX" close bug-13 fixed
+  printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$C/src/calc.c"
+  out="$("$CX" close bug-13 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "close refuses while experiments are in the tree" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'revert the experiments before closing bug-13: src/calc.c:1'" _ "$out"
+  git -C "$C" checkout -q src/calc.c
+  t    "close abandoned, with a note"   bash -c "'$CX' close bug-13 abandoned 'reporter went quiet' | grep -qxF 'closed bug-13 (abandoned: reporter went quiet)'"
+  t    "...the session is closed"       bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "...and its task is done"        bash -c "'$C/.agents/bin/tasks' list bug-13 | grep -q 'T1.*done'"
+  trc  "closing it again: exit 1"       1 "$CX" close bug-13 duplicate
+  t    "the policy lets an agent close a session" policy "$C" test ".agents/commands/debug close bug-13 duplicate 'see bug-12'"
+  "$CX" start bug '#14' >/dev/null
+  "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null
+  printf '## H-1: add subtracts\n- status: confirmed (E-1)\n' >> "$CS/bug-14/hypotheses.md"
+  rcdoc "$CS/bug-14/root-cause.md" evidence-only
+  out="$(CLAUDECODE=1 "$CX" close bug-14 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "close reviewed: not while DEBUG_ASK has rootcause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  t    "absence: DEBUG_ASK empty, the agent closes a reviewed root cause" bash -c "CLAUDECODE=1 '$CX' close bug-14 reviewed | grep -qxF 'closed bug-14 (reviewed)'"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  # Upgrades: an open session survives a re-install; an install from before a key gets its default.
+  "$CX" start bug '#15' >/dev/null
+  "$HARNESS/install.sh" --team "$C" >/dev/null 2>&1
+  t    "upgrade: an open session survives a re-install" bash -c "'$CX' status | grep -qxF 'session: bug-15 (bug, #15), open'"
+  t    "...and run still captures evidence" bash -c "'$CX' run gather-evidence -- true | grep -qF 'E-1 (gather-evidence, exit 0)'"
+  cp "$C/.agents/harness.conf" "$WORK/debugcli.conf"
+  edit "$C/.agents/harness.conf" '/^DEBUG_/d'
+  t    "upgrade: no DEBUG_* keys, the defaults apply" bash -c "'$CX' status | grep -qxF 'session: bug-15 (bug, #15), open' && '$CX' start bug '#16' | grep -q '^started bug-16 '"
+  t    "...and verify stays quiet"     test "$("$C/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  cp "$WORK/debugcli.conf" "$C/.agents/harness.conf"
 fi
 }
 group grp_debug_cli
