@@ -3171,7 +3171,7 @@ except d.ConfError as e:
   t    "the bug steps have a section per step" bash -c "for s in \$(sed -n 's/^steps: //p' '$DK'); do grep -q \"^## [0-9]\\. \$s\$\" '$DK' || exit 1; done"
   t    "the seeded playbook has a section per bindable step" bash -c "b=\$(sed -n 's/^bindable: //p' '$DK'); test -n \"\$b\" && for s in \$b; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
   t    "harness-tailor drafts the playbook" grep -qF '.agents/debug/playbook.md' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
-  t    "...and adds the AGENTS.md line" grep -qF 'Investigating a bug report: use the `debug` skill.' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
+  t    "...and adds the AGENTS.md line" grep -qF 'Investigating a bug report, a failing test, a crash, or a production issue: use the `debug` skill.' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
   # The skill's bisect runs whole inside one debug run: HEAD is back on the branch when it records.
   BI=$(repo debugbisect); mkdir -p "$BI/src"
   "$HARNESS/install.sh" --team --workflow debug "$BI" >/dev/null 2>&1
@@ -3921,6 +3921,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$(printf 'Old install\n' | "$QX" start test - 2>&1)" && rc=0 || rc=$?
   t    "...which refuses debug start test with the usual message (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF \"debug: the test workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: bug)\"" _ "$out"
   t    "...and starts bug as before"     bash -c "printf 'Old install bug\n' | '$QX' start bug - | grep -q '^started bug-old-install-bug '"
+  echo "debug: the skill and harness-tailor know all four"
+  DS="$Q/.agents/skills/debug/SKILL.md"; HT="$Q/.agents/builtin/skills/harness-tailor/SKILL.md"
+  t    "the skill's description names each kind" grep -q '^description: Investigates a bug report, a failing test or CI run, a crash or hang, or a field or production issue' "$DS"
+  t    "...and so does AGENTS.md's skills index" grep -q '^- `debug`: Investigates a bug report, a failing test or CI run, a crash or hang' "$Q/AGENTS.md"
+  t    "the skill says which kind to start" bash -c "grep -qF '.agents/commands/debug start <kind> <ref>' '$DS' && for k in bug test crash field; do grep -qF \"\\\`\$k\\\` (\" '$DS' || exit 1; done"
+  t    "the skill explains masked output" grep -qF '`[masked]`' "$DS"
+  t    "harness-tailor looks for the CI CLI" grep -qF 'gh run view <run-id> --log-failed' "$HT"
+  t    "...debuggers, thread dumps, and sanitizer builds" bash -c "grep -qF 'lldb --batch' '$HT' && grep -qF 'py-spy dump --pid <pid>' '$HT' && grep -qF 'ASan+UBSan' '$HT'"
+  t    "...log pulls through the repo's scrubber" grep -qF 'run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub' "$HT"
+  t    "...and its AGENTS.md line names all four" grep -qF 'Investigating a bug report, a failing test, a crash, or a production issue: use the `debug` skill.' "$HT"
 fi
 }
 group grp_debug_kinds
