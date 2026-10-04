@@ -3157,25 +3157,43 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "a root cause in the fixed format passes" test "$("$KV" 2>&1)" = "ok verify turn"
   edit "$KR" '/^## Ruled out/d'
   t    "a missing heading"              hasl "$("$KV" 2>&1)" ".agents/debug/sessions/bug-6/root-cause.md:1: error: [debug-format] root-cause.md has no '## Ruled out' section"
-  trc  "the edit tier checks an edited root cause" 1 "$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md
+  out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md 2>&1)" && rc=0 || rc=$?
+  t    "the edit tier checks an edited root cause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-format]'" _ "$out"
   trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
   rcdoc "$KR" confirmed
   t    "Confidence must be what the attempts support" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" 'Confidence:'): error: [debug-format] Confidence: confirmed, but the recorded attempts support reproduced"
   "$KX" run isolate --attempt=confirm -- false >/dev/null || true; "$KX" outcome E-2 reproduced >/dev/null
   t    "confirmed: a confirmation attempt reproduced it" test "$("$KV" 2>&1)" = "ok verify turn"
+  echo "confirm_after: 2" >> "$KS/state"
+  out="$("$KV" 2>&1 || true)"
+  t    "a confirmation for a rejected root cause doesn't confirm (confirm_after)" hasl "$out" "Confidence: confirmed, but the recorded attempts support reproduced"
+  t    "...and the fix says why"        hasl "$out" "(confirmation attempts up to E-2 were for a rejected root cause and don't count)"
+  edit "$KS/state" '/^confirm_after:/d'
   "$KX" outcome E-2 not-reproduced >/dev/null; "$KX" outcome E-1 partial >/dev/null
   rcdoc "$KR" reproduced
   t    "a partial reproduction is evidence-only" hasl "$("$KV" 2>&1)" "Confidence: reproduced, but the recorded attempts support evidence-only"
+  edit "$KR" 's/^Confidence:.*/Confidence:/'
+  t    "an empty Confidence line"       hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" 'Confidence:'): error: [debug-format] Confidence: (empty), but the recorded attempts support evidence-only"
   edit "$KR" '/^Confidence:/d'
-  t    "no Confidence line"             hasl "$("$KV" 2>&1)" "[debug-format] no 'Confidence:' line under ## Reproduction"
+  t    "no Confidence line, at the Reproduction heading" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" '## Reproduction'): error: [debug-format] no 'Confidence:' line under ## Reproduction"
   trc  "approve refuses on it"          1 "$KX" approve bug-6
   rcdoc "$KR" evidence-only
   t    "evidence-only: no attempt reproduced it" test "$("$KV" 2>&1)" = "ok verify turn"
-  printf '# Root cause\n\n##  Summary ##\nx\n\n## Cause\n## Evidence\n## Reproduction\n### Steps\n- **Confidence:** `Evidence-only`\n\n## Ruled Out\n## Fix Direction\n' > "$KR"
-  t    "agent formatting: heading case, closing hashes, a bold list-item Confidence line" test "$("$KV" 2>&1)" = "ok verify turn"
-  printf '# Root cause\n\n## Reproduction\n```\n## Summary\nConfidence: confirmed\n```\nConfidence: evidence-only\n' > "$KR"
-  t    "several missing headings are one finding (a fenced block doesn't count)" hasl "$("$KV" 2>&1)" "root-cause.md:1: error: [debug-format] root-cause.md has no '## Summary', '## Cause', '## Evidence', '## Ruled out', '## Fix direction' sections"
-  t    "...and the fenced Confidence line isn't the one judged" bash -c "! printf '%s' \"\$1\" | grep -qF 'Confidence: confirmed'" _ "$("$KV" 2>&1)"
+  awk '{ print } /^## Summary$/ { print "**Confidence:** confirmed" }' "$KR" > "$KR.tmp" && mv "$KR.tmp" "$KR"
+  t    "every Confidence line is judged: an overclaim under Summary" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" '**Confidence:** confirmed'): error: [debug-format] a second Confidence line (Confidence: confirmed); keep one, under ## Reproduction"
+  rcdoc "$KR" evidence-only; { printf '\357\273\277'; tail -n +3 "$KR"; } > "$KR.tmp" && mv "$KR.tmp" "$KR"
+  t    "a byte-order mark doesn't hide a line-1 heading" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '# Root cause\n\n##  Summary ##\nx\n```a` b, not a fence\n\n## Cause\n   ## Evidence:\n## Reproduction\n### Steps\n- **Confidence:** `Evidence-only`\n\n## Ruled Out\n## Fix Direction\n' > "$KR"
+  t    "agent formatting: heading case, spacing, colons, closing hashes, a bold list-item Confidence line" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '# Root cause\n\n## Reproduction\n```\n## Summary\nConfidence: confirmed\n```\nConfidence: evidence-only\n## Cause\n' > "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "several missing headings are one finding (a fenced block doesn't count)" hasl "$out" "root-cause.md:1: error: [debug-format] root-cause.md has no '## Summary', '## Evidence', '## Ruled out', '## Fix direction' sections"
+  t    "...the Confidence line after the fence is found" bash -c "! printf '%s' \"\$1\" | grep -qF \"no 'Confidence:' line\"" _ "$out"
+  t    "...and the fenced one isn't judged" bash -c "! printf '%s' \"\$1\" | grep -qF 'Confidence: confirmed'" _ "$out"
+  printf '# Root cause\n\n## Summary\nx\n```sh\n``` not a close\n~~~\n## Cause\n## Evidence\n## Reproduction\nConfidence: evidence-only\n## Ruled out\n## Fix direction\n' > "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "a fence that never closes is named on the heading finding" hasl "$out" "root-cause.md has no '## Cause', '## Evidence', '## Reproduction', '## Ruled out', '## Fix direction' sections (the fence at line 5 never closes, so the rest of the file is code)"
+  t    "...and on the Confidence finding" hasl "$out" "no 'Confidence:' line under ## Reproduction (the fence at line 5 never closes, so the rest of the file is code)"
 fi
 }
 group grp_debug_checks

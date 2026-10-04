@@ -127,7 +127,7 @@ def git(root, *args):
 
 def read_lines(path):
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
             return fh.read().splitlines()
     except OSError:
         return []
@@ -449,68 +449,91 @@ def no_repro_attempt(ctx):
 
 
 def heading(line):
-    """The text of a level 1 or 2 markdown heading ('## Ruled out  ##' -> 'Ruled out'), with its
-    level, as (level, text); None for any other line ('###', '#12 says', '##Cause')."""
-    m = re.match(r"^(#{1,2})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$", line)
-    return (len(m.group(1)), m.group(2)) if m else None
+    """A level 1 or 2 markdown heading as (level, name), the name normalized for matching: spaces
+    collapsed, a trailing colon and closing hashes dropped, lowercased ('  ## Ruled  Out: ##' ->
+    'ruled out'). None for any other line ('###', '#12 says', '##Cause')."""
+    m = re.match(r"^ {0,3}(#{1,2})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$", line)
+    return (len(m.group(1)), " ".join(m.group(2).split()).rstrip(":").lower()) if m else None
 
 
 CONF_LINE = re.compile(r"^\s*(?:[-*+]\s+)?[*_`]*confidence[*_`]*\s*:[\s*_`]*([A-Za-z-]*)", re.I)
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
 def root_cause(path):
-    """({heading: line no}, (line no, value) of the first 'Confidence:' line under ## Reproduction,
-    or None). Headings are the '## ' ones, matched by name in any case, so '## Ruled Out' is
-    '## Ruled out'; a '# ' heading ends a section, '###' and deeper stay inside it. The Confidence
-    line may be a list item or have *, _ or backticks around its parts ('**Confidence:** `reproduced`');
-    the value is lowercased. Lines inside ``` or ~~~ fences are skipped."""
-    heads, conf, sec, fence = {}, None, None, None
+    """(headings, the required Confidence line, the other Confidence lines, open fence) for
+    root-cause.md: {name: line no} of its '## ' headings (names as heading() gives them); (line
+    no, value) of the first 'Confidence:' line under ## Reproduction, or None; [(line no, value)]
+    of every other one, in any section; the line of a fence still open at the end, or 0. A '# '
+    heading ends a section, '###' and deeper stay inside it. A Confidence line may be a list item
+    or have *, _ or backticks around its parts ('**Confidence:** `reproduced`'); values are
+    lowercased. Lines inside ``` or ~~~ fences are skipped: a backtick opener whose info string
+    has a backtick isn't a fence, and a fence closes only on a bare run of its own character at
+    least as long as the opener."""
+    heads, conf, others, sec, fence, at = {}, None, [], None, None, 0
     for n, line in enumerate(read_lines(path), 1):
-        f = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
-        if f and (fence is None or f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence)):
-            fence = f.group(1) if fence is None else None
-            continue
-        if fence is not None:
+        f = FENCE.match(line)
+        if fence is None:
+            if f and not (f.group(1)[0] == "`" and "`" in f.group(2)):
+                fence, at = f.group(1), n
+                continue
+        else:
+            if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
+                fence, at = None, 0
             continue
         h = heading(line)
         if h:
-            sec = h[1].lower() if h[0] == 2 else None
+            sec = h[1] if h[0] == 2 else None
             if sec is not None:
                 heads.setdefault(sec, n)
             continue
-        m = CONF_LINE.match(line) if sec == "reproduction" else None
-        if m and conf is None:
-            conf = (n, m.group(1).lower())
-    return heads, conf
+        m = CONF_LINE.match(line)
+        if m:
+            if sec == "reproduction" and conf is None:
+                conf = (n, m.group(1).lower())
+            else:
+                others.append((n, m.group(1).lower()))
+    return heads, conf, others, at
 
 
 @check
 def rc_format(ctx):
     """debug-format (edit when root-cause.md is edited, turn, full, check-in): a fixed heading is
-    missing (one finding names them all), or the Confidence: line under ## Reproduction is missing
-    or isn't what the recorded attempts support (confidence(), which honors confirm_after)."""
+    missing (one finding names them all), the Confidence: line under ## Reproduction is missing
+    or isn't what the recorded attempts support (confidence(), which honors confirm_after), or
+    another Confidence line anywhere says something else."""
     rc = ctx.path("root-cause.md") if ctx.slug else ""
     if not rc or not ctx.judged(rc):
         return []
-    heads, stated = root_cause(rc)
+    heads, stated, others, fence = root_cause(rc)
     rel, out = shown(ctx.root, rc), []
+    code = " (the fence at line %d never closes, so the rest of the file is code)" % fence if fence else ""
     missing = [h for h in HEADINGS if h.lower() not in heads]
     if missing:
-        out.append(finding(rel, 1, "debug-format", "root-cause.md has no %s section%s"
-                           % (", ".join("'## %s'" % h for h in missing), "s" if len(missing) > 1 else ""),
+        out.append(finding(rel, 1, "debug-format", "root-cause.md has no %s section%s%s"
+                           % (", ".join("'## %s'" % h for h in missing), "s" if len(missing) > 1 else "", code),
                            "use the fixed headings, in order: %s" % ", ".join("## " + x for x in HEADINGS)))
     want = confidence(evidence(ctx.sdir), ctx.state)
+    after = confirm_after(ctx.state)
     if stated is None:
         out.append(finding(rel, heads.get("reproduction", 1), "debug-format",
-                           "no 'Confidence:' line under ## Reproduction",
+                           "no 'Confidence:' line under ## Reproduction%s" % code,
                            "add 'Confidence: %s', what the recorded attempts support" % want))
     elif stated[1] != want:
         out.append(finding(rel, stated[0], "debug-format",
                            "Confidence: %s, but the recorded attempts support %s" % (stated[1][:40] or "(empty)", want),
                            "confirmed needs a confirmation attempt that reproduced the bug through the cause "
-                           "(%s run isolate --attempt=confirm -- ...), reproduced needs a reproduction "
+                           "(%s run isolate --attempt=confirm -- ...)%s, reproduced needs a reproduction "
                            "attempt that reproduced it, anything else is evidence-only. Say what the attempts "
-                           "show, or record the attempt" % debug_cmd(ctx.root)))
+                           "show, or record the attempt"
+                           % (debug_cmd(ctx.root), " (confirmation attempts up to E-%d were for a rejected root "
+                              "cause and don't count)" % after if after else "")))
+    for n, v in [o for o in others if o[1] != want][:3]:   # with the two above, at most 5 per run
+        out.append(finding(rel, n, "debug-format",
+                           "a second Confidence line (Confidence: %s); keep one, under ## Reproduction"
+                           % (v[:40] or "(empty)"),
+                           "drop this line; the one under ## Reproduction says what the recorded attempts "
+                           "support (%s)" % want))
     return out
 
 
