@@ -2618,6 +2618,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "absence: no gated pack, no record and no switch" bash -c "! ls '$Z'/.git/ai-harness/*-approvals >/dev/null 2>&1 && test ! -e '$Z/.git/ai-harness/simulated-human'"
   tnot "absence: the install summary says nothing about it" bash -c "'$HARNESS/install.sh' --team '$Z' 2>&1 | grep -q 'simulated human'"
   tnot "absence: no debug skill without --workflow debug" test -e "$Z/.agents/skills/debug"
+  tnot "...and none in AGENTS.md"       grep -q '^- `debug`: ' "$Z/AGENTS.md"
 fi
 }
 group grp_approvals
@@ -2947,6 +2948,8 @@ except d.ConfError as e:
   t    "...its check-in task is back in progress" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
   t    "...the check-in question answered, credited to the person" bash -c "! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12' && grep -q 'human: answered Q1: rejected: the caller' '$C/.agents/plans/bug-12/progress.log'"
   t    "...another question on T1 stays open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
+  out="$(cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-12' 2>&1)" && rc=0 || rc=$?
+  t    "a re-ask without --force after a reject is refused as already answered (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -q '^already answered '" _ "$out"
   trc  "the agent re-asks for the check-in (--force): recorded" 0 bash -c "cd '$C' && .agents/bin/tasks ask bug-12 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-12'"
   rcdoc "$CS/bug-12/root-cause.md" reproduced
   t    "a second reject sets it aside as rejected-2" bash -c "'$CX' reject bug-12 still the wrong operands | grep -qF 'root-cause.md is now root-cause.rejected-2.md' && test -f '$CS/bug-12/root-cause.rejected-1.md' && test -f '$CS/bug-12/root-cause.rejected-2.md'"
@@ -3109,13 +3112,29 @@ except d.ConfError as e:
   cp "$WORK/debugcli.conf" "$C/.agents/harness.conf"
   "$CX" close bug-15 abandoned >/dev/null; "$CX" close bug-16 abandoned >/dev/null
   echo "debug: skill, steps, and playbook"
-  t    "the debug skill is installed"   test -f "$C/.agents/skills/debug/SKILL.md"
+  DS="$C/.agents/skills/debug/SKILL.md"; DK="$C/.agents/builtin/workflows/debug/kinds/bug.md"
+  t    "the debug skill is installed"   test -f "$DS"
   t    "...and listed in AGENTS.md"     grep -q '^- `debug`: ' "$C/AGENTS.md"
-  t    "the skill names the check-in command" grep -qF '.agents/commands/debug approve <slug>' "$C/.agents/skills/debug/SKILL.md"
-  t    "...and asks for it with --force, so a re-ask after a reject is recorded" grep -qF "tasks ask <slug> T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve <slug>'" "$C/.agents/skills/debug/SKILL.md"
-  t    "the bug steps have a section per step" bash -c "for s in intake reproduce gather-evidence hypothesize isolate root-cause check-in; do grep -q \"^## [0-9]\\. \$s\$\" '$C/.agents/builtin/workflows/debug/kinds/bug.md' || exit 1; done"
-  t    "the seeded playbook has a section per bindable step" bash -c "for s in intake reproduce gather-evidence isolate; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
+  t    "the skill asks for the check-in with --force, so a re-ask after a reject is recorded" grep -qF "tasks ask <slug> T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve <slug>'" "$DS"
+  trc  "...and that ask passes the policy" 0 policy "$C" test ".agents/bin/tasks ask bug-1 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  t    "the bug steps have a section per step" bash -c "for s in \$(sed -n 's/^steps: //p' '$DK'); do grep -q \"^## [0-9]\\. \$s\$\" '$DK' || exit 1; done"
+  t    "the seeded playbook has a section per bindable step" bash -c "b=\$(sed -n 's/^bindable: //p' '$DK'); test -n \"\$b\" && for s in \$b; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
   t    "harness-tailor drafts the playbook" grep -qF '.agents/debug/playbook.md' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
+  t    "...and adds the AGENTS.md line" grep -qF 'Investigating a bug report: use the `debug` skill.' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
+  # The skill's bisect runs whole inside one debug run: HEAD is back on the branch when it records.
+  BI=$(repo debugbisect); mkdir -p "$BI/src"
+  "$HARNESS/install.sh" --team --workflow debug "$BI" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$BI/.agents/checks/$tier.sh"; done
+  commit "$BI" harness
+  printf 'int add(int a, int b) { return a + b; }\n' > "$BI/src/calc.c"; commit "$BI" good
+  printf '/* add */\n' >> "$BI/src/calc.c"; commit "$BI" comment
+  edit "$BI/src/calc.c" 's/a + b/a - b/'; commit "$BI" bad
+  BB="$(git -C "$BI" symbolic-ref --short HEAD)"
+  (cd "$BI" && .agents/commands/debug start bug '#3' >/dev/null)
+  out="$(cd "$BI" && .agents/commands/debug run isolate -- bash -c 'git bisect start HEAD HEAD~2 && git bisect run grep -q "a + b" src/calc.c; rc=$?; git bisect reset; exit $rc' 2>&1)" && rc=0 || rc=$?
+  t    "a bisect inside debug run: recorded as one entry, exit 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q '^E-1 (isolate, exit 0)' && grep -q 'is the first bad commit' '$BI/.agents/debug/sessions/bug-3/evidence/E-1.log'" _ "$out"
+  t    "...HEAD is back on the branch"  test "$(git -C "$BI" symbolic-ref --short HEAD 2>/dev/null)" = "$BB"
+  t    "...and the session is still current" bash -c "cd '$BI' && .agents/commands/debug status | grep -qxF 'session: bug-3 (bug, #3), open'"
 fi
 }
 group grp_debug_cli

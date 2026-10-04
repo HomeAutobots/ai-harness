@@ -745,7 +745,10 @@ def undo(p, origin):
     """How to revert one experiment, by changed_lines()'s origin. checkout HEAD, not the index, so a
     staged change is undone too."""
     q = shlex.quote(p)
-    if origin in ("head", "deleted"):
+    if origin == "head":
+        return "restore it with git checkout HEAD -- %s (if it also holds the human's uncommitted work, " \
+               "undo only your own lines, by hand)" % q
+    if origin == "deleted":
         return "restore it with git checkout HEAD -- %s" % q
     if origin == "staged":
         return "unstage it with git rm -q --cached -- %s, then delete the file" % q
