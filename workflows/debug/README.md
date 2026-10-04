@@ -232,4 +232,10 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
     `git checkout HEAD -- <path>` as its fix, which fails. Finish or abort the merge first.
   - `confirm_after` sits in `state`, which the agent can edit. That's accepted: the outcomes it
     judges are agent-recorded too.
+  - The stop gate runs `verify` only when a turn changed the project's tree. Session files are
+    gitignored (and all of `.agents/` is hidden in local mode), so a turn that only writes them,
+    with its experiments reverted, stops without a `verify` run and without the "Paused for your
+    input" note for the check-in. `debug-format`, `debug-evidence-missing`, and
+    `debug-no-repro-attempt` then run when the agent runs `verify`, and always at `debug approve`
+    and `close reviewed`, which refuse on any finding.
 - **python3.** The checks and the command need it; a missing python3 is a tooling problem.

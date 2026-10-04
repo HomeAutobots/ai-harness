@@ -10,7 +10,7 @@ trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
-unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK   # the debug pack reads these from the environment too
+unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK   # hygiene: the debug pack reads them from harness.conf only (tested)
 # shellcheck disable=SC2046  # one name per word
 unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT $(compgen -v PY_ || true)   # the python stack reads these; an activated venv mustn't decide its tests
 
@@ -3081,10 +3081,12 @@ except d.ConfError as e:
   rcdoc "$CS/bug-14/root-cause.md" evidence-only
   (cd "$C" && .agents/bin/tasks ask bug-14 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-14' >/dev/null)
   out="$(CLAUDECODE=1 "$CX" close bug-14 abandoned 2>&1)" && rc=0 || rc=$?
-  t    "the agent can't close a root cause that waits on the human (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF 'debug: closing a session whose root cause waits on you is the human'" _ "$out"
+  t    "the agent can't close a root cause that waits on the human (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF 'debug: closing a session whose root cause waits on the human is the human'" _ "$out"
   t    "...the session stays open, its check-in question too" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open' && '$C/.agents/bin/tasks' questions --open --plan=bug-14 | grep -q 'debug approve bug-14'"
   out="$(CLAUDECODE=1 "$CX" close bug-14 reviewed 2>&1)" && rc=0 || rc=$?
   t    "close reviewed: not while DEBUG_ASK has rootcause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
+  out="$(env DEBUG_ASK= CLAUDECODE=1 "$CX" close bug-14 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "...an empty DEBUG_ASK in the environment changes nothing (harness.conf only)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
   edit "$CS/bug-14/state" 's/^status: open$/status: closed/'; printf 'note: reviewed\n' >> "$CS/bug-14/state"
   t    "a state file that says closed closes nothing" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open'"
   edit "$CS/bug-14/state" 's/^status: closed$/status: open/'; edit "$CS/bug-14/state" '/^note: /d'
@@ -3099,13 +3101,13 @@ except d.ConfError as e:
   mv "$CS/bug-20/root-cause.md" "$WORK/debugcli.rc20"
   CLAUDECODE=1 "$CX" close bug-20 abandoned >/dev/null
   mv "$WORK/debugcli.rc20" "$CS/bug-20/root-cause.md"
-  t    "an agent's close made with root-cause.md set aside doesn't count once it's back" bash -c "'$CX' status bug-20 | grep -qxF 'session: bug-20 (bug, #20), open, closed by an agent but its root cause waits on you'"
+  t    "an agent's close made with root-cause.md set aside doesn't count once it's back" bash -c "'$CX' status bug-20 | grep -qxF 'session: bug-20 (bug, #20), open, closed by an agent but its root cause waits on the human'"
   "$CX" close bug-20 abandoned >/dev/null
   "$CX" start bug '#21' >/dev/null; rcdoc "$CS/bug-21/root-cause.md" evidence-only
   edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
   CLAUDECODE=1 "$CX" close bug-21 abandoned >/dev/null
   edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
-  t    "...nor one made while DEBUG_ASK was empty, once rootcause is back" bash -c "'$CX' status bug-21 | grep -qxF 'session: bug-21 (bug, #21), open, closed by an agent but its root cause waits on you'"
+  t    "...nor one made while DEBUG_ASK was empty, once rootcause is back" bash -c "'$CX' status bug-21 | grep -qxF 'session: bug-21 (bug, #21), open, closed by an agent but its root cause waits on the human'"
   "$CX" close bug-21 abandoned >/dev/null
   "$CX" start bug '#17' >/dev/null; rcdoc "$CS/bug-17/root-cause.md" evidence-only; "$CX" reject bug-17 wrong operands >/dev/null
   trc  "the agent can't close a rejected root cause either (2)" 2 env CLAUDECODE=1 "$CX" close bug-17 abandoned
@@ -3119,7 +3121,7 @@ except d.ConfError as e:
   t    "absence: DEBUG_ASK empty, the agent closes a rejected root cause" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qxF 'closed bug-22 (abandoned)'" _ "$out"
   t    "...and that close counts"       bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), closed (abandoned), root cause rejected' && tail -1 '$CS/bug-22/approvals' | grep -q '^close-agent	bug-22 '"
   edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
-  t    "...until rootcause is back in DEBUG_ASK: then it waits on the human again" bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), open, closed by an agent but its root cause waits on you, root cause rejected'"
+  t    "...until rootcause is back in DEBUG_ASK: then it waits on the human again" bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), open, closed by an agent but its root cause waits on the human, root cause rejected'"
   trc  "...and the agent's close is refused again (2)" 2 env CLAUDECODE=1 "$CX" close bug-22 abandoned
   "$CX" close bug-22 abandoned >/dev/null
   "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only
@@ -3355,6 +3357,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "approve refuses on it"          bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/probe.c:1: error: [debug-experiments-left]'" _ "$out"
   tnot "...recording nothing"           test -e "$KS/approvals"
   t    "the full tier checks it too"    hasl "$("$KV" --tier=full 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
+  t    "an empty DEBUG_SCOPE in the environment changes nothing (harness.conf only)" hasl "$(env DEBUG_SCOPE= "$KV" --no-cache 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
   trc  "...the edit tier doesn't"       0 "$K/.agents/bin/check" src/probe.c
   edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
   out="$(CLAUDECODE=1 "$KX" close bug-7 reviewed 2>&1)" && rc=0 || rc=$?

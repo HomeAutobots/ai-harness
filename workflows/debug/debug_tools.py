@@ -367,7 +367,7 @@ def void_close(conf, close, sdir, v):
     if reviewed_void(conf, close):
         return "closed as reviewed but DEBUG_ASK has rootcause"
     if agent_close_void(conf, close, sdir, v):
-        return "closed by an agent but its root cause waits on you"
+        return "closed by an agent but its root cause waits on the human"
     return ""
 
 
@@ -2179,7 +2179,7 @@ def cmd_close(root, words, opts, after):
             return got
     else:
         waits = waits_on_human(conf, sdir, verdict(root, slug, sdir, switch))
-        if waits and ap.refused("debug", "closing a session whose root cause waits on you", switch):
+        if waits and ap.refused("debug", "closing a session whose root cause waits on the human", switch):
             return 2
         left = changed_in_scope(root, conf)
         if left:
