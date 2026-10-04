@@ -495,6 +495,14 @@ printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/lib/feedback.sh"\nagents_st
 commit "$SR" "tier"; echo x >> "$SR/README.md"
 out="$(cd "$SR" && .agents/bin/verify --no-cache 2>&1)" && rc=0 || rc=$?
 t    "verify: a tier step that exits 2 is FAIL (1), not BLOCK" bash -c "test '$rc' = 1 && printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify turn'" _ "$out"
+echo "agents_lint: an empty baseline hides nothing"
+printf '#!/bin/sh\necho "src/a.py:3:1: error: bad thing [X1]"\nexit 1\n' > "$AS/lintone"; chmod +x "$AS/lintone"
+alint(){ local rc=0; (cd "$SR" && AGENTS_ROOT="$SR" bash -c '. .agents/lib/feedback.sh; agents_lint demo "$1"' _ "$AS/lintone") >"$AS/out" 2>&1 || rc=$?; printf '%s' "$rc"; }
+mkdir -p "$SR/.agents/baselines"; : > "$SR/.agents/baselines/demo.txt"
+t    "agents_lint: an empty baseline still reports a new finding (1)" bash -c "test '$(alint)' = 1 && grep -qx 'src/a.py:3:1: error: bad thing \[X1\]' '$AS/out'"
+(cd "$SR" && AGENTS_ROOT="$SR" AGENTS_UPDATE_BASELINE=1 bash -c '. .agents/lib/feedback.sh; agents_lint demo "$1"' _ "$AS/lintone") >/dev/null 2>&1
+t    "...and once baselined, it passes" test "$(alint)" = 0
+rm -rf "$SR/.agents/baselines"
 }
 group grp_hook_gaps
 
