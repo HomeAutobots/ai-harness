@@ -629,20 +629,46 @@ def evidence_missing(ctx):
     return out
 
 
+EXPERIMENT = {"head": "", "deleted": ": the file is deleted", "staged": ": a new file, staged",
+              "untracked": ": a new file"}
+
+
+def undo(p, origin):
+    """How to revert one experiment, by changed_lines()'s origin. checkout HEAD, not the index, so a
+    staged change is undone too."""
+    q = shlex.quote(p)
+    if origin in ("head", "deleted"):
+        return "restore it with git checkout HEAD -- %s" % q
+    if origin == "staged":
+        return "unstage it with git rm -q --cached -- %s, then delete the file" % q
+    return "delete the file"
+
+
 @check
 def experiments_left(ctx):
     """debug-experiments-left (check-in; turn and full once root-cause.md exists): uncommitted changes
     to files in DEBUG_SCOPE, outside .agents/ and DEBUG_DIR (changed_in_scope()), one finding per file
-    at its first changed line. Experiments end when the root cause is written."""
+    at its first changed line, saying how to revert it. Past 5 files, the fifth finding names the rest.
+    Experiments end when the root cause is written."""
     if not ctx.slug or ctx.tier == "edit" or not os.path.isfile(ctx.path("root-cause.md")):
         return []
-    return [finding(p, n, "debug-experiments-left",
-                    "an uncommitted change in DEBUG_SCOPE (%s) while %s's root-cause.md exists"
-                    % (ctx.conf["DEBUG_SCOPE"], ctx.slug),
-                    "experiments end when the root cause is written: revert this one (git checkout -- %s, or "
-                    "delete the file if it's new) and say what it showed in root-cause.md. If it's the human's "
-                    "own work, ask them to commit or stash it (git stash -u) before the check-in" % p)
-            for p, n in changed_in_scope(ctx.root, ctx.conf)]
+    left, kind, scope = changed_in_scope(ctx.root, ctx.conf), "debug-experiments-left", ctx.conf["DEBUG_SCOPE"]
+    human = ("If it's the human's own work, ask them to commit it or stash it (git stash -u) before the "
+             "check-in")
+    out = [finding(p, n, kind, "an uncommitted change in DEBUG_SCOPE (%s) while %s's root-cause.md exists%s"
+                   % (scope, ctx.slug, EXPERIMENT[o]),
+                   "experiments end when the root cause is written: %s, and say what it showed in "
+                   "root-cause.md. %s" % (undo(p, o), human))
+           for p, n, o in (left[:4] if len(left) > 5 else left)]
+    if len(left) > 5:
+        rest = left[4:]
+        out.append(finding(rest[0][0], rest[0][1], kind, "%d more files have uncommitted changes in DEBUG_SCOPE "
+                           "(%s): %s%s" % (len(rest), scope, ", ".join("%s:%d" % x[:2] for x in rest[:8]),
+                                           ", ..." if len(rest) > 8 else ""),
+                           "revert each like the ones above (git checkout HEAD -- <path> for a file HEAD has; "
+                           "git rm -q --cached -- <path> and then delete it for a new staged file; delete a new "
+                           "untracked one; %s status lists them all). %s" % (debug_cmd(ctx.root), human)))
+    return out
 
 
 # ------------------------------------------------------------------ the debug command
@@ -1225,12 +1251,14 @@ DIFF_OPTS = ("--no-color", "--no-ext-diff", "--no-textconv", "--relative", "--no
 
 
 def diff_first_lines(root, *rev):
-    """{path: first changed line} for one 'git diff' (rev: 'HEAD', '--cached', ...). The paths come
-    from 'git diff --name-only -z', so a file the patch parser can't name still counts (line 1); the
-    line is the new side's start of the file's first hunk in 'git diff -U0', 1 for a change with no
-    hunk (binary, mode, an empty file). Paths are relative to root; the user's diff settings
-    (external tools, textconv, renames, prefixes) can't change the output."""
-    names = [p for p in git_raw(root, "diff", "--name-only", "-z", *(DIFF_OPTS + rev)).split("\0") if p]
+    """{path: (first changed line, status letter)} for one 'git diff' (rev: 'HEAD', '--cached', ...).
+    The paths and their status (A added, D deleted, M, T, ...) come from 'git diff --name-status -z',
+    so a file the patch parser can't name still counts (line 1); the line is the new side's start of
+    the file's first hunk in 'git diff -U0', 1 for a change with no hunk (binary, mode, an empty or
+    deleted file). Paths are relative to root; the user's diff settings (external tools, textconv,
+    renames, prefixes) can't change the output."""
+    raw = git_raw(root, "diff", "--name-status", "-z", *(DIFF_OPTS + rev)).split("\0")
+    names = [(p, s[:1]) for s, p in zip(raw[0::2], raw[1::2]) if p]
     first, cur = {}, None
     text = git_raw(root, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", *(DIFF_OPTS + rev))
     for line in text.split("\n"):
@@ -1241,40 +1269,56 @@ def diff_first_lines(root, *rev):
         elif cur is not None and first[cur] == 0 and line.startswith("@@ "):
             m = re.match(r"@@ -\S+ \+(\d+)", line)
             first[cur] = max(int(m.group(1)), 1) if m else 1
-    return {p: first.get(p) or 1 for p in names}
+    return {p: (first.get(p) or 1, s) for p, s in names}
 
 
 def changed_lines(root):
-    """{path: first changed line} for every uncommitted change, relative to root: the working tree
-    and the index against HEAD (a change only staged counts too; the working tree's line wins), and
-    new files git doesn't ignore (line 1). In a repo with no commits yet, every staged file counts.
-    Call it once per run: up to seven git processes, however many files changed. ConfError when git
-    can't read the repo."""
+    """{path: (first changed line, origin)} for every uncommitted change, relative to root: the working
+    tree and the index against HEAD (a change only staged counts too; the working tree's line wins),
+    and new files git doesn't ignore (line 1). In a repo with no commits yet, every staged file counts.
+    origin says how to undo it: 'head' (HEAD has the file), 'deleted' (HEAD has it, the working tree
+    doesn't), 'staged' (a new file in the index), 'untracked' (a new file git doesn't know). Call it
+    once per run: up to seven git processes, however many files changed. ConfError when git can't read
+    the repo."""
     rc, _, err = git_run(root, "rev-parse", "--is-inside-work-tree")
     if rc != 0:
         raise ConfError("git can't read the repo at %s: %s" % (root, one_line(err)[:300] or "exit %d" % rc))
-    got = {}
-    if git(root, "rev-parse", "-q", "--verify", "HEAD").strip():
-        got.update(diff_first_lines(root, "--cached", "HEAD"))
-        got.update(diff_first_lines(root, "HEAD"))
-    else:
-        got.update(diff_first_lines(root, "--cached"))
+    got, said = {}, {}
+    revs = (("--cached", "HEAD"), ("HEAD",)) if git(root, "rev-parse", "-q", "--verify", "HEAD").strip() \
+        else (("--cached",),)   # no commits: the index against the empty tree, every file added
+    for rev in revs:
+        for p, (n, s) in diff_first_lines(root, *rev).items():
+            got[p] = n
+            said.setdefault(p, set()).add(s)
     for p in git_raw(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
         if p:
             got.setdefault(p, 1)
-    return got
+    out = {}
+    for p, n in got.items():
+        s = said.get(p, set())
+        if s - {"A"}:   # a diff against HEAD that isn't an add: HEAD has the file
+            out[p] = (n, "head" if os.path.lexists(os.path.join(root, p)) else "deleted")
+        else:
+            out[p] = (n, "staged" if s else "untracked")
+    return out
 
 
 def changed_in_scope(root, conf):
-    """[(path, first changed line)] for the uncommitted changes (changed_lines) to files in
+    """[(path, first changed line, origin)] for the uncommitted changes (changed_lines) to files in
     DEBUG_SCOPE, leaving out .agents/ and DEBUG_DIR: the experiments a session leaves in the tree.
     Empty when DEBUG_SCOPE is."""
     if not conf["DEBUG_SCOPE"].split():
         return []
     dd = debug_dir(root, conf) + os.sep
-    return [(p, n) for p, n in sorted(changed_lines(root).items())
+    return [(p, n, o) for p, (n, o) in sorted(changed_lines(root).items())
             if not p.startswith(".agents/") and not os.path.normpath(os.path.join(root, p)).startswith(dd)
             and matches_any(p, conf["DEBUG_SCOPE"])]
+
+
+def listed(left, most=8):
+    """'a:1, b:3' for changed_in_scope()'s list: the first most, then 'and N more'."""
+    text = ", ".join("%s:%d" % x[:2] for x in left[:most])
+    return text + (" and %d more" % (len(left) - most) if len(left) > most else "")
 
 
 def where(root):
@@ -1324,7 +1368,7 @@ def print_status(root, conf, switch, session):
         print("experiments: not checked (DEBUG_SCOPE is empty)")
     else:
         left = changed_in_scope(root, conf)
-        print("experiments in the tree: %s" % (", ".join("%s:%d" % x for x in left) if left else "none"))
+        print("experiments in the tree: %s" % (listed(left) if left else "none"))
     gaps = unbound_steps(root, conf, kind)
     if gaps:
         print("steps with no playbook bindings: %s (%s)" % (", ".join(gaps), shown(root, playbook_path(root, conf))))
@@ -1559,7 +1603,7 @@ def cmd_close(root, words, opts, after):
         left = changed_in_scope(root, conf)
         if left:
             print("debug: revert the experiments before closing %s: %s (if they're the human's own work, ask "
-                  "them to commit or stash it)" % (slug, ", ".join("%s:%d" % x for x in left)), file=sys.stderr)
+                  "them to commit or stash it)" % (slug, listed(left)), file=sys.stderr)
             return 1
     text = reason + (": " + note if note else "")
     # Marked simulated only when it took the human (the token got it past refused); otherwise an

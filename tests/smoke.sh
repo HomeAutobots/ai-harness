@@ -2872,7 +2872,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...an untracked file"           hasl "$out" "src/new.c:1"
   t    "...a change only in the index"  hasl "$out" "src/calc.c:1"
   t    "...a staged new file deleted from the tree" hasl "$out" "src/staged.c:1"
-  DX="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r = sys.argv[2]; d.use_lib(r); c = dict(d.load_conf(r), DEBUG_DIR='dbg'); print(' '.join(p for p, _ in d.changed_in_scope(r, c)))"
+  DX="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r = sys.argv[2]; d.use_lib(r); c = dict(d.load_conf(r), DEBUG_DIR='dbg'); print(' '.join(x[0] for x in d.changed_in_scope(r, c)))"
   t    "...but nothing under a DEBUG_DIR outside .agents/" test "$(python3 -B -c "$DX" "$GP" "$C" 2>&1)" = "src/calc.c src/lines.c src/new.c src/staged.c"
   edit "$C/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
   t    "...DEBUG_SCOPE empty: not checked" hasl "$("$CX" status)" "experiments: not checked (DEBUG_SCOPE is empty)"
@@ -2898,7 +2898,8 @@ except d.ConfError as e:
   "$HARNESS/install.sh" --team --workflow debug "$NC" >/dev/null 2>&1
   mkdir -p "$NC/src"; printf 'x\n' > "$NC/src/a.c"; git -C "$NC" add src/a.c
   "$NC/.agents/commands/debug" start bug '#1' >/dev/null
-  t    "a repo with no commits yet: status lists a staged file" bash -c "'$NC/.agents/commands/debug' status | grep -q '^experiments in the tree: .*src/a\.c:1'"
+  edit "$NC/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'   # else the uncommitted harness files fill status's first 8
+  t    "a repo with no commits yet: status lists a staged file" bash -c "'$NC/.agents/commands/debug' status | grep -q '^experiments in the tree: src/a\.c:1$'"
   edit "$CS/bug-12/state" 's/^kind: bug$/kind: crash/'
   t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no crash workflow"
   edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'
@@ -3273,9 +3274,13 @@ if [ "$HAVE_PY" -eq 1 ]; then
   rcdoc "$KR" evidence-only
   out="$("$KV" 2>&1 || true)"
   t    "once root-cause.md exists, an experiment left in the tree" hasl "$out" "src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists"
+  t    "...and the fix restores it from HEAD" hasl "$out" "  fix: experiments end when the root cause is written: restore it with git checkout HEAD -- src/calc.c"
   printf 'int probe;\n' > "$K/src/probe.c"
-  t    "...new files count too"         hasl "$("$KV" 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
-  trc  "approve refuses on it"          1 "$KX" approve bug-7
+  out="$("$KV" 2>&1 || true)"
+  t    "...new files count too"         hasl "$out" "src/probe.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists: a new file"
+  t    "...and their fix says to delete them" hasl "$out" "  fix: experiments end when the root cause is written: delete the file"
+  out="$("$KX" approve bug-7 2>&1)" && rc=0 || rc=$?
+  t    "approve refuses on it"          bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/probe.c:1: error: [debug-experiments-left]'" _ "$out"
   tnot "...recording nothing"           test -e "$KS/approvals"
   t    "the full tier checks it too"    hasl "$("$KV" --tier=full 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
   trc  "...the edit tier doesn't"       0 "$K/.agents/bin/check" src/probe.c
@@ -3287,17 +3292,55 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "absence: an empty DEBUG_SCOPE turns it off" test "$("$KV" 2>&1)" = "ok verify turn"
   git -C "$K" checkout -q src/calc.c .agents/harness.conf; rm -f "$K/src/probe.c"
   t    "cleaned up: passes"             test "$("$KV" 2>&1)" = "ok verify turn"
+  # The working tree now matches the clean run just above, so this also guards checks/state.sh's
+  # cache key: without the index in it, verify would answer from the cache.
   printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; git -C "$K" add src/calc.c
   git -C "$K" show HEAD:src/calc.c > "$K/src/calc.c"
-  t    "a change only in the index counts too" hasl "$("$KV" 2>&1)" "src/calc.c:1: error: [debug-experiments-left]"
+  out="$("$KV" 2>&1 || true)"
+  t    "a change only in the index counts too" hasl "$out" "src/calc.c:1: error: [debug-experiments-left]"
+  t    "...and its fix restores from HEAD, not the index" hasl "$out" "restore it with git checkout HEAD -- src/calc.c"
   git -C "$K" reset -q -- src/calc.c
+  printf 'int fresh;\n' > "$K/src/new.c"; git -C "$K" add src/new.c
+  out="$("$KV" 2>&1 || true)"
+  t    "a staged new file"              hasl "$out" "src/new.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists: a new file, staged"
+  t    "...is unstaged, then deleted"   hasl "$out" "unstage it with git rm -q --cached -- src/new.c, then delete the file"
+  git -C "$K" rm -q --cached -- src/new.c; rm -f "$K/src/new.c"
+  rm -f "$K/src/calc.c"
+  out="$("$KV" 2>&1 || true)"
+  t    "a deleted tracked file"         hasl "$out" "src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists: the file is deleted"
+  t    "...is restored from HEAD"       hasl "$out" "restore it with git checkout HEAD -- src/calc.c"
+  git -C "$K" checkout -q HEAD -- src/calc.c
+  git -C "$K" mv src/calc.c src/sum.c
+  out="$("$KV" 2>&1 || true)"
+  t    "a staged rename shows both paths" bash -c "printf '%s' \"\$1\" | grep -qF 'src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7'\''s root-cause.md exists: the file is deleted' && printf '%s' \"\$1\" | grep -qF 'src/sum.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7'\''s root-cause.md exists: a new file, staged'" _ "$out"
+  git -C "$K" mv src/sum.c src/calc.c
+  t    "...moved back: passes"          test "$("$KV" 2>&1)" = "ok verify turn"
+  for i in 01 02 03 04 05 06 07; do printf 'int p;\n' > "$K/src/p$i.c"; done
+  out="$("$KV" 2>&1 || true)"
+  t    "seven experiments: five findings" test "$(printf '%s\n' "$out" | grep -c 'debug-experiments-left')" = 5
+  t    "...the fifth names the rest"    hasl "$out" "src/p05.c:1: error: [debug-experiments-left] 3 more files have uncommitted changes in DEBUG_SCOPE (**): src/p05.c:1, src/p06.c:1, src/p07.c:1"
+  for i in 08 09 10; do printf 'int p;\n' > "$K/src/p$i.c"; done
+  t    "status names the first eight, then how many more" hasl "$("$KX" status 2>&1 || true)" "experiments in the tree: src/p01.c:1, src/p02.c:1, src/p03.c:1, src/p04.c:1, src/p05.c:1, src/p06.c:1, src/p07.c:1, src/p08.c:1 and 2 more"
+  out="$("$KX" close bug-7 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "close abandoned refuses, listing them the same way" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/p08.c:1 and 2 more (if they'\''re the human'\''s own work'" _ "$out"
+  rm -f "$K"/src/p*.c
   edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
   printf 'notes\n' >> "$K/README.md"
   t    "a change outside DEBUG_SCOPE isn't an experiment" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'int moved;\n' > "$K/docs/moved.c"
+  # Given files, verify's own key leaves out other untracked paths; checks/state.sh adds them.
+  t    "an untracked file outside DEBUG_SCOPE isn't one" test "$("$KV" README.md 2>&1)" = "ok verify turn"
+  mv "$K/docs/moved.c" "$K/src/moved.c"
+  t    "...moved into it, it is, even with verify given files" hasl "$("$KV" README.md 2>&1)" "src/moved.c:1: error: [debug-experiments-left]"
+  rm -f "$K/src/moved.c"
   git -C "$K" checkout -q README.md .agents/harness.conf
   printf '\n' >> "$K/.agents/debug/playbook.md"
   t    "harness files aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
   git -C "$K" checkout -q .agents/debug/playbook.md
+  printf 'int probe;\n' > "$K/src/probe.c"
+  "$KX" reject bug-7 'not it' >/dev/null
+  t    "after a reject sets root-cause.md aside, experiments are fine again" test "$("$KV" 2>&1)" = "ok verify turn"
+  rm -f "$K/src/probe.c"
 fi
 }
 group grp_debug_checks

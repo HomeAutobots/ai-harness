@@ -22,8 +22,11 @@ if [ -n "$gd" ]; then
 fi
 # The current session is the newest open one on this branch.
 git -C "$AGENTS_ROOT" symbolic-ref -q HEAD 2>/dev/null
-# debug-experiments-left counts a change only in the index; verify's own key sees the working tree.
-git -C "$AGENTS_ROOT" diff --cached --binary --no-ext-diff --no-textconv 2>/dev/null
+# debug-experiments-left counts a change only in the index, and judges untracked files by path:
+# verify's own key sees the working tree, and given files, leaves the other untracked paths out.
+# Both print nothing outside git; with no commits, --cached compares against the empty tree.
+git -C "$AGENTS_ROOT" diff --cached --raw -z --no-abbrev --no-renames 2>/dev/null
+git -C "$AGENTS_ROOT" ls-files -o --exclude-standard -z 2>/dev/null
 [ -d "$d" ] || exit 0
 # What the checks read: the playbook, and each session's state, approvals, *.md, and evidence/*.md
 # (never the E-<n>.log files: their E-<n>.md entries change with them).
