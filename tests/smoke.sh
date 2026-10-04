@@ -3139,6 +3139,8 @@ if [ "$HAVE_PY" -eq 1 ]; then
   edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
   "$KX" run reproduce --attempt=reproduce -- false >/dev/null || true
   t    "an attempt with no outcome still needs one" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a reproduction attempt, but its outcome isn't recorded"
+  awk '{ print } /^attempt:/ { print "outcome: maybe" }' "$KS/evidence/E-2.md" > "$KS/evidence/E-2.tmp" && mv "$KS/evidence/E-2.tmp" "$KS/evidence/E-2.md"
+  t    "...and a hand-written outcome that isn't one of the three is named" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a reproduction attempt, but its outcome 'maybe' isn't one of reproduced|partial|not-reproduced"
   "$KX" outcome E-2 not-reproduced >/dev/null
   t    "not reproduced is enough: the attempt is what's required" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
   fresh 6
@@ -3148,6 +3150,32 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "a confirmation attempt with no outcome still needs one" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a confirmation attempt, but its outcome isn't recorded"
   "$KX" outcome E-2 reproduced >/dev/null
   t    "a confirmation attempt with its outcome is a reproduction attempt too" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  echo "debug: root-cause format and confidence"
+  fresh 6; hyp
+  "$KX" run reproduce --attempt=reproduce -- false >/dev/null || true; "$KX" outcome E-1 reproduced >/dev/null
+  rcdoc "$KR" reproduced
+  t    "a root cause in the fixed format passes" test "$("$KV" 2>&1)" = "ok verify turn"
+  edit "$KR" '/^## Ruled out/d'
+  t    "a missing heading"              hasl "$("$KV" 2>&1)" ".agents/debug/sessions/bug-6/root-cause.md:1: error: [debug-format] root-cause.md has no '## Ruled out' section"
+  trc  "the edit tier checks an edited root cause" 1 "$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md
+  trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  rcdoc "$KR" confirmed
+  t    "Confidence must be what the attempts support" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" 'Confidence:'): error: [debug-format] Confidence: confirmed, but the recorded attempts support reproduced"
+  "$KX" run isolate --attempt=confirm -- false >/dev/null || true; "$KX" outcome E-2 reproduced >/dev/null
+  t    "confirmed: a confirmation attempt reproduced it" test "$("$KV" 2>&1)" = "ok verify turn"
+  "$KX" outcome E-2 not-reproduced >/dev/null; "$KX" outcome E-1 partial >/dev/null
+  rcdoc "$KR" reproduced
+  t    "a partial reproduction is evidence-only" hasl "$("$KV" 2>&1)" "Confidence: reproduced, but the recorded attempts support evidence-only"
+  edit "$KR" '/^Confidence:/d'
+  t    "no Confidence line"             hasl "$("$KV" 2>&1)" "[debug-format] no 'Confidence:' line under ## Reproduction"
+  trc  "approve refuses on it"          1 "$KX" approve bug-6
+  rcdoc "$KR" evidence-only
+  t    "evidence-only: no attempt reproduced it" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '# Root cause\n\n##  Summary ##\nx\n\n## Cause\n## Evidence\n## Reproduction\n### Steps\n- **Confidence:** `Evidence-only`\n\n## Ruled Out\n## Fix Direction\n' > "$KR"
+  t    "agent formatting: heading case, closing hashes, a bold list-item Confidence line" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '# Root cause\n\n## Reproduction\n```\n## Summary\nConfidence: confirmed\n```\nConfidence: evidence-only\n' > "$KR"
+  t    "several missing headings are one finding (a fenced block doesn't count)" hasl "$("$KV" 2>&1)" "root-cause.md:1: error: [debug-format] root-cause.md has no '## Summary', '## Cause', '## Evidence', '## Ruled out', '## Fix direction' sections"
+  t    "...and the fenced Confidence line isn't the one judged" bash -c "! printf '%s' \"\$1\" | grep -qF 'Confidence: confirmed'" _ "$("$KV" 2>&1)"
 fi
 }
 group grp_debug_checks

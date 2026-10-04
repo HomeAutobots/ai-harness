@@ -422,7 +422,8 @@ def cmd_check(tier, root, files):
 def no_repro_attempt(ctx):
     """debug-no-repro-attempt (check-in, full): root-cause.md exists, but no reproduction attempt
     has its outcome recorded. A confirmation attempt counts too (it's a reproduction as well). The
-    outcome itself never blocks: not-reproduced is a fine answer."""
+    outcome itself never blocks: not-reproduced is a fine answer. Attempts made before a rejected
+    root cause still count (confirm_after only limits `confirmed`)."""
     rc = ctx.path("root-cause.md") if ctx.slug else ""
     if ctx.tier not in ("checkin", "full") or not rc or not os.path.isfile(rc):
         return []
@@ -433,15 +434,84 @@ def no_repro_attempt(ctx):
     cmd = debug_cmd(ctx.root)
     if tried:
         n = tried[-1]
+        said = ev[n].get("outcome", "")
         return [finding(shown(ctx.root, rc), 1, "debug-no-repro-attempt",
-                        "E-%d is a %s attempt, but its outcome isn't recorded"
-                        % (n, "reproduction" if ev[n]["attempt"] == "reproduce" else "confirmation"),
+                        "E-%d is a %s attempt, but %s"
+                        % (n, "reproduction" if ev[n]["attempt"] == "reproduce" else "confirmation",
+                           "its outcome '%s' isn't one of %s" % (said[:40], "|".join(OUTCOMES)) if said
+                           else "its outcome isn't recorded"),
                         "record it: %s outcome E-%d reproduced|partial|not-reproduced" % (cmd, n))]
     return [finding(shown(ctx.root, rc), 1, "debug-no-repro-attempt",
                     "root-cause.md is written, but session %s has no reproduction attempt" % ctx.slug,
                     "try to reproduce it once: %s run reproduce --attempt=reproduce -- <command>, then record "
                     "the outcome (%s outcome E-<n> ...). Not reproduced is a fine answer; the attempt is "
                     "what's required" % (cmd, cmd))]
+
+
+def heading(line):
+    """The text of a level 1 or 2 markdown heading ('## Ruled out  ##' -> 'Ruled out'), with its
+    level, as (level, text); None for any other line ('###', '#12 says', '##Cause')."""
+    m = re.match(r"^(#{1,2})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$", line)
+    return (len(m.group(1)), m.group(2)) if m else None
+
+
+CONF_LINE = re.compile(r"^\s*(?:[-*+]\s+)?[*_`]*confidence[*_`]*\s*:[\s*_`]*([A-Za-z-]*)", re.I)
+
+
+def root_cause(path):
+    """({heading: line no}, (line no, value) of the first 'Confidence:' line under ## Reproduction,
+    or None). Headings are the '## ' ones, matched by name in any case, so '## Ruled Out' is
+    '## Ruled out'; a '# ' heading ends a section, '###' and deeper stay inside it. The Confidence
+    line may be a list item or have *, _ or backticks around its parts ('**Confidence:** `reproduced`');
+    the value is lowercased. Lines inside ``` or ~~~ fences are skipped."""
+    heads, conf, sec, fence = {}, None, None, None
+    for n, line in enumerate(read_lines(path), 1):
+        f = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if f and (fence is None or f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence)):
+            fence = f.group(1) if fence is None else None
+            continue
+        if fence is not None:
+            continue
+        h = heading(line)
+        if h:
+            sec = h[1].lower() if h[0] == 2 else None
+            if sec is not None:
+                heads.setdefault(sec, n)
+            continue
+        m = CONF_LINE.match(line) if sec == "reproduction" else None
+        if m and conf is None:
+            conf = (n, m.group(1).lower())
+    return heads, conf
+
+
+@check
+def rc_format(ctx):
+    """debug-format (edit when root-cause.md is edited, turn, full, check-in): a fixed heading is
+    missing (one finding names them all), or the Confidence: line under ## Reproduction is missing
+    or isn't what the recorded attempts support (confidence(), which honors confirm_after)."""
+    rc = ctx.path("root-cause.md") if ctx.slug else ""
+    if not rc or not ctx.judged(rc):
+        return []
+    heads, stated = root_cause(rc)
+    rel, out = shown(ctx.root, rc), []
+    missing = [h for h in HEADINGS if h.lower() not in heads]
+    if missing:
+        out.append(finding(rel, 1, "debug-format", "root-cause.md has no %s section%s"
+                           % (", ".join("'## %s'" % h for h in missing), "s" if len(missing) > 1 else ""),
+                           "use the fixed headings, in order: %s" % ", ".join("## " + x for x in HEADINGS)))
+    want = confidence(evidence(ctx.sdir), ctx.state)
+    if stated is None:
+        out.append(finding(rel, heads.get("reproduction", 1), "debug-format",
+                           "no 'Confidence:' line under ## Reproduction",
+                           "add 'Confidence: %s', what the recorded attempts support" % want))
+    elif stated[1] != want:
+        out.append(finding(rel, stated[0], "debug-format",
+                           "Confidence: %s, but the recorded attempts support %s" % (stated[1][:40] or "(empty)", want),
+                           "confirmed needs a confirmation attempt that reproduced the bug through the cause "
+                           "(%s run isolate --attempt=confirm -- ...), reproduced needs a reproduction "
+                           "attempt that reproduced it, anything else is evidence-only. Say what the attempts "
+                           "show, or record the attempt" % debug_cmd(ctx.root)))
+    return out
 
 
 # ------------------------------------------------------------------ the debug command
