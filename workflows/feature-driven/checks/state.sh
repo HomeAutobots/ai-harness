@@ -6,13 +6,20 @@ d="${d:-.agents/fdd}"
 case "$d" in /*) ;; *) d="$AGENTS_ROOT/$d" ;; esac
 # The records in the git dir (fdd approve writes fdd-approvals; an approval counts only when it's
 # there) and the simulated-human switch next to them (install.sh --simulated-human), which counts
-# when any pack's record holds its hash, so every record goes in.
+# when any pack's record holds its hash, so every record goes in, each under its name (a line moved
+# from one record to another changes the key).
 gd="$(git -C "$AGENTS_ROOT" rev-parse --git-common-dir 2>/dev/null)"
 case "$gd" in
   "") ;;
-  /*) cat "$gd"/ai-harness/*-approvals "$gd/ai-harness/simulated-human" 2>/dev/null ;;
-  *) cat "$AGENTS_ROOT/$gd"/ai-harness/*-approvals "$AGENTS_ROOT/$gd/ai-harness/simulated-human" 2>/dev/null ;;
+  /*) ;;
+  *) gd="$AGENTS_ROOT/$gd" ;;
 esac
+if [ -n "$gd" ]; then
+  for f in "$gd"/ai-harness/*-approvals; do
+    [ -f "$f" ] && { printf '%s\n' "${f##*/}"; cat "$f"; }
+  done
+  cat "$gd/ai-harness/simulated-human" 2>/dev/null
+fi
 # The wrong-branch check reads the current branch, each plan's Branch: line (tasks link), and git.conf.
 git -C "$AGENTS_ROOT" symbolic-ref -q HEAD 2>/dev/null
 grep -H '^Branch:' "$AGENTS_ROOT"/.agents/plans/*/plan.md 2>/dev/null

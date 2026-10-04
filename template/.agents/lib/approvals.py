@@ -89,11 +89,12 @@ def recorded(root, key):
 
 def record(root, key, lines):
     """Append approvals lines to the pack's record (no-op outside git). Only approvals lines: five
-    tab-separated fields on one line, not starting with "#". The record's markers (adopted,
-    simulated, the switch's hash) are this library's to write, so a pack can't write one by
-    mistake. Raises ValueError, writing nothing, for any other line."""
+    tab-separated fields on one line (no break of any kind str.splitlines() knows, which is what
+    read_lines() splits on), not starting with "#". The record's markers (adopted, simulated, the
+    switch's hash) are this library's to write, so a pack can't write one by mistake. Raises
+    ValueError, writing nothing, for any other line."""
     for l in lines:
-        if "\n" in l or "\r" in l or l.startswith("#") or len(l.split("\t")) != 5:
+        if l.splitlines() != [l] or l.startswith("#") or len(l.split("\t")) != 5:
             raise ValueError("not an approvals line (five tab-separated fields, not a # marker): %r" % l)
     _append(root, key, lines)
 
@@ -242,8 +243,8 @@ def refused(prog, doing, switch):
 def new_line(root, kind, ident, value, switch):
     """(approvals line, simulated?). who is git's user.name, else $USER, and ends in SIMULATED while
     the simulated human is on: in the line itself, so a copy of the file carries it anywhere."""
-    def field(t):   # one field: no tab or line break can split the line
-        return t.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    def field(t):   # one field: no tab or line break (any that read_lines() splits on) can split the line
+        return " ".join(t.splitlines()).replace("\t", " ")
     who = field(git(root, "config", "user.name").strip() or os.environ.get("USER", "unknown"))
     sim = switch.state == "on"
     if sim:
