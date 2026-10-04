@@ -629,6 +629,22 @@ def evidence_missing(ctx):
     return out
 
 
+@check
+def experiments_left(ctx):
+    """debug-experiments-left (check-in; turn and full once root-cause.md exists): uncommitted changes
+    to files in DEBUG_SCOPE, outside .agents/ and DEBUG_DIR (changed_in_scope()), one finding per file
+    at its first changed line. Experiments end when the root cause is written."""
+    if not ctx.slug or ctx.tier == "edit" or not os.path.isfile(ctx.path("root-cause.md")):
+        return []
+    return [finding(p, n, "debug-experiments-left",
+                    "an uncommitted change in DEBUG_SCOPE (%s) while %s's root-cause.md exists"
+                    % (ctx.conf["DEBUG_SCOPE"], ctx.slug),
+                    "experiments end when the root cause is written: revert this one (git checkout -- %s, or "
+                    "delete the file if it's new) and say what it showed in root-cause.md. If it's the human's "
+                    "own work, ask them to commit or stash it (git stash -u) before the check-in" % p)
+            for p, n in changed_in_scope(ctx.root, ctx.conf)]
+
+
 # ------------------------------------------------------------------ the debug command
 
 CLI = {}   # name -> (function, usage line, options it takes), in the order usage lists them

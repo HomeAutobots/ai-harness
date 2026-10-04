@@ -3265,6 +3265,39 @@ if [ "$HAVE_PY" -eq 1 ]; then
   mv "$WORK/debugchk.hyp" "$KS/hypotheses.md"
   "$KX" reject bug-6 'see E-42' >/dev/null
   t    "a rejection's reason in hypotheses.md isn't a citation" test "$("$KV" 2>&1)" = "ok verify turn"
+  echo "debug: experiments left"
+  fresh 7; hyp
+  "$KX" run reproduce --attempt=reproduce -- true >/dev/null; "$KX" outcome E-1 not-reproduced >/dev/null
+  printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$K/src/calc.c"
+  t    "absence: before the root cause, experiments are fine" test "$("$KV" 2>&1)" = "ok verify turn"
+  rcdoc "$KR" evidence-only
+  out="$("$KV" 2>&1 || true)"
+  t    "once root-cause.md exists, an experiment left in the tree" hasl "$out" "src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists"
+  printf 'int probe;\n' > "$K/src/probe.c"
+  t    "...new files count too"         hasl "$("$KV" 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
+  trc  "approve refuses on it"          1 "$KX" approve bug-7
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  t    "the full tier checks it too"    hasl "$("$KV" --tier=full 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
+  trc  "...the edit tier doesn't"       0 "$K/.agents/bin/check" src/probe.c
+  edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  out="$(CLAUDECODE=1 "$KX" close bug-7 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "DEBUG_ASK empty: close reviewed refuses on it" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/probe.c:1: error: [debug-experiments-left]' && printf '%s' \"\$1\" | grep -qF 'debug: fix these before closing bug-7'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
+  t    "absence: an empty DEBUG_SCOPE turns it off" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q src/calc.c .agents/harness.conf; rm -f "$K/src/probe.c"
+  t    "cleaned up: passes"             test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; git -C "$K" add src/calc.c
+  git -C "$K" show HEAD:src/calc.c > "$K/src/calc.c"
+  t    "a change only in the index counts too" hasl "$("$KV" 2>&1)" "src/calc.c:1: error: [debug-experiments-left]"
+  git -C "$K" reset -q -- src/calc.c
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
+  printf 'notes\n' >> "$K/README.md"
+  t    "a change outside DEBUG_SCOPE isn't an experiment" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q README.md .agents/harness.conf
+  printf '\n' >> "$K/.agents/debug/playbook.md"
+  t    "harness files aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/debug/playbook.md
 fi
 }
 group grp_debug_checks
