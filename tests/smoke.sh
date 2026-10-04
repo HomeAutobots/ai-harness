@@ -3149,6 +3149,8 @@ except d.ConfError as e:
   t    "...and listed in AGENTS.md"     grep -q '^- `debug`: ' "$C/AGENTS.md"
   t    "the skill asks for the check-in with --force, so a re-ask after a reject is recorded" grep -qF "tasks ask <slug> T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve <slug>'" "$DS"
   trc  "...and that ask passes the policy" 0 policy "$C" test ".agents/bin/tasks ask bug-1 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  trc  "...chained after another command it's blocked (2)" 2 policy "$C" test ".agents/bin/verify; .agents/bin/tasks ask bug-1 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  t    "...so the skill says to run it on its own" grep -qF "Ask with its own command" "$DS"
   t    "the bug steps have a section per step" bash -c "for s in \$(sed -n 's/^steps: //p' '$DK'); do grep -q \"^## [0-9]\\. \$s\$\" '$DK' || exit 1; done"
   t    "the seeded playbook has a section per bindable step" bash -c "b=\$(sed -n 's/^bindable: //p' '$DK'); test -n \"\$b\" && for s in \$b; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
   t    "harness-tailor drafts the playbook" grep -qF '.agents/debug/playbook.md' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
