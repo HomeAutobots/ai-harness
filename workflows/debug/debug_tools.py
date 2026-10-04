@@ -447,6 +447,7 @@ class Ctx:
         self.switch = ap.Switch(root)
         cur = session or current_session(root, self.conf, self.switch)
         self.slug, self.sdir, self.state = cur if cur else (None, None, {})
+        self.infra = []   # tooling problems the checks hit; each check still runs
 
     def path(self, name):
         return os.path.join(self.sdir, name)
@@ -457,21 +458,32 @@ class Ctx:
 
 
 def run_checks(ctx):
-    """(findings, policy blocks), each a list of finding texts."""
+    """(findings, policy blocks), each a list of finding texts. A check that hits a tooling problem
+    (ConfError) adds it to ctx.infra, once, and the other checks still run, so it hides nothing."""
     found, blocked = [], []
     for fn in CHECKS:
-        for kind, text in fn(ctx):
+        try:
+            got = fn(ctx)
+        except ConfError as e:
+            got = []
+            if str(e) not in ctx.infra:
+                ctx.infra.append(str(e))
+        for kind, text in got:
             (blocked if kind in BLOCKING else found).append(text)
     return found, blocked
 
 
 def cmd_check(tier, root, files):
+    """Exit 2 with a policy block, else 1 with findings, else 3 with a tooling problem, else 0."""
     ctx = Ctx(root, tier, files)
     found, blocked = run_checks(ctx)
     if tier != "edit" and ctx.slug and ctx.switch.state == "on":   # verify shows note lines even on a pass
         print("note: simulated human is on in this clone (%s): a shell with its token can approve debug "
               "check-ins, and each approval made here is marked simulated" % ctx.switch.how)
-    return emit(found, blocked)
+    for e in ctx.infra:
+        print("infra: %s" % e)
+    rc = emit(found, blocked)
+    return rc or (3 if ctx.infra else 0)
 
 
 @check
@@ -933,17 +945,21 @@ def outside(path):
 def playbook_format(ctx):
     """debug-playbook-format (edit when the playbook is edited, full): a section that isn't a step
     any shipped kind binds, a list item that isn't a skill:, run:, or context: binding, an empty
-    binding, a context: path outside the repo or missing from it, or a skill: the resolver doesn't
-    find (a tooling problem instead while a library LIBRARIES lists isn't here: it may have the
-    skill, as verify does for packs). Judged with or without a session: harness-tailor writes the
-    playbook before any. run: lines are never run. Lines in ``` and ~~~ fences are examples
-    (read_playbook skips them). Findings in line order."""
+    binding, a context: path outside the repo or missing from it, a skill: the resolver doesn't
+    find, or a fence never closed. A skill that doesn't resolve while a library LIBRARIES lists
+    isn't here (it may have the skill, as verify says for packs), or a resolver that fails, goes to
+    ctx.infra instead, and the rest is still judged. Judged with or without a session: harness-tailor
+    writes the playbook before any. run: lines are never run. Lines in ``` and ~~~ fences are
+    examples (read_playbook skips them). Findings in line order."""
     pb = playbook_path(ctx.root, ctx.conf)
     if ctx.tier not in ("edit", "full") or not ctx.judged(pb):
         return []
-    sections, heads, odd = read_playbook(pb)
+    sections, heads, odd, open_at = read_playbook(pb)
     known = sorted({s for k in shipped_kinds() for s in read_kind(k)["bindable"]})
-    hits, skills = [], None   # (line no, message, fix)
+    hits, skills, missing = [], None, None   # (line no, message, fix)
+    if open_at:
+        hits.append((open_at, "the fence at line %d never closes, so the rest of the file is code" % open_at,
+                     "close it with ``` or delete it"))
     for n, h in heads:
         if h not in known:
             hits.append((n, "'%s' isn't a step a debug workflow binds" % h[:60],
@@ -955,7 +971,8 @@ def playbook_format(ctx):
     for step in sections:
         for n, key, value in sections[step]:
             if key not in BINDINGS:
-                hits.append((n, "'%s:' isn't a binding" % key[:30], "use skill:, run:, or context:"))
+                hits.append((n, "'%s:' isn't a binding" % key[:30],
+                             "use skill:, run:, or context:; a note goes on a plain line, not a list item"))
             elif not value:
                 hits.append((n, "%s: has nothing after it" % key, "fill it in, or delete the line"))
             elif key == "context" and outside(value):
@@ -965,12 +982,18 @@ def playbook_format(ctx):
                 hits.append((n, "context %s doesn't exist" % value[:200],
                              "point it at a doc in the repo (repo-relative), or delete the line"))
             elif key == "skill":
-                skills = resolvable_skills(ctx.root) if skills is None else skills
-                if value in skills:
+                if skills is None:
+                    try:
+                        skills = resolvable_skills(ctx.root)
+                    except ConfError as e:
+                        ctx.infra.append(str(e))
+                        skills = False   # no list to judge against: every skill: line goes unjudged
+                if skills is False or value in skills:
                     continue
-                note = missing_libraries(ctx.root)
-                if note:
-                    raise ConfError("the playbook's skill %s isn't available: %s" % (value[:60], note))
+                missing = missing_libraries(ctx.root) if missing is None else missing
+                if missing:   # the skill may be in that library: a tooling problem, not a finding
+                    ctx.infra.append("the playbook's skill %s isn't available: %s" % (value[:60], missing))
+                    continue
                 hits.append((n, "skill %s doesn't resolve (not in this project, a library, or the built-ins)"
                              % value[:60], "check the name (.agents/bin/sync lists the skills), or add the skill "
                              "to .agents/library/skills/"))
@@ -1055,17 +1078,18 @@ def cli(root, a):
 
 def read_playbook(path):
     """({step: [(line no, key, value)]}, [(line no, heading)], [(line no, text)]): the bindings in
-    each '## <step>' section, every section heading, and every list item in a section that isn't a
-    '<key>: <value>' binding. Lines before the first section, lines in ``` and ~~~ fences
-    (examples), and other lines are notes."""
+    each '## <step>' section, every section heading, and every list item (-, *, or +) in a section
+    that isn't a '<key>: <value>' binding, then the line of a fence never closed (0 when none).
+    Lines before the first section, lines in ``` and ~~~ fences (examples), and other lines are notes."""
     sections, heads, odd, cur = {}, [], [], None
-    for n, line in unfenced(read_lines(path))[0]:
+    kept, open_at = unfenced(read_lines(path))
+    for n, line in kept:
         if line.startswith("## "):
             cur = line[3:].strip()
             heads.append((n, cur))
             sections.setdefault(cur, [])
             continue
-        m = re.match(r"^\s*[-*]\s+(.*?)\s*$", line) if cur is not None else None
+        m = re.match(r"^\s*[-*+]\s+(.*?)\s*$", line) if cur is not None else None
         if not m:
             continue
         b = re.match(r"^([A-Za-z][\w-]*):\s*(.*)$", m.group(1))
@@ -1073,7 +1097,7 @@ def read_playbook(path):
             sections[cur].append((n, b.group(1), b.group(2).strip().strip("`").strip()))
         else:
             odd.append((n, m.group(1)))
-    return sections, heads, odd
+    return sections, heads, odd, open_at
 
 
 def unbound_steps(root, conf, kind):
@@ -1837,15 +1861,22 @@ def cmd_status(root, words, opts, after):
 # ------------------------------------------------------------------ the check-in
 
 def checkin(root, session, prog):
-    """The check-in set debug approve (and close reviewed) runs on a session's root cause: True when
-    it passes; otherwise the findings go to stderr."""
-    found, blocked = run_checks(Ctx(root, "checkin", [], session))
+    """The check-in set debug approve (and close reviewed) runs on a session's root cause: 0 when it
+    passes; otherwise the findings and any tooling problems go to stderr, and it's 1 with findings,
+    else 3 (a check couldn't run, so nothing passed)."""
+    ctx = Ctx(root, "checkin", [], session)
+    found, blocked = run_checks(ctx)
+    for e in ctx.infra:
+        print("infra: %s" % e, file=sys.stderr)
     if not found and not blocked:
-        return True
+        if ctx.infra:
+            print("debug: a check couldn't run, so %s %s waits until it can" % (prog, session[0]), file=sys.stderr)
+            return 3
+        return 0
     for f in blocked + found:
         print(f, file=sys.stderr)
     print("debug: fix these before %s %s" % (prog, session[0]), file=sys.stderr)
-    return False
+    return 1
 
 
 def checkin_questions(root, slug):
@@ -1946,8 +1977,9 @@ def cmd_approve(root, words, opts, after):
         print("debug: can't read %s, so there's nothing to approve; make it readable" % shown(root, rc),
               file=sys.stderr)
         return 1
-    if not checkin(root, session, "approving"):
-        return 1
+    got = checkin(root, session, "approving")
+    if got:
+        return got
     if sha(rc) != seen:   # the approval binds what the check-in judged
         print("debug: root-cause.md changed while checking; run approve again", file=sys.stderr)
         return 1
@@ -2023,8 +2055,9 @@ def cmd_close(root, words, opts, after):
         if not os.path.isfile(rc):
             print("debug: %s has no root-cause.md yet, so there's nothing to review" % slug, file=sys.stderr)
             return 1
-        if not checkin(root, session, "closing"):
-            return 1
+        got = checkin(root, session, "closing")
+        if got:
+            return got
     else:
         waits = (asks and os.path.isfile(rc)) or verdict(root, slug, sdir, switch) in ("rejected", "changed")
         if waits and ap.refused("debug", "closing a session whose root cause waits on you", switch):

@@ -3478,8 +3478,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "a line that isn't a binding"    hasl "$out" "'just a note' isn't a binding"
   t    "a context that doesn't exist"   hasl "$out" "[debug-playbook-format] context docs/missing.md doesn't exist"
   t    "a skill that doesn't resolve"   hasl "$out" "[debug-playbook-format] skill no-such-skill doesn't resolve"
+  t    "...and an unknown key's fix says where notes go" hasl "$out" "  fix: use skill:, run:, or context:; a note goes on a plain line, not a list item"
   trc  "the edit tier checks an edited playbook" 1 "$K/.agents/bin/check" .agents/debug/playbook.md
   t    "the turn tier doesn't"          test "$("$KV" 2>&1)" = "ok verify turn"
+  trc  "...nor the edit tier when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
   git -C "$K" checkout -q .agents/debug/playbook.md
   printf -- '- run:\n' >> "$KP"
   t    "an empty binding"               hasl "$("$KV" --tier=full 2>&1)" "playbook.md:$(wc -l < "$KP" | tr -d ' '): error: [debug-playbook-format] run: has nothing after it"
@@ -3494,9 +3496,31 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf -- '- skill: no-such-skill\n' >> "$KP"; printf 'LIBRARIES="vendor/skills"\n' >> "$K/.agents/harness.conf"
   out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
   t    "a skill that doesn't resolve while a listed library isn't here: a tooling problem" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qF \"the playbook's skill no-such-skill isn't available: LIBRARIES lists vendor/skills, which isn't here\"" _ "$out"
+  printf '## lunch\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "...a tooling problem doesn't hide the findings: exit 1, both printed" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF \"[debug-playbook-format] 'lunch' isn't a step\" && printf '%s' \"\$1\" | grep -qF \"infra: the playbook's skill no-such-skill isn't available\"" _ "$out"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- skill: validate\n' >> "$KP"
+  t    "...while a skill that resolves passes" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
   git -C "$K" checkout -q .agents/debug/playbook.md .agents/harness.conf
   printf -- '```\n## lunch\n- tool: fork\n```\n- run: ./sim\n' >> "$KP"
   t    "fenced lines are examples, not bindings" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '+ context: docs/missing.md\n~~~\n- run: ./sim\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "a + list item is a binding too" hasl "$out" "playbook.md:$(line_of "$KP" '+ context:'): error: [debug-playbook-format] context docs/missing.md doesn't exist"
+  t    "a fence that never closes"      hasl "$out" "playbook.md:$(line_of "$KP" '~~~'): error: [debug-playbook-format] the fence at line $(line_of "$KP" '~~~') never closes, so the rest of the file is code"
+  t    "...with a fix line"             hasl "$out" "  fix: close it with \`\`\` or delete it"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  echo 'docs/gen.md' >> "$K/.git/info/exclude"
+  printf -- '- context: `docs/gen.md` \n' >> "$KP"
+  t    "a backquoted context to an ignored file that isn't there" hasl "$("$KV" --tier=full 2>&1)" "[debug-playbook-format] context docs/gen.md doesn't exist"
+  printf '# Generated\n' > "$K/docs/gen.md"
+  t    "...passes once it's there (verify's cache key sees it)" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  rm -f "$K/docs/gen.md"; git -C "$K" checkout -q .agents/debug/playbook.md
+  awk '{ print } $0 == "## intake" { print "```"; print "- run: ./sim"; print "```" }' "$KP" > "$KP.tmp" && mv "$KP.tmp" "$KP"
+  fresh 10
+  t    "a fenced binding doesn't count in status" hasl "$("$KX" status)" "steps with no playbook bindings: intake, reproduce, gather-evidence, isolate ("
   git -C "$K" checkout -q .agents/debug/playbook.md
   printf -- '- run: ./sim --scenario <file>\n' >> "$KP"
   fresh 10

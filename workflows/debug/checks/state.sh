@@ -46,12 +46,15 @@ done
 # value is trimmed as debug_tools.py's read_playbook trims it (whitespace, then backquotes around it).
 if [ -f "$d/playbook.md" ]; then
   # shellcheck disable=SC2016  # the backquotes are literal
-  sed -n 's/^[[:space:]]*[-*][[:space:]]*context:[[:space:]]*//p' "$d/playbook.md" |
+  sed -n 's/^[[:space:]]*[-*+][[:space:]]*context:[[:space:]]*//p' "$d/playbook.md" |
     sed 's/[[:space:]]*$//; s/^`*//; s/`*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | while IFS= read -r c; do
     case "$c" in /*) p="$c" ;; *) p="$AGENTS_ROOT/$c" ;; esac
     if [ -e "$p" ]; then echo "context $c: here"; else echo "context $c: missing"; fi
   done
-  if grep -q '^[[:space:]]*[-*][[:space:]]*skill:' "$d/playbook.md"; then
+  if grep -q '^[[:space:]]*[-*+][[:space:]]*skill:' "$d/playbook.md"; then
     bash "$AGENTS_ROOT/.agents/lib/libraries.sh" resolve skills 2>/dev/null | cut -f1   # AGENTS_ROOT: verify exports it
+    # A listed library that isn't here turns a skill that doesn't resolve into a tooling problem.
+    # shellcheck disable=SC2016  # $1 is expanded by the inner shell
+    bash -c '. "$1" && agents_missing_note' _ "$AGENTS_ROOT/.agents/lib/libraries.sh" 2>/dev/null
   fi
 fi
