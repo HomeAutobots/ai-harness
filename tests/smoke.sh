@@ -3773,6 +3773,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf 'secret\tzz[[:punct:]]q[0-9]{8}\tOdd rule: remove it\n' > "$R/.agents/guard.patterns"
   out="$("$RX" run gather-evidence -- true 2>&1)"; n="$(printf '%s\n' "$out" | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
   t    "a secret rule debug run can't use is named, in the entry and in what run printed" bash -c "grep -qxF 'not masked: 1 secret rule debug run can'\''t use (Odd rule)' '$RE/E-$n.md' && printf '%s\n' \"\$1\" | grep -qxF 'not masked: 1 secret rule debug run can'\''t use (Odd rule)'" _ "$out"
+  printf 'secret\tq{99999999999}\tHuge rule: remove it\nsecret\tzz[[:punct:]]q\n' > "$R/.agents/guard.patterns"
+  out="$("$RX" run gather-evidence -- true 2>&1)" && rc=0 || rc=$?
+  t    "...a repeat count Python can't compile too, each name once" bash -c "test $rc = 0 && printf '%s\n' \"\$1\" | grep -qxF 'not masked: 2 secret rules debug run can'\''t use (Huge rule, secret)'" _ "$out"
   rm -f "$R/.agents/guard.patterns"
   n="$(rn env DB_PASSWORD=s3cr3tValue99xyz true)"
   t    "a VAR=value secret in the command line is masked" bash -c "grep -qxF \"command: env 'DB_PASSWORD=[masked]' true\" '$RE/E-$n.md' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
@@ -3932,6 +3935,13 @@ sys.modules["fcntl"] = None; del signal.SIGHUP   # as on a Python without them (
 sys.path.insert(0, sys.argv[1]); import debug_tools as d
 print(len(d.STOP_SIGNALS), d.run_lock(sys.argv[2]))'
   t    "the pack still loads without fcntl or SIGHUP (the checks need it)" test "$(python3 -B -c "$GN" "$GP" "$WORK" 2>&1)" = "2 None"
+  GX='import os, sys
+del os.killpg   # as on a Python without process groups (Windows)
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+sys.exit(d.main(["debug_tools.py", "cli", sys.argv[2], "run", "gather-evidence", "--", "true"]))'
+  nlog=$(find "$RE" -name 'E-*.log' | wc -l | tr -d ' ')
+  out="$(python3 -B -c "$GX" "$GP" "$R" 2>&1)" && rc=0 || rc=$?
+  t    "no process groups (Windows): debug run refuses (3) and runs nothing" bash -c "test $rc = 3 && printf '%s\n' \"\$1\" | grep -qxF 'infra: debug run needs a POSIX system (process groups) to stop what it starts' && test \$(find '$RE' -name 'E-*.log' | wc -l | tr -d ' ') = $nlog" _ "$out"
   GK='import signal, subprocess, sys, time
 sys.path.insert(0, sys.argv[1]); import debug_tools as d
 signal.alarm(20)   # the old code waited forever
@@ -4012,6 +4022,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/$fake}" 2>&1)" && rc=0 || rc=$?
   t    "test: the steps' run-it-N-times recipe counts passes and fails" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'passed 15, failed 5'" _ "$out" "$recipe"
   t    "test: a flaky failure is partial, a pass here a finding" bash -c "grep -qF 'some is \`partial\`' '$QK/test.md' && grep -qF 'A pass here is a finding in itself' '$QK/test.md'"
+  t    "test: the CI log comes in as evidence, not in report.md" bash -c "grep -qF 'the failed job'\''s log as evidence (\`debug run intake\`)' '$QK/test.md' && ! grep -qF 'CI job or run, and its log' '$QK/test.md'"
   t    "test: a long count asks the agent's tool for a longer timeout" grep -qF 'ask your tool for a' "$QK/test.md"
   t    "test: the test, flakiness, and the environment are causes too" bash -c "grep -qF 'the test is wrong' '$QK/test.md' && grep -qF 'not the code' '$QK/test.md'"
   echo "debug: the crash and hang workflow"
@@ -4032,7 +4043,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and stops it after"            bash -c "test -n '$hung' && ! kill -0 '$hung' 2>/dev/null"
   t    "crash: when attaching is refused, the tool launches the program" bash -c "grep -qF 'ptrace scope 1' '$QK/crash.md' && grep -qF 'pkill -INT -P \$!' '$QK/crash.md'"
   t    "crash: unbuffered through env (debug run runs argv as is)" grep -qF '`env PYTHONUNBUFFERED=1 <command>`' "$QK/crash.md"
-  t    "every bisect turns a crash into a plain failure, with its own limit" bash -c "for k in bug test crash field; do grep -qF 'timeout -k 5 60 <command>; rc=\$?; [ \"\$rc\" -ne 127 ] || exit 255; [ \"\$rc\" -eq 0 ] || exit 1' '$QK/'\$k.md || exit 1; done"
+  t    "every bisect turns a crash into a plain failure, with its own limit" bash -c "for k in bug test crash field; do grep -qF 'timeout -k 5 60 <command>; rc=\$?; [ \"\$rc\" -lt 125 ] || [ \"\$rc\" -gt 127 ] || exit 255; [ \"\$rc\" -eq 0 ] || exit 1' '$QK/'\$k.md || exit 1; done"
   t    "every workflow uses the shared playbook's bindings that fit it" bash -c "for k in bug test crash field; do grep -qF 'the bindings that fit this one' '$QK/'\$k.md || exit 1; done"
   t    "crash: the root cause names the faulting path:line and the bad state" grep -qF 'names the faulting `path:line` and the bad state that reached it' "$QK/crash.md"
   echo "debug: the field issue workflow"

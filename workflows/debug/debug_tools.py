@@ -1662,6 +1662,8 @@ def catch_signals():
 
 
 def restore_signals(old):
+    """Put the handlers back. A signal held a moment ago could still meet SIG_IGN or SIG_DFL here on an
+    unpatched 3.8 (bpo-43406); the entry is written by then."""
     global _starting
     _starting = False
     for s, h in old.items():
@@ -1839,7 +1841,8 @@ def cmd_run(root, words, opts, after):
         notes = (["timed out: after %ds" % limit] if timed_out else []) + \
             ([] if ended else ["still running: the command didn't stop"]) + \
             (["not masked: %d secret rule%s debug run can't use (%s)" % (len(gs.SKIPPED), "" if len(gs.SKIPPED) == 1
-              else "s", ", ".join(gs.SKIPPED[:5]) + (", ..." if len(gs.SKIPPED) > 5 else ""))] if gs.SKIPPED else []) + \
+              else "s", ", ".join(sorted(set(gs.SKIPPED))[:5]) + (", ..." if len(set(gs.SKIPPED)) > 5 else ""))]
+             if gs.SKIPPED else []) + \
             (["masked: %d possible secret%s" % (masked, "" if masked == 1 else "s")] if masked else [])
         header = ["# E-%d" % n, "step: " + step] + (["attempt: " + attempt] if attempt else []) + \
                  ["command: " + shown_cmd, "exit: %d" % rc, "head: " + head] + notes

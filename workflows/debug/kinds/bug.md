@@ -77,11 +77,11 @@ the check-in).
   `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
   out that commit's `.agents/`, or none. `git bisect run` gives up on an exit code of 128 or more
   (a crash), so `<test>` turns any failure into 1, and one that can hang gets its own limit:
-  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -ne 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
-  (`gtimeout` on macOS with Homebrew's coreutils). Exit 127 means `timeout` or the command wasn't
-  found; 255 stops the bisect, where 1 would call every commit bad. A limit on the whole
-  `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect (`git status`
-  says so), run `git bisect reset` first.
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -lt 125 ] || [ "$rc" -gt 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
+  (`gtimeout` on macOS with Homebrew's coreutils). 125 to 127 mean `timeout` failed or couldn't
+  find or run the command; 255 stops the bisect, where 1 would call every commit bad. A limit on
+  the whole `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect
+  (`git status` says so), run `git bisect reset` first.
 - Experiments are fine until `root-cause.md` exists; keep track of them so you can revert them.
   Don't put one in a file that already had uncommitted changes. If you must, undo your own lines
   by hand; never `git checkout` that file.

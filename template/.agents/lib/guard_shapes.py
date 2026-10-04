@@ -50,7 +50,7 @@ def shapes():
                 if "[:" in ere:
                     raise re.error("a POSIX class with no Python twin")
                 rx = re.compile(ere)
-            except re.error:
+            except (re.error, OverflowError, RecursionError, ValueError):   # a repeat count past re's limit
                 SKIPPED.append(what)
                 continue
             out.append((rx, what))

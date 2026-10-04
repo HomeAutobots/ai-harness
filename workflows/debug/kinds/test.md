@@ -15,7 +15,7 @@ the check-in).
 
 | # | Step | Playbook section | Produces |
 |---|---|---|---|
-| 1 | intake | `intake` | `report.md`: the failing test's id, the CI job or run, and its log |
+| 1 | intake | `intake` | `report.md`: the failing test's id and the CI job or run; the failed job's log as evidence (`debug run intake`) |
 | 2 | reproduce | `reproduce` | the one test run here, several times, with its pass and fail count |
 | 3 | gather-evidence | `gather-evidence` | the CI and local environments side by side, and the failure itself |
 | 4 | hypothesize | (judgment) | `hypotheses.md` |
@@ -92,11 +92,11 @@ the check-in).
   if any run fails, or the bisect lands on noise. `git bisect run` gives up on an exit code of 128
   or more (a crash), so `<test>` turns any failure into 1, and a test that can hang gets its own
   limit:
-  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -ne 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
-  (`gtimeout` on macOS with Homebrew's coreutils). Exit 127 means `timeout` or the command wasn't
-  found; 255 stops the bisect, where 1 would call every commit bad. A limit on the whole
-  `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect (`git status`
-  says so), run `git bisect reset` first.
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -lt 125 ] || [ "$rc" -gt 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
+  (`gtimeout` on macOS with Homebrew's coreutils). 125 to 127 mean `timeout` failed or couldn't
+  find or run the command; 255 stops the bisect, where 1 would call every commit bad. A limit on
+  the whole `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect
+  (`git status` says so), run `git bisect reset` first.
 - At the first red commit, check what changed: the test, the code it tests, or neither (a
   dependency, the CI config): `debug run isolate -- git show --stat <commit>`.
 - Order and shared state: run the test alone, then with the tests that ran before it in CI, and

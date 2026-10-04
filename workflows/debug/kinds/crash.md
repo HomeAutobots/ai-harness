@@ -105,10 +105,10 @@ the check-in).
   out that commit's `.agents/`, or none. `git bisect run` gives up on an exit code of 128 or more,
   which is what a crash exits with (139 for a segfault, 134 for an abort), and on a hang it waits
   forever. So `<test>` turns any failure into 1 and gives the program its own limit:
-  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -ne 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -lt 125 ] || [ "$rc" -gt 127 ] || exit 255; [ "$rc" -eq 0 ] || exit 1`
   (`gtimeout` on macOS with Homebrew's coreutils; `-k 5` kills it 5 seconds after the limit if it
-  ignores SIGTERM). Exit 127 means `timeout` or the command wasn't found; 255 stops the bisect,
-  where 1 would call every commit bad. A limit on the whole `debug run` stops it before
+  ignores SIGTERM). 125 to 127 mean `timeout` failed or couldn't find or run the command; 255 stops
+  the bisect, where 1 would call every commit bad. A limit on the whole `debug run` stops it before
   `git bisect reset`. If HEAD is ever left mid-bisect (`git status` says so), run
   `git bisect reset` first.
 - An old version: never check it out in place, since the session follows the branch. From the repo
