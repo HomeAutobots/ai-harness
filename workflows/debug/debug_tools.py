@@ -294,13 +294,25 @@ def approvals_path(sdir):
     return os.path.join(sdir, "approvals")
 
 
+def sorted_lines(root, slug, sdir, switch):
+    """The session's approvals file, sorted out: (lines that count for it, as classify() gives them;
+    lines another session's, [(line no, fields)]; classify()'s unrecorded and simulated lines). A
+    line counts for a session only when its id field is the session's start id (start_id, as
+    approve, reject, and close write it) and debug recorded it after the session's start line, so a
+    line from a session in another worktree, or from an earlier session with the same slug, binds
+    nothing here."""
+    counted, unrecorded, simulated = ap.classify(root, KEY, approvals_path(sdir), switch)
+    sid, began = start_id(root, slug, sdir), start_place(root, slug, sdir)
+    mine = [c for c in counted if c[1][1] == sid and c[2] > began]
+    return mine, [(n, parts) for n, parts, p in counted if parts[1] != sid or p <= began], unrecorded, simulated
+
+
 def last_line(root, slug, sdir, switch, kinds):
     """The fields of the session's counted approvals line of one of these kinds that debug recorded
     last (its place in the git-dir record), or None."""
-    counted, _, _ = ap.classify(root, KEY, approvals_path(sdir), switch)
     best, at = None, None
-    for _, parts, p in counted:
-        if parts[1] == slug and parts[0] in kinds and (at is None or p >= at):
+    for _, parts, p in sorted_lines(root, slug, sdir, switch)[0]:
+        if parts[0] in kinds and (at is None or p >= at):
             best, at = parts, p
     return best
 
@@ -372,7 +384,10 @@ def not_open(root, conf, slug, sdir, st, switch):
 # record) and moving the clone changes nothing. A session with no start line is never current
 # (current_session), so a session dir made by hand can't take the real one's place. A start line
 # never counts as an approval or a close: those are read from the session's approvals file by kind
-# (last_line), and start is none of them.
+# (last_line), and start is none of them. approve, reject, and close write the same id in their
+# lines' id field, and a line counts only for the session with that id, recorded after its start line
+# (sorted_lines): a line copied from another worktree's session, or from an earlier session with the
+# same slug, approves and closes nothing.
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 WORKTREE = {}   # root -> (its worktree's id, the repo's top), worked out once per run
 
@@ -386,6 +401,30 @@ def start_id(root, slug, sdir):
     wt, top = WORKTREE[root]
     text = "%s %s %s" % (slug, wt, os.path.relpath(os.path.realpath(sdir), top))
     return " ".join(text.splitlines()).replace("\t", " ")   # as new_line() writes a field
+
+
+STARTS = {}   # record path -> ((size, mtime), {start id: its last place in the record})
+
+
+def start_place(root, slug, sdir):
+    """The place in the git-dir record (its line index, as classify() counts) of the session's last
+    start line; -1 when it has none, or outside git."""
+    path = ap.record_file(root, KEY)
+    try:
+        st = os.stat(path) if path else None
+    except OSError:
+        st = None
+    if st is None:
+        return -1
+    stamp = (st.st_size, st.st_mtime_ns)
+    if STARTS.get(path, (None,))[0] != stamp:
+        places = {}
+        for i, line in enumerate(ap.read_lines(path)):
+            parts = line.split("\t")
+            if len(parts) == 5 and parts[0] == "start":
+                places[parts[1]] = i
+        STARTS[path] = (stamp, places)
+    return STARTS[path][1].get(start_id(root, slug, sdir), -1)
 
 
 def start_value(root):
@@ -1007,9 +1046,12 @@ def playbook_format(ctx):
     return [finding(rel, n, "debug-playbook-format", msg, fix) for n, msg, fix in sorted(hits, key=lambda h: h[0])]
 
 
-def redo(root, kind, slug):
+def redo(root, kind, slug, simulated=False):
     """Who makes an approvals line of this kind for real, and with what command, for a fix line."""
     cmd = debug_cmd(root)
+    if kind in CLOSES and simulated:   # it took the human: the root cause waited on them
+        return ("only the human closes a session whose root cause waits on them: ask them to run %s close %s "
+                "abandoned|duplicate, or to approve or reject it" % (cmd, slug))
     if kind in CLOSES:
         return ("a session ends only through %s close %s abandoned|duplicate|reviewed, or the human's approve"
                 % (cmd, slug))
@@ -1019,38 +1061,51 @@ def redo(root, kind, slug):
 
 @check
 def approvals_recorded(ctx):
-    """debug-approval-unrecorded, debug-approval-simulated, debug-simulated-human (turn, full): an
-    approvals line debug approve, reject, or close didn't record, one a simulated human made while
-    the switch is off, or a switch that doesn't count. Each is a policy block (BLOCKING). Every
-    session's approvals are read, open or not, current or not: a forged line is a forged line.
-    Nothing is said while there are no sessions, so the switch finding speaks only while debug has
-    something it could approve (feature-driven reports the switch on its own). Never the line's
-    date field."""
-    sessions = all_sessions(ctx.root, ctx.conf) if ctx.tier in ("turn", "full") else []
+    """debug-approval-unrecorded, debug-approval-simulated, debug-simulated-human (turn, full; edit
+    for an approvals file that was edited, like feature-driven): an approvals line debug approve,
+    reject, or close didn't record, or that's another session's (sorted_lines); one a simulated
+    human made while the switch is off; or, on turn and full, a switch that doesn't count. Each is
+    a policy block (BLOCKING). Every session's approvals are read, open or not, current or not: a
+    forged line is a forged line. Nothing is said while there are no sessions, so the switch finding
+    speaks only while debug has something it could approve (feature-driven reports the switch on
+    its own). Never the line's date field."""
+    sessions = all_sessions(ctx.root, ctx.conf)
+    if ctx.tier == "edit":
+        sessions = [s for s in sessions if os.path.normpath(approvals_path(s[1])) in ctx.edited]
+    elif ctx.tier not in ("turn", "full"):
+        return []
     if not sessions:
         return []
     out = []
-    if ctx.switch.state == "void":
+    if ctx.switch.state == "void" and ctx.tier != "edit":
         out.append(finding(shown(ctx.root, ctx.switch.path), 1, "debug-simulated-human",
                            "this simulated-human switch %s, so it's off" % ctx.switch.why,
                            "only a person turns it on, with install.sh --simulated-human between agent turns; "
                            "ask them, and delete this file if they didn't"))
-    for slug, sdir, _ in sessions:
+    for slug, sdir, st in sessions:
         path = approvals_path(sdir)
         if not os.path.isfile(path):
             continue
-        _, unrecorded, simulated = ap.classify(ctx.root, KEY, path, ctx.switch)
+        _, foreign, unrecorded, simulated = sorted_lines(ctx.root, slug, sdir, ctx.switch)
+        if not (foreign or unrecorded or simulated):
+            continue
         rel = shown(ctx.root, path)
+        done = bool(not_open(ctx.root, ctx.conf, slug, sdir, st, ctx.switch))   # nothing left to ask for
+        hits = []   # (line no, kind, message, fix)
+        for n, parts in foreign:
+            hits.append((n, "debug-approval-unrecorded", "this %s line belongs to another session (in another "
+                         "worktree, or one this slug had before), so it doesn't count" % one_line(parts[0])[:20],
+                         "delete this line"))
         for n, parts in unrecorded:
-            out.append(finding(rel, n, "debug-approval-unrecorded",
-                               "this %s line wasn't written by debug approve, reject, or close, so it doesn't "
-                               "count" % one_line(parts[0])[:20],
-                               "%s; delete this line" % redo(ctx.root, parts[0], slug)))
+            hits.append((n, "debug-approval-unrecorded", "this %s line wasn't written by debug approve, reject, "
+                         "or close, so it doesn't count" % one_line(parts[0])[:20],
+                         "delete this line" if done else "%s; delete this line" % redo(ctx.root, parts[0], slug)))
         for n, parts in simulated:
-            out.append(finding(rel, n, "debug-approval-simulated",
-                               "this %s line was made by a simulated human (install.sh --simulated-human), and "
-                               "that switch is off in this clone, so it doesn't count" % one_line(parts[0])[:20],
-                               redo(ctx.root, parts[0], slug)))
+            hits.append((n, "debug-approval-simulated", "this %s line was made by a simulated human (install.sh "
+                         "--simulated-human), and that switch is off in this clone, so it doesn't count"
+                         % one_line(parts[0])[:20],
+                         "delete this line" if done else redo(ctx.root, parts[0], slug, simulated=True)))
+        out += [finding(rel, n, kind, msg, fix) for n, kind, msg, fix in sorted(hits, key=lambda h: h[0])]
     return out
 
 
@@ -1874,9 +1929,10 @@ def print_status(root, conf, switch, session):
     gaps = unbound_steps(root, conf, kind)
     if gaps:
         print("steps with no playbook bindings: %s (%s)" % (", ".join(gaps), shown(root, playbook_path(root, conf))))
-    _, unrecorded, simulated = ap.classify(root, KEY, approvals_path(sdir), switch)
+    _, foreign, unrecorded, simulated = sorted_lines(root, slug, sdir, switch)
     for label, rows in (("not written by debug approve, reject, or close", unrecorded),
-                        ("made by a simulated human while the switch is off", simulated)):
+                        ("made by a simulated human while the switch is off", simulated),
+                        ("another session's", foreign)):
         if rows:
             print("not counted, %s: %s" % (label, ", ".join(
                 "%s:%d %s" % (shown(root, approvals_path(sdir)), n, p[0]) for n, p in rows)))
@@ -2036,7 +2092,7 @@ def cmd_approve(root, words, opts, after):
     if sha(rc) != seen:   # the approval binds what the check-in judged
         print("debug: root-cause.md changed while checking; run approve again", file=sys.stderr)
         return 1
-    line, sim = ap.new_line(root, "rootcause", slug, seen, switch)
+    line, sim = ap.new_line(root, "rootcause", start_id(root, slug, sdir), seen, switch)
     ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
     append_line(approvals_path(sdir), line)
     st.update(status="approved", step=last_step(st, st.get("step", "")))
@@ -2060,7 +2116,7 @@ def cmd_reject(root, words, opts, after):
         return session
     slug, sdir, st = session
     rc = os.path.join(sdir, "root-cause.md")
-    line, sim = ap.new_line(root, "reject", slug, sha(rc), switch)
+    line, sim = ap.new_line(root, "reject", start_id(root, slug, sdir), sha(rc), switch)
     ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
     append_line(approvals_path(sdir), line)
     k = 1
@@ -2127,7 +2183,7 @@ def cmd_close(root, words, opts, after):
     # wait on the human.
     by_agent = ap.agent_shell() is not None and not waits
     kind = "close-agent" if by_agent else "close"
-    line, sim = ap.new_line(root, kind, slug, text, switch if waits and ap.agent_shell() else OFF)
+    line, sim = ap.new_line(root, kind, start_id(root, slug, sdir), text, switch if waits and ap.agent_shell() else OFF)
     ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
     append_line(approvals_path(sdir), line)
     st.update(status="closed", note=text)

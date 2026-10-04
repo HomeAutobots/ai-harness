@@ -2941,7 +2941,7 @@ except d.ConfError as e:
   t    "reject sends the root cause back" hasl "$out" "rejected bug-12: root-cause.md is now root-cause.rejected-1.md"
   t    "...the reason goes in hypotheses.md" grep -qxF -- '- why: the caller passes the wrong operands' "$CS/bug-12/hypotheses.md"
   t    "...the session is open again"   bash -c "'$CX' status | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
-  t    "...and it's recorded in the git dir" grep -q '^reject	bug-12	' "$C/.git/ai-harness/debug-approvals"
+  t    "...and it's recorded in the git dir" grep -q '^reject	bug-12 \. \.agents/debug/sessions/bug-12	' "$C/.git/ai-harness/debug-approvals"
   t    "...the confirm attempt for the rejected cause no longer confirms" bash -c "'$CX' status | grep -qxF 'confidence: reproduced' && grep -qx 'confirm_after: $cn' '$CS/bug-12/state'"
   t    "...its check-in task is back in progress" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
   t    "...the check-in question answered, credited to the person" bash -c "! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12' && grep -q 'human: answered Q1: rejected: the caller' '$C/.agents/plans/bug-12/progress.log'"
@@ -2961,7 +2961,7 @@ except d.ConfError as e:
     tnot "...and records nothing"        grep -q '^rootcause' "$CS/bug-12/approvals"
   fi
   t    "approve from a person's terminal" test "$("$CX" approve bug-12)" = "approved bug-12"
-  t    "...the line goes in approvals and the record" bash -c "grep -q '^rootcause	bug-12	' '$CS/bug-12/approvals' && grep -qxF \"\$(tail -1 '$CS/bug-12/approvals')\" '$C/.git/ai-harness/debug-approvals'"
+  t    "...the line goes in approvals and the record" bash -c "grep -q '^rootcause	bug-12 \. \.agents/debug/sessions/bug-12	' '$CS/bug-12/approvals' && grep -qxF \"\$(tail -1 '$CS/bug-12/approvals')\" '$C/.git/ai-harness/debug-approvals'"
   t    "...the session is approved"     bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), approved'"
   t    "...its check-in question answered, its task done" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*done' && ! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12'"
   t    "...the unrelated question still open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
@@ -2973,7 +2973,7 @@ except d.ConfError as e:
   printf 'Also check sub().\n' >> "$CS/bug-12/root-cause.md"
   t    "root-cause.md edited after its approval: open again" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause changed since its approval'"
   t    "...and it can be approved again" test "$("$CX" approve bug-12)" = "approved bug-12"
-  EH="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r, s = sys.argv[2], sys.argv[3]; d.use_lib(r); sw = d.ap.Switch(r); line, _ = d.ap.new_line(r, 'rootcause', 'bug-12', '', sw); d.ap.record(r, d.KEY, [line]); d.append_line(d.approvals_path(s), line); print(d.verdict(r, 'bug-12', s, sw))"
+  EH="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r, s = sys.argv[2], sys.argv[3]; d.use_lib(r); sw = d.ap.Switch(r); line, _ = d.ap.new_line(r, 'rootcause', d.start_id(r, 'bug-12', s), '', sw); d.ap.record(r, d.KEY, [line]); d.append_line(d.approvals_path(s), line); print(d.verdict(r, 'bug-12', s, sw))"
   cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals0"; mv "$CS/bug-12/root-cause.md" "$WORK/debugcli.rc"
   t    "a recorded approval with no hash approves nothing, even with no root-cause.md" test "$(python3 -B -c "$EH" "$GP" "$C" "$CS/bug-12" 2>&1)" = changed
   cp "$WORK/debugcli.approvals0" "$CS/bug-12/approvals"; mv "$WORK/debugcli.rc" "$CS/bug-12/root-cause.md"
@@ -2987,7 +2987,8 @@ except d.ConfError as e:
   rm -rf "$CS/bug-12" "$C/.agents/plans/bug-12"
   "$CX" start bug '#12' >/dev/null; rcdoc "$CS/bug-12/root-cause.md" evidence-only
   cp "$WORK/debugcli.rootcause" "$CS/bug-12/approvals"
-  t    "a new bug-12 with the old one's recorded approvals copied in: not approved" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause changed since its approval'"
+  out="$("$CX" status bug-12)"
+  t    "a new bug-12 with the old one's recorded approvals copied in: not approved, they're the old one's" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open' && printf '%s\n' \"\$1\" | grep -qF \"not counted, another session's: .agents/debug/sessions/bug-12/approvals:1 rootcause\"" _ "$out"
   rm -rf "$CS/bug-12" "$C/.agents/plans/bug-12"
   mv "$CS/bug-proj-30/root-cause.md" "$CS/bug-proj-30/rc.real"; ln -s rc.real "$CS/bug-proj-30/root-cause.md"
   trc  "approve refuses a symlinked root-cause.md (2)" 2 "$CX" approve bug-proj-30
@@ -3012,7 +3013,8 @@ except d.ConfError as e:
   rcdoc "$SMS/root-cause.md" evidence-only
   trc  "simulated human: an agent shell without the token is refused" 2 env CLAUDECODE=1 "$SMX" approve bug-1
   t    "...the token approves, marked simulated" test "$(CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKS" "$SMX" approve bug-1 2>&1)" = "approved bug-1 (simulated human)"
-  t    "...in the line itself"         grep -q '^rootcause	bug-1	[^	]* (simulated human)	' "$SMS/approvals"
+  t    "...in the line itself"         grep -q '^rootcause	bug-1 [^	]*	[^	]* (simulated human)	' "$SMS/approvals"
+  t    "...and verify, with the switch on, counts it: no block" bash -c "'$SM/.agents/bin/verify' 2>&1 | sed -n 1p | grep -qx 'ok verify turn'"
   mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
   t    "...and it counts only while the switch is on" bash -c "'$SMX' status bug-1 | grep -qxF 'session: bug-1 (bug, #1), open'"
   "$SMX" run isolate -- true >/dev/null
@@ -3025,7 +3027,7 @@ except d.ConfError as e:
   cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
   "$SMX" start bug '#3' >/dev/null
   CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKS" "$SMX" close bug-3 abandoned >/dev/null
-  t    "...an agent with the token closing what doesn't wait on the human: still an agent's close" bash -c "tail -1 '$SM/.agents/debug/sessions/bug-3/approvals' | grep -q '^close-agent	bug-3	[^	]*[^)]	[^	]*	abandoned$'"
+  t    "...an agent with the token closing what doesn't wait on the human: still an agent's close" bash -c "tail -1 '$SM/.agents/debug/sessions/bug-3/approvals' | grep -q '^close-agent	bug-3 [^	]*	[^	]*[^)]	[^	]*	abandoned$'"
   "$CX" start bug '#13' >/dev/null
   trc  "close needs a reason it knows"  2 "$CX" close bug-13 fixed
   out="$("$CX" close nosuch reviewed 2>&1)" && rc=0 || rc=$?
@@ -3036,7 +3038,7 @@ except d.ConfError as e:
   git -C "$C" checkout -q src/calc.c
   t    "absence: no root-cause.md, the agent closes abandoned, with a note" bash -c "CLAUDECODE=1 '$CX' close bug-13 abandoned 'reporter went quiet' | grep -qxF 'closed bug-13 (abandoned: reporter went quiet)'"
   t    "...the session is closed"       bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
-  t    "...the close is recorded, as an agent's" bash -c "grep -q '^close-agent	bug-13	.*	abandoned: reporter went quiet$' '$C/.git/ai-harness/debug-approvals' && grep -q '^close-agent	bug-13	' '$CS/bug-13/approvals'"
+  t    "...the close is recorded, as an agent's" bash -c "grep -q '^close-agent	bug-13 .*	abandoned: reporter went quiet$' '$C/.git/ai-harness/debug-approvals' && grep -q '^close-agent	bug-13 ' '$CS/bug-13/approvals'"
   t    "...and its task is done"        bash -c "'$C/.agents/bin/tasks' list bug-13 | grep -q 'T1.*done'"
   trc  "closing it again: exit 1"       1 "$CX" close bug-13 duplicate
   t    "the policy lets an agent close a session" policy "$C" test ".agents/commands/debug close bug-13 duplicate 'see bug-12'"
@@ -3059,7 +3061,7 @@ except d.ConfError as e:
   t    "rootcause back in DEBUG_ASK: a reviewed close no longer counts" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open, closed as reviewed but DEBUG_ASK has rootcause'"
   t    "absence: an agent's close with no root-cause.md still counts after DEBUG_ASK changes" bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
   t    "a person's terminal closes a root cause that waits on them" bash -c "'$CX' close bug-14 duplicate 'same as bug-13' | grep -qxF 'closed bug-14 (duplicate: same as bug-13)'"
-  t    "...and that close counts, with the root cause there" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), closed (duplicate: same as bug-13)' && tail -1 '$CS/bug-14/approvals' | grep -q '^close	bug-14	'"
+  t    "...and that close counts, with the root cause there" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), closed (duplicate: same as bug-13)' && tail -1 '$CS/bug-14/approvals' | grep -q '^close	bug-14 '"
   "$CX" start bug '#20' >/dev/null; rcdoc "$CS/bug-20/root-cause.md" evidence-only
   mv "$CS/bug-20/root-cause.md" "$WORK/debugcli.rc20"
   CLAUDECODE=1 "$CX" close bug-20 abandoned >/dev/null
@@ -3540,6 +3542,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and so does the linked one"  hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
   "$KX" close bug-20 abandoned -- worktree test >/dev/null
   t    "...closing one leaves the other open" hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
+  cp "$K/.agents/debug/sessions/bug-20/approvals" "$WORK/debugchk-wt/.agents/debug/sessions/bug-20/approvals"
+  t    "...the closed one's line copied into the other closes nothing" bash -c "cd '$WORK/debugchk-wt' && .agents/commands/debug status | grep -qxF 'session: bug-20 (bug, #20), open'"
+  out="$(cd "$WORK/debugchk-wt" && .agents/bin/verify 2>&1)" && rc=0 || rc=$?
+  t    "...and it's a policy block there" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '.agents/debug/sessions/bug-20/approvals:1: error: [debug-approval-unrecorded] this close line belongs to another session'" _ "$out"
   git -C "$K" worktree remove --force "$WORK/debugchk-wt"; git -C "$K" branch -q -D wt
   rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
   echo "debug: approvals debug didn't record"
@@ -3552,7 +3558,8 @@ if [ "$HAVE_PY" -eq 1 ]; then
   tnot "...and no date from the line"   hasl "$out" "2026-10-03"
   t    "...the session stays open"      bash -c "'$KX' status | grep -qxF 'session: bug-9 (bug, #9), open'"
   t    "...status says it isn't counted" hasl "$("$KX" status)" "not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-9/approvals:1 rootcause"
-  trc  "...the edit tier doesn't judge it" 0 "$K/.agents/bin/check" .agents/debug/sessions/bug-9/approvals
+  trc  "...the edit tier judges an edited approvals file, like feature-driven" 2 "$K/.agents/bin/check" .agents/debug/sessions/bug-9/approvals
+  trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
   printf -- '- skill: no-such-skill\n' >> "$KP"; printf 'LIBRARIES="vendor/skills"\n' >> "$K/.agents/harness.conf"
   out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
   t    "a forged approval and a tooling problem: still a policy block, both printed" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '[debug-approval-unrecorded]' && printf '%s' \"\$1\" | grep -qF \"infra: the playbook's skill no-such-skill isn't available\"" _ "$out"
@@ -3564,9 +3571,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and it closes nothing"       bash -c "'$KX' status | grep -qxF 'session: bug-9 (bug, #9), open'"
   "$KX" close bug-9 abandoned >/dev/null
   t    "...and a closed session's forged line still blocks" bash -c "'$KV' >/dev/null 2>&1; test \$? = 2"
-  printf 'rootcause\tbug-9\tt (simulated human)\t2026-10-03\tx\n' > "$KS/approvals"; cp "$KS/approvals" "$WORK/sim.line"; mkdir -p "$K/.git/ai-harness"; cat "$WORK/sim.line" >> "$K/.git/ai-harness/debug-approvals"
+  t    "...its fix just says to delete it: nothing's left to ask for" bash -c "'$KV' 2>&1 | grep -A1 -F 'bug-9/approvals:1: error: [debug-approval-unrecorded]' | grep -qxF '  fix: delete this line'"
+  printf 'rootcause\tbug-9 . .agents/debug/sessions/bug-9\tt (simulated human)\t2026-10-03\tx\n' > "$KS/approvals"; cp "$KS/approvals" "$WORK/sim.line"; mkdir -p "$K/.git/ai-harness"; cat "$WORK/sim.line" >> "$K/.git/ai-harness/debug-approvals"
   out="$("$KV" 2>&1)" && rc=0 || rc=$?
   t    "a simulated approval while the switch is off: a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-9/approvals:1: error: [debug-approval-simulated] this rootcause line was made by a simulated human\"" _ "$out"
+  printf 'close\tbug-9 . .agents/debug/sessions/bug-9\tt (simulated human)\t2026-10-03\tabandoned\n' | tee -a "$KS/approvals" >> "$K/.git/ai-harness/debug-approvals"
+  t    "...a simulated close's fix says to ask the human" hasl "$("$KV" 2>&1)" "  fix: only the human closes a session whose root cause waits on them: ask them to run .agents/commands/debug close bug-9 abandoned|duplicate, or to approve or reject it"
+  h="$(python3 -c 'import hashlib; print(hashlib.sha256(b"debugchk-token-123456").hexdigest())')"
+  printf '#simulated-human\t%s\n' "$h" >> "$K/.git/ai-harness/debug-approvals"
+  printf 'on\t%s\tinstall.sh --simulated-human, run from a terminal\n' "$h" > "$K/.git/ai-harness/simulated-human"
+  t    "...with the switch on, they count: no block" bash -c "'$KV' 2>&1 | sed -n 1p | grep -qx 'ok verify turn'"
   rm -f "$KS/approvals"
   printf 'on\t%s\tinstall.sh --simulated-human, run from a terminal\n' "$(python3 -c 'import hashlib; print(hashlib.sha256(b"agent-made-token-1234").hexdigest())')" > "$K/.git/ai-harness/simulated-human"
   out="$("$KV" 2>&1)" && rc=0 || rc=$?
@@ -3575,6 +3589,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "absence: no sessions, debug says nothing about it" test "$("$KV" 2>&1)" = "ok verify turn"
   t    "...nor on the full tier"        test "$("$KV" --tier=full 2>&1)" = "ok verify full"
   rm -f "$K/.git/ai-harness/simulated-human"
+  fresh 16
+  "$KX" close bug-16 abandoned >/dev/null; cp "$KS/approvals" "$WORK/debugchk.close16"
+  fresh 16
+  cp "$WORK/debugchk.close16" "$KS/approvals"
+  t    "a close line from an earlier session with the same slug closes nothing" bash -c "'$KX' status | grep -qxF 'session: bug-16 (bug, #16), open'"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "...and it's a policy block"     bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-16/approvals:1: error: [debug-approval-unrecorded] this close line belongs to another session (in another worktree, or one this slug had before), so it doesn't count\"" _ "$out"
+  t    "...whose fix is to delete it"   hasl "$out" "  fix: delete this line"
+  t    "...and status lists it"         hasl "$("$KX" status)" "not counted, another session's: .agents/debug/sessions/bug-16/approvals:1 close"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
   echo "debug: a check-in a check can't run"
   fresh 15; hyp
   "$KX" run reproduce --attempt=reproduce -- true >/dev/null; "$KX" outcome E-1 not-reproduced >/dev/null

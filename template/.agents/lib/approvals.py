@@ -63,14 +63,17 @@ def shown(root, path):
 
 # ------------------------------------------------------------------ the record
 
+RECORD_DIRS = {}   # root -> record_dir(root), worked out once per run: a pack reads many approvals files
+
+
 def record_dir(root):
     """<git dir every worktree shares>/ai-harness: outside the working tree and every pack's own
     files. None outside git: nothing to record in, so every line counts."""
-    gd = git(root, "rev-parse", "--git-common-dir").strip()
-    if not gd:
-        return None
-    gd = gd if os.path.isabs(gd) else os.path.join(root, gd)
-    return os.path.join(os.path.normpath(gd), "ai-harness")
+    if root not in RECORD_DIRS:
+        gd = git(root, "rev-parse", "--git-common-dir").strip()
+        gd = gd if not gd or os.path.isabs(gd) else os.path.join(root, gd)
+        RECORD_DIRS[root] = os.path.join(os.path.normpath(gd), "ai-harness") if gd else None
+    return RECORD_DIRS[root]
 
 
 def record_file(root, key):
