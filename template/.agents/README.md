@@ -17,7 +17,7 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `bin/tasks` | harness | Plan ledger CLI (`plans/<slug>/tasks.json`) |
 | `bin/eval` | harness | Replays real fixes to measure whether the harness helps |
 | `bin/gitflow` | harness | The repo's git workflow: branch, commit, update, push, PR, review, merge, checks |
-| `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, `agents_render.py` (per-tool agent renderer), `approvals.py` (approvals only a person records, for packs with human gates), hook adapter |
+| `lib/`, `hooks/` | harness | Shared shell library, JSON renderer, `agents_render.py` (per-tool agent renderer), `approvals.py` (approvals only a person records, for packs with human gates), `guard_shapes.py` (guard's secret rules for Python: the MCP secrets check, `debug run`'s masking), hook adapter |
 | `builtin/` | harness | The built-in library: the harness's skills and its workflow and stack packs (e.g. req-driven, cpp-cmake, python), rebuilt on every install |
 | `library/` | project | Your library: `skills/`, `workflows/`, `stacks/`. Upgrades never touch it. Also searched: `LIBRARIES` in `harness.conf`, your personal `~/.config/ai-harness/` |
 | `skills/` | sync | Every resolved skill, rendered (links, or copies with `LINK_MODE=copy`). Don't edit here; a skill added by hand moves to `library/skills/` |
