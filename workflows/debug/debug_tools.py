@@ -418,6 +418,32 @@ def cmd_check(tier, root, files):
     return emit(found, blocked)
 
 
+@check
+def no_repro_attempt(ctx):
+    """debug-no-repro-attempt (check-in, full): root-cause.md exists, but no reproduction attempt
+    has its outcome recorded. A confirmation attempt counts too (it's a reproduction as well). The
+    outcome itself never blocks: not-reproduced is a fine answer."""
+    rc = ctx.path("root-cause.md") if ctx.slug else ""
+    if ctx.tier not in ("checkin", "full") or not rc or not os.path.isfile(rc):
+        return []
+    ev = evidence(ctx.sdir)
+    tried = sorted(n for n, e in ev.items() if e.get("attempt") in ATTEMPTS)
+    if any(ev[n].get("outcome") in OUTCOMES for n in tried):
+        return []
+    cmd = debug_cmd(ctx.root)
+    if tried:
+        n = tried[-1]
+        return [finding(shown(ctx.root, rc), 1, "debug-no-repro-attempt",
+                        "E-%d is a %s attempt, but its outcome isn't recorded"
+                        % (n, "reproduction" if ev[n]["attempt"] == "reproduce" else "confirmation"),
+                        "record it: %s outcome E-%d reproduced|partial|not-reproduced" % (cmd, n))]
+    return [finding(shown(ctx.root, rc), 1, "debug-no-repro-attempt",
+                    "root-cause.md is written, but session %s has no reproduction attempt" % ctx.slug,
+                    "try to reproduce it once: %s run reproduce --attempt=reproduce -- <command>, then record "
+                    "the outcome (%s outcome E-<n> ...). Not reproduced is a fine answer; the attempt is "
+                    "what's required" % (cmd, cmd))]
+
+
 # ------------------------------------------------------------------ the debug command
 
 CLI = {}   # name -> (function, usage line, options it takes), in the order usage lists them

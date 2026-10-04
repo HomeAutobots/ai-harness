@@ -3076,6 +3076,7 @@ except d.ConfError as e:
   "$CX" close bug-17 abandoned >/dev/null
   t    "status of a closed session keeps its verdict" bash -c "'$CX' status bug-17 | grep -qxF 'session: bug-17 (bug, #17), closed (abandoned), root cause rejected'"
   "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only
+  "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null   # the check-in wants one
   cp "$C/.agents/harness.conf" "$WORK/debugcli.conf18"; edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
   "$CX" run hypothesize -- "$CX" approve bug-18 >/dev/null
   cp "$WORK/debugcli.conf18" "$C/.agents/harness.conf"
@@ -3105,6 +3106,51 @@ except d.ConfError as e:
 fi
 }
 group grp_debug_cli
+grp_debug_checks() {   # the debug pack's checks, each with its absence case
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflow: checks"
+  K=$(repo debugchk)
+  mkdir -p "$K/src" "$K/docs"; printf 'int add(int a, int b) { return a - b; }\n' > "$K/src/calc.c"; printf '# Simulator\n' > "$K/docs/sim.md"
+  commit "$K" base
+  "$HARNESS/install.sh" --team --workflow debug "$K" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$K/.agents/checks/$tier.sh"; done
+  commit "$K" harness
+  KX="$K/.agents/commands/debug"; KV="$K/.agents/bin/verify"
+  fresh(){ rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*; "$KX" start bug "#$1" >/dev/null; KS="$K/.agents/debug/sessions/bug-$1"; KR="$KS/root-cause.md"; }
+  hyp(){ printf '## H-1: add subtracts\n- would confirm: add(2,2) is 0\n- status: confirmed (E-1)\n' >> "$KS/hypotheses.md"; }
+  echo "debug: no reproduction attempt"
+  t    "absence: no open session, full tier quiet" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  fresh 5
+  t    "absence: a session with no root cause, full tier quiet" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  hyp; "$KX" run gather-evidence -- cat "$K/src/calc.c" >/dev/null
+  rcdoc "$KR" evidence-only
+  t    "the turn tier doesn't ask for an attempt" test "$("$KV" 2>&1)" = "ok verify turn"
+  t    "...nor the edit tier"           test "$("$KV" --tier=edit "$KR" 2>&1)" = "ok verify edit"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "full: a root cause and no reproduction attempt" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '.agents/debug/sessions/bug-5/root-cause.md:1: error: [debug-no-repro-attempt] root-cause.md is written, but session bug-5 has no reproduction attempt'" _ "$out"
+  t    "...with a fix line"             hasl "$out" "  fix: try to reproduce it once: .agents/commands/debug run reproduce --attempt=reproduce -- <command>"
+  out="$("$KX" approve bug-5 2>&1)" && rc=0 || rc=$?
+  t    "approve runs it too, and refuses" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-no-repro-attempt]' && printf '%s' \"\$1\" | grep -qF 'debug: fix these before approving bug-5'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  out="$(CLAUDECODE=1 "$KX" close bug-5 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "DEBUG_ASK empty: close reviewed runs it too, and refuses" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-no-repro-attempt]' && printf '%s' \"\$1\" | grep -qF 'debug: fix these before closing bug-5'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  "$KX" run reproduce --attempt=reproduce -- false >/dev/null || true
+  t    "an attempt with no outcome still needs one" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a reproduction attempt, but its outcome isn't recorded"
+  "$KX" outcome E-2 not-reproduced >/dev/null
+  t    "not reproduced is enough: the attempt is what's required" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  fresh 6
+  hyp; "$KX" run gather-evidence -- cat "$K/src/calc.c" >/dev/null
+  rcdoc "$KR" confirmed
+  "$KX" run isolate --attempt=confirm -- true >/dev/null
+  t    "a confirmation attempt with no outcome still needs one" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a confirmation attempt, but its outcome isn't recorded"
+  "$KX" outcome E-2 reproduced >/dev/null
+  t    "a confirmation attempt with its outcome is a reproduction attempt too" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+fi
+}
+group grp_debug_checks
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
