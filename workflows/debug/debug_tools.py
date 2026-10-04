@@ -48,8 +48,8 @@ TAIL = 60   # lines of a command's output kept in its evidence entry (E-<n>.md).
             # read E-<n>.log: checks/state.sh leaves *.log out of verify's cache key.
 STATE_KEYS = ("kind", "ref", "start", "branch", "seq", "step", "status", "note", "confirm_after")
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
-EID = re.compile(r"(?<![A-Za-z0-9-])E-([0-9]+)(?![0-9])")
-HID = re.compile(r"(?<![A-Za-z0-9-])H-([0-9]+)(?![0-9])")
+EID = re.compile(r"(?<![A-Za-z0-9-])E-([0-9]+)(?!\w)")   # (?!\w): the \b hypotheses() ends a heading's id with
+HID = re.compile(r"(?<![A-Za-z0-9-])H-([0-9]+)(?!\w)")
 # A check that emits a policy-block kind must list it here, or it exits 1.
 BLOCKING = ("debug-approval-unrecorded", "debug-approval-simulated", "debug-simulated-human")
 
@@ -554,13 +554,16 @@ def rc_format(ctx):
     return out
 
 
-def citations(path, kinds):
-    """[(kind, n, [line nos])] of the ids a file cites outside fences, kind 'E' or 'H' (only those
-    in kinds), in the order they're first cited; each line once per id. An id is E- or H- in
-    capitals, then digits, with no letter, digit or hyphen before it ('E-1.', '(E-2, E-3)'; not
-    'XE-5' or 'e-7'); the number ends at the first non-digit, so E-10 is never E-1."""
+def citations(path, kinds, only=None):
+    """[(kind, n, [line nos])] of the ids a file cites outside fences (on the lines in only, when
+    given), kind 'E' or 'H' (only those in kinds), in the order they're first cited; each line once
+    per id. An id is E- or H- in capitals, then digits, with no letter, digit or hyphen before it
+    and no letter, digit or underscore after it ('E-1.', '(E-2, E-3)'; not 'XE-5', 'H-7x' or 'e-7'),
+    so E-10 is never E-1. Ids in code spans and URLs count ('`E-9`'); fenced ones don't."""
     found = {}
     for n, line in unfenced(read_lines(path))[0]:
+        if only is not None and n not in only:
+            continue
         hits = sorted((m.start(), k, int(m.group(1))) for k, rx in (("E", EID), ("H", HID)) if k in kinds
                       for m in rx.finditer(line))
         for _, k, i in hits:
@@ -574,34 +577,43 @@ def citations(path, kinds):
 def evidence_missing(ctx):
     """debug-evidence-missing (turn, full, check-in; edit when root-cause.md or hypotheses.md is
     edited): root-cause.md cites an E-id debug run didn't capture in this session (evidence())
-    or an H-id hypotheses.md doesn't have, or hypotheses.md cites a missing E-id. An edited
-    hypotheses.md also has root-cause.md's H-ids judged, since dropping a hypothesis breaks them.
-    Citations in fenced code don't count. One finding per id per file, at the line that first
+    or an H-id hypotheses.md doesn't have, or a hypothesis in hypotheses.md cites a missing E-id.
+    In hypotheses.md only the '## H-<n>' sections count, so the human's reject reason and other
+    notes there are never findings. When only hypotheses.md was edited (the edit tier), root-cause.md
+    is judged for its H-ids alone, since dropping a hypothesis breaks those and nothing else.
+    Fenced code doesn't count (citations()). One finding per id per file, at the line that first
     cites it; past 5 in a file, the fifth names the rest."""
     if not ctx.slug:
         return []
     rc, hy = ctx.path("root-cause.md"), ctx.path("hypotheses.md")
-    todo = [(rc, "EH")] if os.path.isfile(rc) and (ctx.judged(rc) or ctx.judged(hy)) else []
-    todo += [(hy, "E")] if ctx.judged(hy) else []
+    todo = [(rc, "EH" if ctx.judged(rc) else "H", None)] if os.path.isfile(rc) and (ctx.judged(rc) or
+                                                                                   ctx.judged(hy)) else []
+    secs, fence = h_sections(hy)
+    todo += [(hy, "E", set().union(*[h[4] for h in secs]))] if ctx.judged(hy) else []
     if not todo:
         return []
-    ev, hs, cmd, out = evidence(ctx.sdir), {h[0] for h in hypotheses(hy)}, debug_cmd(ctx.root), []
+    ev, hs, cmd, out = evidence(ctx.sdir), {h[0] for h in secs}, debug_cmd(ctx.root), []
+    no_h = ": there's no hypotheses.md" if not os.path.isfile(hy) else \
+        " (the fence at line %d in hypotheses.md never closes)" % fence if fence else ""
     kind = "debug-evidence-missing"
-    for p, kinds in todo:
+    for p, kinds, only in todo:
         rel = shown(ctx.root, p)
-        bad = [c for c in citations(p, kinds) if c[1] not in (ev if c[0] == "E" else hs)]
+        bad = [c for c in citations(p, kinds, only) if c[1] not in (ev if c[0] == "E" else hs)]
+        # verify shows at most 5 findings per file (FEEDBACK_MAX_PER_FILE), counting debug-format's on
+        # root-cause.md, and says how many more are in its log. Capping here keeps a long list from
+        # crowding those out, and the fifth names the rest (up to 8); debug approve's output isn't capped.
         for k, i, ls in (bad[:4] if len(bad) > 5 else bad):
             also = "" if len(ls) < 2 else " (also cited on line%s %s%s)" % (
                 "s" if len(ls) > 2 else "", ", ".join(str(x) for x in ls[1:4]), ", ..." if len(ls) > 4 else "")
             if k == "H":
-                out.append(finding(rel, ls[0], kind, "H-%d isn't in hypotheses.md%s" % (i, also),
+                out.append(finding(rel, ls[0], kind, "H-%d isn't in hypotheses.md%s%s" % (i, no_h, also),
                                    "cite a hypothesis hypotheses.md has (a '## H-<n>: <claim>' section), or add "
                                    "it there first"))
             elif os.path.lexists(os.path.join(ctx.sdir, "evidence", "E-%d.md" % i)):
                 out.append(finding(rel, ls[0], kind, "E-%d isn't in this session's evidence: evidence/E-%d.md "
                                    "isn't an entry debug run captured%s" % (i, i, also),
                                    "capture it with %s run <step> -- <command> and cite the E-id it prints; an "
-                                   "entry written by hand (no command: and exit: lines) isn't evidence" % cmd))
+                                   "entry written by hand isn't evidence" % cmd))
             else:
                 out.append(finding(rel, ls[0], kind, "E-%d isn't in this session's evidence: there's no "
                                    "evidence/E-%d.md%s" % (i, i, also),
@@ -1082,6 +1094,32 @@ def cmd_outcome(root, words, opts, after):
 H_STATUSES = ("open", "confirmed", "ruled")
 
 
+def h_sections(path):
+    """([[n, line no, status, status seen, {line nos in the section}]], the line of a fence still
+    open at the end or 0) for hypotheses.md: what hypotheses() returns, plus the lines each section
+    holds, its heading included."""
+    out, cur = [], None
+    lines, at = unfenced(read_lines(path))
+    for n, line in lines:
+        m = re.match(r"^## H-([0-9]+)\b", line)
+        if m:
+            cur = [int(m.group(1)), n, "open", False, {n}]
+            out.append(cur)
+            continue
+        if re.match(r"#{1,6}\s", line):
+            cur = None
+            continue
+        if cur is None:
+            continue
+        cur[4].add(n)
+        s = re.match(r"^\s*[-*]\s+[*_`]*status[*_`]*\s*:(.*)$", line, re.I)
+        if s and not cur[3]:
+            w = re.match(r"[\s*_`]*([A-Za-z]+)", s.group(1))
+            word = w.group(1).lower() if w else ""
+            cur[2], cur[3] = (word if word in H_STATUSES else "unclear"), True
+    return out, at
+
+
 def hypotheses(path):
     """[(n, line no, status)] for each '## H-<n>: <claim>' section in hypotheses.md, in file order (an
     id written twice is there twice). status is the first word of the section's first '- status:'
@@ -1089,22 +1127,7 @@ def hypotheses(path):
     unclear for any other word or none; open when there's no status line. Any other markdown heading
     (1 to 6 #, then a space) ends a section; a line like '#12 says' or '#include' doesn't. Lines
     inside ``` or ~~~ fences are code, skipped (unfenced())."""
-    out, cur = [], None
-    for n, line in unfenced(read_lines(path))[0]:
-        m = re.match(r"^## H-([0-9]+)\b", line)
-        if m:
-            cur = [int(m.group(1)), n, "open", False]
-            out.append(cur)
-            continue
-        if re.match(r"#{1,6}\s", line):
-            cur = None
-            continue
-        s = re.match(r"^\s*[-*]\s+[*_`]*status[*_`]*\s*:(.*)$", line, re.I)
-        if s and cur is not None and not cur[3]:
-            w = re.match(r"[\s*_`]*([A-Za-z]+)", s.group(1))
-            word = w.group(1).lower() if w else ""
-            cur[2], cur[3] = (word if word in H_STATUSES else "unclear"), True
-    return [tuple(h[:3]) for h in out]
+    return [tuple(h[:3]) for h in h_sections(path)[0]]
 
 
 def confirm_after(st):

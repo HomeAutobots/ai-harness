@@ -3210,14 +3210,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "an E-id debug run didn't capture" hasl "$out" "root-cause.md:$(line_of "$KR" 'See also'): error: [debug-evidence-missing] E-9 isn't in this session's evidence: there's no evidence/E-9.md"
   t    "...and an H-id hypotheses.md doesn't have" hasl "$out" "root-cause.md:$(line_of "$KR" 'See also'): error: [debug-evidence-missing] H-4 isn't in hypotheses.md"
   out="$("$KX" approve bug-6 2>&1)" && rc=0 || rc=$?
-  t    "approve refuses on it"          bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-evidence-missing] E-9'" _ "$out"
-  trc  "the edit tier checks an edited root cause" 1 "$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md
-  trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  t    "approve refuses on a missing E-id" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-evidence-missing] E-9'" _ "$out"
+  out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md 2>&1)" && rc=0 || rc=$?
+  t    "evidence-missing: the edit tier checks an edited root cause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-evidence-missing]'" _ "$out"
+  trc  "evidence-missing: ...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
   rcdoc "$KR" evidence-only
-  printf '\nNot E-10 (E-2, E-3). XE-5, H-1x, e-7, E-2.\n' >> "$KR"
+  printf '\nNot E-10 (E-2, E-3). XE-5, H-7x, e-7, E-2, `E-8`.\n' >> "$KR"
   out="$("$KV" 2>&1 || true)"
   t    "ids end at a non-digit: E-10 isn't E-1, and (E-2, E-3) is two" bash -c "printf '%s' \"\$1\" | grep -qF '] E-10 isn'\''t' && printf '%s' \"\$1\" | grep -qF '] E-3 isn'\''t'" _ "$out"
-  t    "...XE-5 and lowercase e-7 aren't ids" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 2
+  t    "...a backticked E-8 is a citation" hasl "$out" "] E-8 isn't in this session's evidence"
+  t    "...XE-5, H-7x, and lowercase e-7 aren't" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 3
   rcdoc "$KR" evidence-only
   printf '# E-3\nstep: gather-evidence\n\n## Output\nIt subtracts, I looked.\n' > "$KS/evidence/E-3.md"
   printf '\nE-3 says so.\nE-3 again, and E-3.\nE-3 once more.\n' >> "$KR"
@@ -3240,13 +3242,25 @@ if [ "$HAVE_PY" -eq 1 ]; then
   edit "$KS/hypotheses.md" '/^```$/,/^```$/d'
   printf -- '- status: ruled out (E-7)\n' >> "$KS/hypotheses.md"
   t    "hypotheses.md is checked too"   hasl "$("$KV" 2>&1)" "hypotheses.md:$(line_of "$KS/hypotheses.md" '(E-7)'): error: [debug-evidence-missing] E-7 isn't in this session's evidence"
-  printf '\nH-4 is the one.\n' >> "$KR"
+  printf '\nH-4 is the one, E-9 shows it.\n' >> "$KR"
   out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/hypotheses.md 2>&1)" && rc=0 || rc=$?
   t    "the edit tier checks an edited hypotheses.md" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'hypotheses.md:$(line_of "$KS/hypotheses.md" '(E-7)'): error: [debug-evidence-missing] E-7'" _ "$out"
   t    "...and root-cause.md's H-ids against it" hasl "$out" "root-cause.md:$(line_of "$KR" 'H-4 is'): error: [debug-evidence-missing] H-4 isn't in hypotheses.md"
+  t    "...but not its E-ids (hypotheses.md doesn't change them)" bash -c "! printf '%s' \"\$1\" | grep -qF '] E-9'" _ "$out"
+  edit "$KS/hypotheses.md" '$d'
+  printf '```\n' >> "$KS/hypotheses.md"
+  t    "an unclosed fence in hypotheses.md is named on H findings" hasl "$("$KV" 2>&1)" "H-4 isn't in hypotheses.md (the fence at line $(line_of "$KS/hypotheses.md" '```') in hypotheses.md never closes)"
   edit "$KS/hypotheses.md" '$d'
   rcdoc "$KR" evidence-only
   t    "absence: only real ids, nothing to say" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\n## Notes\nE-50 looked odd.\n' >> "$KS/hypotheses.md"
+  t    "hypotheses.md: only H sections cite evidence, not other notes" test "$("$KV" 2>&1)" = "ok verify turn"
+  edit "$KS/hypotheses.md" '/^## Notes$/,$d'
+  mv "$KS/hypotheses.md" "$WORK/debugchk.hyp"
+  t    "no hypotheses.md: a cited H-1 is missing" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" '(H-1)'): error: [debug-evidence-missing] H-1 isn't in hypotheses.md: there's no hypotheses.md"
+  mv "$WORK/debugchk.hyp" "$KS/hypotheses.md"
+  "$KX" reject bug-6 'see E-42' >/dev/null
+  t    "a rejection's reason in hypotheses.md isn't a citation" test "$("$KV" 2>&1)" = "ok verify turn"
 fi
 }
 group grp_debug_checks
