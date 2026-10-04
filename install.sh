@@ -4,9 +4,10 @@
 #   ./install.sh [--local | --team] [--stack <name>]... [--workflow <name>]... [--simulated-human] <project-dir>
 #
 # --simulated-human is for flows where an agent plays the person (a scratch repo, a pilot, a demo):
-# a shell holding the token it prints may approve feature-driven gates in this clone, even an
-# agent's shell, and every approval is marked simulated. Never in a real project. It's kept in the
-# git dir, so it's per clone; delete .git/ai-harness/simulated-human to turn it off.
+# a shell holding the token it prints may approve the gates of every workflow pack with human gates
+# (feature-driven, debug) in this clone, even an agent's shell, and every approval is marked
+# simulated. Never in a real project. It's kept in the git dir, so it's per clone; delete
+# .git/ai-harness/simulated-human to turn it off.
 #
 # Harness-owned files are replaced on every run. Project-owned files are only created when
 # missing, so re-running is the upgrade and never touches tailoring. What the harness ships
@@ -98,16 +99,31 @@ done
 for w in $NEW_WORKFLOWS; do
   known_pack workflows "$w" || { echo "install: unknown workflow '$w' (not shipped with the harness or in a library)" >&2; usage; }
 done
-# --simulated-human: checked before anything changes. It only affects feature-driven approvals and
-# lives in the git dir. A token the caller sets must be long enough that an agent can't guess it.
+# --simulated-human: checked before anything changes. It only affects the approvals of workflow
+# packs with human gates (a pack with a human-gates file) and lives in the git dir. A token the
+# caller sets must be long enough that an agent can't guess it.
+gated_pack() {  # gated_pack <name>: the pack that will run has human gates (a library's copy, else the one shipped here)
+  local p
+  p="$(agents_resolve workflows "$1" 2>/dev/null)" || p=""
+  case "$p" in ""|"$DEST/.agents/builtin/"*) p="$HARNESS/workflows/$1" ;; esac   # builtin/ is rebuilt below
+  [ -f "$p/human-gates" ]
+}
 if [ "$SIMULATED_HUMAN" -eq 1 ]; then
   git -C "$DEST" rev-parse --git-dir >/dev/null 2>&1 \
     || { echo "install: --simulated-human needs a git repo (it's kept in the git dir, per clone)" >&2; exit 2; }
   command -v python3 >/dev/null 2>&1 || { echo "install: --simulated-human needs python3" >&2; exit 3; }
-  case " $(sed -n 's/^WORKFLOWS="\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$DEST/.agents/harness.conf" 2>/dev/null | head -1) $NEW_WORKFLOWS " in
-    *" feature-driven "*) ;;
-    *) echo "install: --simulated-human only changes feature-driven approvals; add --workflow feature-driven" >&2; exit 2 ;;
-  esac
+  gated=""
+  for w in $(sed -n 's/^WORKFLOWS="\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$DEST/.agents/harness.conf" 2>/dev/null | head -1) $NEW_WORKFLOWS; do
+    if gated_pack "$w"; then gated="$gated $w"; fi
+  done
+  if [ -z "$gated" ]; then
+    names=""
+    for g in "$HARNESS"/workflows/*/human-gates; do
+      if [ -f "$g" ]; then names="${names:+$names, }$(basename "$(dirname "$g")")"; fi
+    done
+    echo "install: --simulated-human only changes approvals in workflow packs with human gates ($names); add one with --workflow" >&2
+    exit 2
+  fi
   if [ -n "${AGENTS_SIMULATED_HUMAN:-}" ] && [ "${#AGENTS_SIMULATED_HUMAN}" -lt 16 ]; then
     echo "install: AGENTS_SIMULATED_HUMAN is shorter than 16 characters; unset it to get a generated token" >&2; exit 2
   fi
@@ -634,33 +650,41 @@ bash "$DEST/.agents/bin/sync"
 if [ "$IN_GIT" -eq 1 ]; then
   (cd "$DEST" && bash .agents/bin/gitflow install-hooks) | sed 's/^/install: /'
 fi
-# feature-driven: approvals count only when fdd approve recorded them in the git dir (0.3.0). The
-# first person-run install (or fdd approve) in a clone records what's already there, and lists it.
-# The simulated human (--simulated-human) goes on first, so this run can adopt with its token; on
-# every run, the summary says when a switch is there. A --simulated-human that couldn't be turned
-# on fails the install (exit 3, at the end), so a script that relies on it doesn't go on without it.
+# Packs with human gates (a human-gates file naming the pack's record key): an approval counts only
+# when the pack's CLI recorded it in the git dir. The simulated human (--simulated-human) goes on
+# first, for every such pack at once (.agents/lib/approvals.py), so this run can adopt with its
+# token; on every run, the summary says when a switch is there. A --simulated-human that couldn't
+# be turned on fails the install (exit 3, at the end), so a script that relies on it doesn't go on
+# without it. Then feature-driven records the approvals already in FDD_DIR, once per clone (0.3.0):
+# the first person-run install (or fdd approve) in a clone records what's there, and lists it.
 SIM_FAILED=""
+HUMAN_GATE_KEYS=""
+for w in $WORKFLOWS; do
+  wp="$(agents_resolve workflows "$w" 2>/dev/null)" || continue
+  [ -f "$wp/human-gates" ] || continue
+  k="$(sed -n 's/^[[:space:]]*\([a-z0-9][a-z0-9-]*\)[[:space:]]*$/\1/p' "$wp/human-gates" | head -n 1)"
+  [ -z "$k" ] || HUMAN_GATE_KEYS="$HUMAN_GATE_KEYS $k"
+done
+if [ -n "$HUMAN_GATE_KEYS" ] && [ "$IN_GIT" -eq 1 ] && command -v python3 >/dev/null 2>&1; then
+  sim_on=""
+  if [ "$SIMULATED_HUMAN" -eq 1 ]; then
+    [ -n "${AGENTS_SIMULATED_HUMAN:-}" ] \
+      || AGENTS_SIMULATED_HUMAN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    export AGENTS_SIMULATED_HUMAN
+    sim_on=on
+  fi
+  sim_rc=0
+  # shellcheck disable=SC2086  # one key per word
+  sim_out="$(python3 "$DEST/.agents/lib/approvals.py" simulated-human "$DEST" $sim_on $HUMAN_GATE_KEYS 2>&1)" || sim_rc=$?
+  [ -z "$sim_out" ] || printf '%s\n' "$sim_out" | sed 's/^/install: /'
+  [ "$sim_rc" -eq 0 ] || [ "$SIMULATED_HUMAN" -eq 0 ] || SIM_FAILED="--simulated-human didn't turn the simulated human on (see above)"
+elif [ "$SIMULATED_HUMAN" -eq 1 ]; then
+  SIM_FAILED="no active workflow pack resolved with human gates (a human-gates file), so the simulated human is off"
+fi
 case " $WORKFLOWS " in *" feature-driven "*)
   if [ "$IN_GIT" -eq 1 ] && command -v python3 >/dev/null 2>&1 && wp="$(agents_resolve workflows feature-driven)" \
      && grep -q '^def cmd_adopt' "$wp/fdd_tools.py" 2>/dev/null; then   # an older personal pack has no adopt
-    if grep -q '^def cmd_simulated_human' "$wp/fdd_tools.py" 2>/dev/null; then
-      sim_on=""
-      if [ "$SIMULATED_HUMAN" -eq 1 ]; then
-        [ -n "${AGENTS_SIMULATED_HUMAN:-}" ] \
-          || AGENTS_SIMULATED_HUMAN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
-        export AGENTS_SIMULATED_HUMAN
-        sim_on=on
-      fi
-      sim_rc=0
-      sim_out="$(python3 "$wp/fdd_tools.py" simulated-human "$DEST" $sim_on 2>&1)" || sim_rc=$?
-      [ -z "$sim_out" ] || printf '%s\n' "$sim_out" | sed 's/^/install: /'
-      [ "$sim_rc" -eq 0 ] || [ "$SIMULATED_HUMAN" -eq 0 ] || SIM_FAILED="--simulated-human didn't turn the simulated human on (see above)"
-    elif [ "$SIMULATED_HUMAN" -eq 1 ]; then
-      SIM_FAILED="the feature-driven pack in $wp predates --simulated-human, so the simulated human is off"
-    fi
     { python3 "$wp/fdd_tools.py" adopt "$DEST" 2>&1 || true; } | sed 's/^/install: /'
-  elif [ "$SIMULATED_HUMAN" -eq 1 ]; then
-    SIM_FAILED="the feature-driven pack didn't resolve or predates the approval record, so the simulated human is off"
   fi ;;
 esac
 

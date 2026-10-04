@@ -2126,7 +2126,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   # Misuse is refused before anything changes.
   P=$(repo simh-plain)
   out="$("$HARNESS/install.sh" --simulated-human "$P" 2>&1)" && rc=0 || rc=$?
-  t    "--simulated-human without feature-driven is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes feature-driven approvals; add --workflow feature-driven'" _ "$out"
+  t    "--simulated-human without a pack with human gates is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes approvals in workflow packs with human gates (.*feature-driven.*); add one with --workflow'" _ "$out"
   tnot "...before anything is installed" test -e "$P/.agents"
   mkdir -p "$WORK/simh-nogit"
   out="$("$HARNESS/install.sh" --workflow feature-driven --simulated-human "$WORK/simh-nogit" 2>&1)" && rc=0 || rc=$?
@@ -2536,6 +2536,56 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_fdd_trace
+grp_approvals() {   # .agents/lib/approvals.py: the record and the simulated human, shared by packs with human gates
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "shared approvals: any pack with human gates"
+  AH="$WORK/ah"; mkdir -p "$AH"   # a copy of the harness plus a gated test pack
+  cp -R "$HARNESS/install.sh" "$HARNESS/VERSION" "$HARNESS/template" "$HARNESS/stacks" "$HARNESS/workflows" "$AH/"
+  GP="$AH/workflows/gated"; mkdir -p "$GP/skill"
+  printf -- '---\nname: gated\ndescription: Test pack with a human gate.\n---\n\n# Gated\n' > "$GP/skill/SKILL.md"
+  printf '# record key for approvals only a person makes\ngated\n' > "$GP/human-gates"
+  Q=$(repo ah-on)
+  out="$(CLAUDECODE=1 "$AH/install.sh" --team --workflow gated --simulated-human "$Q" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human works with any pack that has a human-gates file" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q 'install: simulated human: on (install.sh --simulated-human, run from a Claude Code shell)'" _ "$out"
+  QS="$Q/.git/ai-harness/simulated-human"
+  t    "...its hash goes in that pack's record" bash -c "grep -qx \"#simulated-human	\$(sed -n 's/^on	\([0-9a-f]*\)	.*/\1/p' '$QS')\" '$Q/.git/ai-harness/gated-approvals'"
+  tnot "...and no other pack's"          test -e "$Q/.git/ai-harness/fdd-approvals"
+  TOKQ="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
+  t    "the lib reports the switch to install.sh" bash -c "cd '$Q' && python3 .agents/lib/approvals.py simulated-human . | grep -q '^simulated human: on (install.sh --simulated-human'"
+  lib(){ (cd "$Q" && python3 -c "import sys; sys.path.insert(0, '.agents/lib'); import approvals as a; $1"); }
+  out="$(CLAUDECODE=1 lib 'sys.exit(0 if a.refused("gated", "approving", a.Switch(".")) else 1)' 2>&1)" && rc=0 || rc=$?
+  t    "refused(): an agent shell without the token" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qx \"gated: approving is the human's step, and this shell was started by Claude Code (CLAUDECODE is set). Run it in your own terminal.\"" _ "$out"
+  trc  "refused(): the token lets it through" 1 env CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKQ" bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; sys.exit(0 if a.refused(\"gated\", \"approving\", a.Switch(\".\")) else 1)'"
+  trc  "refused(): a person's terminal is never refused" 1 bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; sys.exit(0 if a.refused(\"gated\", \"approving\", a.Switch(\".\")) else 1)'"
+  lib 'l, s = a.new_line(".", "gate", "x-1", "v", a.Switch(".")); a.record(".", "gated", [l]); open("approvals", "a").write(l + "\n" + "gate\tx-2\tme\t2026-10-03\tv\n")'
+  t    "new_line() marks a simulated approval in the line" grep -q '^gate	x-1	[^	]* (simulated human)	' "$Q/approvals"
+  t    "classify(): a recorded line counts, a forged one doesn't" test "$(lib 'c, u, s = a.classify(".", "gated", "approvals"); print(len(c), [p[1] for _, p in u], len(s))')" = "1 ['x-2'] 0"
+  mv "$QS" "$WORK/ah.switch"
+  t    "classify(): with the switch off, a simulated line doesn't count" test "$(lib 'c, u, s = a.classify(".", "gated", "approvals"); print(len(c), len(u), [p[1] for _, p in s])')" = "0 1 ['x-1']"
+  cp "$WORK/ah.switch" "$QS"; rm -f "$Q/approvals"
+  # A clone switched on before the shared lib has the hash in fdd-approvals only: it still counts.
+  F2=$(repo ah-old)
+  "$AH/install.sh" --team --workflow feature-driven --workflow gated --simulated-human "$F2" >/dev/null 2>&1
+  t    "with two gated packs, both records hold the hash" bash -c "grep -q '^#simulated-human	' '$F2/.git/ai-harness/fdd-approvals' && grep -q '^#simulated-human	' '$F2/.git/ai-harness/gated-approvals'"
+  edit "$F2/.git/ai-harness/gated-approvals" '/^#simulated-human/d'
+  t    "a hash in any pack's record keeps the switch on (an older clone)" bash -c "cd '$F2' && python3 .agents/lib/approvals.py simulated-human . | grep -q '^simulated human: on'"
+  edit "$F2/.git/ai-harness/fdd-approvals" '/^#simulated-human/d'
+  t    "...and in none, it's off"         bash -c "cd '$F2' && python3 .agents/lib/approvals.py simulated-human . | grep -q \"^simulated human: off, .git/ai-harness/simulated-human wasn't written by install.sh --simulated-human\""
+  # Refusals happen before anything changes.
+  Z=$(repo ah-none)
+  out="$("$HARNESS/install.sh" --team --simulated-human "$Z" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human without a gated pack names the ones that have gates" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes approvals in workflow packs with human gates (.*feature-driven.*); add one with --workflow'" _ "$out"
+  tnot "...before anything is installed" test -e "$Z/.agents"
+  UG="$AH/workflows/ungated"; mkdir -p "$UG/skill"
+  printf -- '---\nname: ungated\ndescription: No human gate.\n---\n' > "$UG/skill/SKILL.md"
+  trc  "a pack without a human-gates file doesn't count" 2 "$AH/install.sh" --team --workflow ungated --simulated-human "$Z"
+  # Absence: no gated pack, no switch and no record.
+  "$HARNESS/install.sh" --team "$Z" >/dev/null 2>&1
+  t    "absence: no gated pack, no record and no switch" bash -c "! ls '$Z'/.git/ai-harness/*-approvals >/dev/null 2>&1 && test ! -e '$Z/.git/ai-harness/simulated-human'"
+  tnot "absence: the install summary says nothing about it" bash -c "'$HARNESS/install.sh' --team '$Z' 2>&1 | grep -q 'simulated human'"
+fi
+}
+group grp_approvals
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

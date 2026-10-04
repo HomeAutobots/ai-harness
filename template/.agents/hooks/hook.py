@@ -663,8 +663,8 @@ def switch_state():
 
 
 def flag_switch(tool, event, path, why):
-    """Mark the switch flagged, once, which turns it off (the feature-driven checks report it). A
-    switch that can't be written to is off too, so a failed write still counts."""
+    """Mark the switch flagged, once, which turns it off (the checks of each pack with human gates
+    report it). A switch that can't be written to is off too, so a failed write still counts."""
     try:
         with open(path, "rb") as fh:
             text = fh.read()
