@@ -2762,6 +2762,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   cp "$WORK/debugcli.git.conf" "$C/.agents/git.conf"
   rm -rf "$CS" "$C"/.agents/plans/bug-*
   trc  "run with no session: exit 2"    2 "$CX" run reproduce -- true
+  trc  "outcome with no session: exit 2" 2 "$CX" outcome E-1 reproduced
   "$CX" start bug '#12' >/dev/null
   trc  "run needs -- and a command"     2 "$CX" run reproduce
   trc  "run needs a step of the workflow" 2 "$CX" run lunch -- true
@@ -2772,21 +2773,50 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and asks for the outcome"    hasl "$out" "record the outcome: .agents/commands/debug outcome E-1 reproduced|partial|not-reproduced"
   t    "E-1.md: step, attempt, command, exit" bash -c "grep -qx 'step: reproduce' '$CS/bug-12/evidence/E-1.md' && grep -qx 'attempt: reproduce' '$CS/bug-12/evidence/E-1.md' && grep -q '^command: sh -c ' '$CS/bug-12/evidence/E-1.md' && grep -qx 'exit: 3' '$CS/bug-12/evidence/E-1.md'"
   t    "E-1.log: the full output"       grep -qx adding "$CS/bug-12/evidence/E-1.log"
+  t    "E-1.md: the commit it ran on"   grep -qE '^head: [0-9a-f]{12}(, with uncommitted changes)?$' "$CS/bug-12/evidence/E-1.md"
   seq 1 100 > "$WORK/hundred.txt"
-  "$CX" run gather-evidence -- cat "$WORK/hundred.txt" >/dev/null
+  out="$("$CX" run gather-evidence -- cat "$WORK/hundred.txt" 2>&1)"
+  tnot "a run that isn't an attempt doesn't ask for an outcome" hasl "$out" "record the outcome"
   t    "an entry keeps the last 60 lines, the log all of them" bash -c "! grep -qx 40 '$CS/bug-12/evidence/E-2.md' && grep -qx 41 '$CS/bug-12/evidence/E-2.md' && test \$(wc -l < '$CS/bug-12/evidence/E-2.log') -eq 100"
   t    "run moves the session's step"   grep -qx 'step: gather-evidence' "$CS/bug-12/state"
   trc  "a missing command: exit 127, still evidence" 127 "$CX" run isolate -- no-such-command-xyz
   t    "...E-3 says why"                grep -q "couldn't run no-such-command-xyz" "$CS/bug-12/evidence/E-3.log"
-  trc  "the policy still applies inside debug run" 2 "$CX" run isolate -- git clean -fdx
+  out="$("$CX" run isolate -- git clean -ndx 2>&1 >/dev/null)" && rc=0 || rc=$?
+  t    "the policy still applies inside debug run (2)" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | sed -n 1p | grep -q '^debug: not run: ' && printf '%s\n' \"\$1\" | grep -q '^\.agents/policy\.conf:[0-9]*: deny'" _ "$out"
   tnot "...and a blocked command records nothing" test -e "$CS/bug-12/evidence/E-4.md"
   trc  "...even with AGENTS_HOOKS=off set on the debug command" 2 env AGENTS_HOOKS=off "$CX" run isolate -- git clean -ndx
   cp "$C/.agents/hooks/hook.py" "$WORK/debugcli.hook.py"; printf 'raise RuntimeError("broken")\n' > "$C/.agents/hooks/hook.py"
   trc  "a policy test that fails: infra (3), not run" 3 "$CX" run isolate -- true
   cp "$WORK/debugcli.hook.py" "$C/.agents/hooks/hook.py"
   tnot "...and nothing recorded"        test -e "$CS/bug-12/evidence/E-4.md"
+  cp "$C/.agents/harness.conf" "$WORK/debugcli.harness.conf"
+  edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
+  trc  "with the policy hook off in HOOKS, a command it would block runs" 0 "$CX" run isolate -- git clean -ndx
+  t    "...and is recorded"             grep -qx 'command: git clean -ndx' "$CS/bug-12/evidence/E-4.md"
+  cp "$WORK/debugcli.harness.conf" "$C/.agents/harness.conf"
+  echo leak | "$CX" run gather-evidence -- cat >/dev/null
+  t    "the command's stdin is /dev/null" bash -c "test -e '$CS/bug-12/evidence/E-5.md' && ! grep -q leak '$CS/bug-12/evidence/E-5.log'"
+  seq 1 200000 > "$WORK/big.txt"
+  "$CX" run gather-evidence -- cat "$WORK/big.txt" >/dev/null
+  sed -n '/^## Output/,$p' "$CS/bug-12/evidence/E-6.md" | sed '1,2d' | sed '/^$/,$d' > "$WORK/big.tail"
+  t    "a log past 1 MiB: the entry has its last 60 lines, none cut" bash -c "test \$(wc -l < '$WORK/big.tail') -eq 60 && test \"\$(sed -n 1p '$WORK/big.tail')\" = 199941 && test \"\$(sed -n '\$p' '$WORK/big.tail')\" = 200000"
+  printf 'echo hi\n' > "$WORK/noexec.sh"; chmod -x "$WORK/noexec.sh"
+  trc  "a command that isn't executable: exit 126, still evidence" 126 "$CX" run isolate -- "$WORK/noexec.sh"
+  t    "...E-7 says why"                grep -q "couldn't run .*noexec.sh" "$CS/bug-12/evidence/E-7.log"
+  trc  "a command line that isn't UTF-8 still runs" 0 "$CX" run isolate -- echo $'x\377y'
+  t    "...and is recorded"             grep -q '^command: echo ' "$CS/bug-12/evidence/E-8.md"
+  nmd=$(find "$CS/bug-12/evidence" -name 'E-*.md' | wc -l)
+  "$CX" run gather-evidence -- sh -c 'sleep 1; echo AAA' >/dev/null 2>&1 & bgrun=$!
+  "$CX" run gather-evidence -- echo BBB >/dev/null
+  wait "$bgrun" || true
+  t    "two runs at once get two entries" bash -c "test \$(find '$CS/bug-12/evidence' -name 'E-*.md' | wc -l) -eq $((nmd + 2)) && a=\$(grep -lx AAA '$CS'/bug-12/evidence/E-*.md) && b=\$(grep -lx BBB '$CS'/bug-12/evidence/E-*.md) && test -n \"\$a\" && test -n \"\$b\" && test \"\$a\" != \"\$b\""
+  "$CX" run hypothesize -- sh -c "printf 'status: closed\n' >> '$CS/bug-12/state'" >/dev/null
+  t    "a session closed during a run stays closed" bash -c "grep -qx 'status: closed' '$CS/bug-12/state' && ! grep -qx 'step: hypothesize' '$CS/bug-12/state'"
+  edit "$CS/bug-12/state" '/^status: closed$/d'
   trc  "outcome needs an attempt"       1 "$CX" outcome E-2 reproduced
   trc  "outcome needs a known value"    2 "$CX" outcome E-1 maybe
+  out="$("$CX" outcome E-99 reproduced 2>&1)" && rc=0 || rc=$?
+  t    "outcome of an entry that isn't there (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qxF 'debug: session bug-12 has no E-99'" _ "$out"
   t    "outcome records it"             bash -c "'$CX' outcome E-1 not-reproduced | grep -qxF 'E-1: not-reproduced (reproduce attempt)' && grep -qx 'outcome: not-reproduced' '$CS/bug-12/evidence/E-1.md'"
   "$CX" outcome E-1 reproduced >/dev/null
   t    "...and replaces an earlier one" bash -c "test \$(grep -c '^outcome: ' '$CS/bug-12/evidence/E-1.md') = 1 && grep -qx 'outcome: reproduced' '$CS/bug-12/evidence/E-1.md'"

@@ -20,8 +20,11 @@ its default, and a value this pack doesn't know is a tooling problem (exit 3):
   debug_tools.py check <edit|turn|full> <root> [files...]   the verify checks; with AGENTS_SINCE
                                                             (verify --since), turn and full also
                                                             judge what was committed since then
-Exit: 0 clean, 1 findings, 2 usage or a policy block (an approval debug didn't record), 3 tooling
-problem or an unknown option. debug run exits with its command's exit code.
+Exit: 0 clean, 1 findings, 2 usage or a policy block (an approval debug didn't record, or a
+command .agents/policy.conf blocks), 3 tooling problem or an unknown option. debug run exits with
+its command's exit code, so its 2 or 3 can come from the command too: a run that happened prints its
+"E-<n> (...)" line first. Its command gets no stdin (/dev/null) and has no time limit, and E-<n>.log
+keeps all of its output with no size cap; only the entry (E-<n>.md) is cut to the last lines.
 """
 import fnmatch
 import hashlib
@@ -656,42 +659,67 @@ def evidence(sdir):
 
 def policy_block(root, cmdline):
     """What the policy hook would say about this command line (.agents/bin/policy test), so debug
-    run never gets around .agents/policy.conf; '' when it's allowed or harness.conf turns the policy
-    hook off. AGENTS_HOOKS is left out of the test's environment: set inline on the debug command,
-    it would turn the check off for that one call while the hook stays on. A test that fails is a
-    tooling problem (ConfError), never a pass."""
+    run never gets around .agents/policy.conf: (why, the rule line policy test names, or ''), or
+    None when it's allowed or harness.conf turns the policy hook off. AGENTS_HOOKS is left out of
+    the test's environment: set inline on the debug command, it would turn the check off for that
+    one call while the hook stays on. A policy test that's missing or fails is a tooling problem
+    (ConfError), never a pass."""
     pol = os.path.join(root, ".agents", "bin", "policy")
     if not os.path.isfile(pol):
-        return ""
+        raise ConfError("this project's harness has no .agents/bin/policy to check the command against, "
+                        "so it didn't run; re-run install.sh")
     env = dict(os.environ)
     env.pop("AGENTS_HOOKS", None)
     p = subprocess.run(["bash", pol, "test", cmdline], cwd=root, env=env, stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, errors="replace")
     if p.returncode == 0:
-        return ""
+        return None
     if p.returncode != 2:
         raise ConfError("couldn't check the command against .agents/policy.conf, so it didn't run: %s"
                         % ((p.stderr.strip().splitlines() or [""])[-1][:300] or "policy test exited %d" % p.returncode))
-    if "note: the policy hook is off" in p.stdout:
-        return ""
-    first = (p.stdout.strip().splitlines() or ["blocked"])[0]
-    return first[len("blocked: "):] if first.startswith("blocked: ") else first
+    out = p.stdout.strip().splitlines()
+    if any(l.startswith("note: the policy hook is off") for l in out):
+        return None
+    first = (out or ["blocked"])[0]
+    rule = next((l for l in out[1:] if not l.startswith("note: ")), "")
+    return (first[len("blocked: "):] if first.startswith("blocked: ") else first), rule
 
 
 def tail_lines(path, n=TAIL):
-    """The last n lines of a file, each cut at 1000 characters. Reads at most its last MiB, so a
-    huge log costs no more than a small one."""
+    """The last n lines of a file, as a terminal would show them: split on newlines only, each line
+    the text after its last carriage return (progress bars), cut at 1000 characters. Reads at most
+    its last MiB, so a huge log costs no more than a small one."""
+    window = 1 << 20
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
-            fh.seek(max(0, size - (1 << 20)))
-            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+            fh.seek(max(0, size - window - 1))
+            lines = fh.read().decode("utf-8", errors="replace").split("\n")
     except OSError:
         return []
-    if size > (1 << 20) and len(lines) > 1:
-        lines = lines[1:]   # the first one started before the part read
-    return [l if len(l) <= 1000 else l[:1000] + " ..." for l in lines[-n:]]
+    if size > window + 1:
+        lines = lines[1:]   # it started before the part read (or is the empty text before a newline)
+    if lines and lines[-1] == "":
+        lines.pop()
+    lines = [l[:-1] if l.endswith("\r") else l for l in lines[-n:]]
+    lines = [l.rsplit("\r", 1)[-1] for l in lines]
+    return [l if len(l) <= 1000 else l[:1000] + " ..." for l in lines]
+
+
+def new_entry(sdir):
+    """(n, fd of evidence/E-<n>.log, created with O_EXCL): the next number after every E-<n>.md and
+    E-<n>.log there, reserved before the command runs, so two runs at once never share one. A log
+    with no .md is a run in progress (or one that died); evidence() counts only the .md entries."""
+    ed = os.path.join(sdir, "evidence")
+    os.makedirs(ed, exist_ok=True)
+    nums = [int(m.group(1)) for m in (re.fullmatch(r"E-([0-9]+)\.(?:md|log)", x) for x in os.listdir(ed)) if m]
+    n = max(nums) + 1 if nums else 1
+    while True:
+        try:
+            return n, os.open(os.path.join(ed, "E-%d.log" % n), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            n += 1
 
 
 @command("run", "debug run <step> [--attempt=reproduce|confirm] -- <command...>", ("--attempt=",))
@@ -710,34 +738,37 @@ def cmd_run(root, words, opts, after):
               " ".join(meta["steps"]) if meta else "its kind file is gone"), file=sys.stderr)
         return 2
     cmdline = shlex.join(after)
-    why = policy_block(root, cmdline)
-    if why:
-        print("debug: not run: %s" % why, file=sys.stderr)
+    blocked = policy_block(root, cmdline)
+    if blocked:
+        print("debug: not run: %s" % blocked[0], file=sys.stderr)
+        if blocked[1]:
+            print(blocked[1], file=sys.stderr)
         return 2
-    ev = evidence(sdir)
-    n = max(ev) + 1 if ev else 1
+    head = git(root, "rev-parse", "-q", "--verify", "HEAD").strip()[:12] or "none"   # what it ran on
+    if git(root, "status", "--porcelain").strip():
+        head += ", with uncommitted changes"
+    n, fd = new_entry(sdir)
     md, log = (os.path.join(sdir, "evidence", "E-%d%s" % (n, ext)) for ext in (".md", ".log"))
-    os.makedirs(os.path.dirname(md), exist_ok=True)
-    with open(log, "wb") as fh:
+    with os.fdopen(fd, "wb") as fh:
         try:
             rc = subprocess.run(after, cwd=root, stdout=fh, stderr=subprocess.STDOUT,
                                 stdin=subprocess.DEVNULL).returncode
-        except OSError as e:
+        except OSError as e:   # as a shell says it: 127 not found, 126 found but it can't run
             fh.write(("debug: couldn't run %s: %s\n" % (after[0], e.strerror or e)).encode("utf-8", "replace"))
-            rc = 127
+            rc = 127 if isinstance(e, FileNotFoundError) else 126
         except KeyboardInterrupt:
             rc = 130
     rc = rc if rc >= 0 else 128 - rc   # killed by a signal
-    head = git(root, "rev-parse", "-q", "--verify", "HEAD").strip()[:12] or "none"
-    if git(root, "status", "--porcelain").strip():
-        head += ", with uncommitted changes"
     tail = tail_lines(log)
+    shown_cmd = one_line(cmdline).encode("utf-8", "surrogateescape").decode("utf-8", "replace")
     header = ["# E-%d" % n, "step: " + step] + (["attempt: " + attempt] if attempt else []) + \
-             ["command: " + one_line(cmdline), "exit: %d" % rc, "head: " + head]
+             ["command: " + shown_cmd, "exit: %d" % rc, "head: " + head]
     write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
                              ["", "Full output: E-%d.log" % n]) + "\n")
-    st["step"] = step
-    write_state(sdir, st)
+    st = read_state(sdir)   # fresh: the session may have been closed while the command ran
+    if st.get("status") == "open":
+        st["step"] = step
+        write_state(sdir, st)
     print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
     for l in tail:
         print(l)
