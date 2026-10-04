@@ -2828,6 +2828,29 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "outcome records it"             bash -c "'$CX' outcome E-1 not-reproduced | grep -qxF 'E-1: not-reproduced (reproduce attempt)' && grep -qx 'outcome: not-reproduced' '$CS/bug-12/evidence/E-1.md'"
   "$CX" outcome E-1 reproduced >/dev/null
   t    "...and replaces an earlier one" bash -c "test \$(grep -c '^outcome: ' '$CS/bug-12/evidence/E-1.md') = 1 && grep -qx 'outcome: reproduced' '$CS/bug-12/evidence/E-1.md'"
+  nev=$(find "$CS/bug-12/evidence" -name 'E-*.md' | wc -l | tr -d ' ')
+  evl="$(seq 1 "$nev" | sed 's/^/E-/' | paste -sd, - | sed 's/,/, /g')"
+  out="$("$CX" status)"
+  t    "status: the session and its step" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open' && printf '%s\n' \"\$1\" | grep -qx 'step: gather-evidence'" _ "$out"
+  t    "...evidence and attempts"       bash -c "printf '%s\n' \"\$1\" | grep -qxF 'evidence: $nev ($evl)' && printf '%s\n' \"\$1\" | grep -qxF 'attempts: E-1 reproduce: reproduced'" _ "$out"
+  t    "...the computed confidence"     hasl "$out" "confidence: reproduced"
+  t    "...the steps with no bindings"  hasl "$out" "steps with no playbook bindings: intake, reproduce, gather-evidence, isolate (.agents/debug/playbook.md)"
+  t    "...no experiments yet"          hasl "$out" "experiments in the tree: none"
+  tnot "...and no dates"                bash -c "printf '%s' \"\$1\" | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'" _ "$out"
+  printf '## H-1: add subtracts\n- would confirm: add(2,2) is 0\n- would rule out: add(2,2) is 4\n- status: confirmed (E-1)\n\n## H-2: the test expects the wrong sum\n- status: open\n' >> "$CS/bug-12/hypotheses.md"
+  printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$C/src/calc.c"
+  out="$("$CX" status)"
+  t    "...hypotheses by status"        hasl "$out" "hypotheses: 1 open (H-2), 1 confirmed, 0 ruled out"
+  t    "...experiments in the tree"     hasl "$out" "experiments in the tree: src/calc.c:1"
+  git -C "$C" checkout -q src/calc.c
+  git -C "$C" checkout -q -b other
+  t    "another branch: no session here, and where one is" bash -c "'$CX' status | grep -qxF 'no open session on other; open elsewhere: bug-12 ($CB)'"
+  t    "status <slug> works from any branch" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open'"
+  trc  "run there has no session"       2 "$CX" run reproduce -- true
+  git -C "$C" checkout -q --detach
+  t    "on a detached HEAD, status says here" bash -c "'$CX' status | grep -qxF 'no open session here (detached HEAD); open elsewhere: bug-12 ($CB)'"
+  git -C "$C" checkout -q "$CB"
+  trc  "status of no such session: exit 1" 1 "$CX" status bug-99
 fi
 }
 group grp_debug_cli

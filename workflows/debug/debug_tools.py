@@ -393,8 +393,8 @@ def bad(name):
 
 
 def no_session(root):
-    print("debug: no open session on this branch; start one with %s start <kind> <ref>, or see %s status"
-          % (debug_cmd(root), debug_cmd(root)), file=sys.stderr)
+    print("debug: no open session %s; start one with %s start <kind> <ref>, or see %s status"
+          % (where(root), debug_cmd(root), debug_cmd(root)), file=sys.stderr)
     return 2
 
 
@@ -803,6 +803,131 @@ def cmd_outcome(root, words, opts, after):
     at = next(i for i, l in enumerate(header) if l.startswith("attempt: "))
     write_text(path, "\n".join(header[:at + 1] + ["outcome: " + words[1]] + header[at + 1:] + lines[end:]) + "\n")
     print("E-%d: %s (%s attempt)" % (n, words[1], meta["attempt"]))
+    return 0
+
+
+# ------------------------------------------------------------------ where a session stands
+
+def hypotheses(path):
+    """[(n, line no, status)] for each '## H-<n>: <claim>' section in hypotheses.md. status is the
+    first word of its '- status:' line (open, confirmed, ruled), open when there's none."""
+    out = []
+    for n, line in enumerate(read_lines(path), 1):
+        m = re.match(r"^## H-([0-9]+)\b", line)
+        if m:
+            out.append([int(m.group(1)), n, "open"])
+            continue
+        s = re.match(r"^\s*[-*]\s+status:\s*([A-Za-z]+)", line)
+        if s and out and out[-1][2] == "open":
+            out[-1][2] = s.group(1).lower()
+    return [tuple(h) for h in out]
+
+
+def confidence(ev):
+    """What the recorded attempts support: confirmed when a confirmation attempt triggered the bug
+    through the stated cause, reproduced when a reproduction attempt did, else evidence-only."""
+    got = {(e.get("attempt"), e.get("outcome")) for e in ev.values()}
+    if ("confirm", "reproduced") in got:
+        return "confirmed"
+    if ("reproduce", "reproduced") in got:
+        return "reproduced"
+    return "evidence-only"
+
+
+def first_changed_line(root, path):
+    m = re.search(r"^@@ -\S+ \+(\d+)", git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", path),
+                  re.M)
+    return max(int(m.group(1)), 1) if m else 1
+
+
+def changed_in_scope(root, conf):
+    """[(path, line)] for uncommitted changes (working tree and index against HEAD, and new files git
+    doesn't ignore) to files in DEBUG_SCOPE, leaving out .agents/ and DEBUG_DIR: the experiments a
+    session leaves in the tree. Paths are relative to root; line is the first changed one."""
+    dd = debug_dir(root, conf) + os.sep
+    pre = git(root, "rev-parse", "--show-prefix").strip()
+    has_head = bool(git(root, "rev-parse", "-q", "--verify", "HEAD").strip())
+    paths = set()
+    if has_head:
+        for p in git(root, "diff", "--name-only", "--no-renames", "HEAD", "--", ".").splitlines():
+            paths.add(p[len(pre):] if pre and p.startswith(pre) else p)
+    else:
+        paths.update(git(root, "ls-files", "--cached", "--", ".").splitlines())
+    paths.update(git(root, "ls-files", "--others", "--exclude-standard", "--", ".").splitlines())
+    out = []
+    for p in sorted(x for x in paths if x):
+        if p.startswith(".agents/") or os.path.join(root, p).startswith(dd) or not matches_any(p, conf["DEBUG_SCOPE"]):
+            continue
+        tracked = has_head and os.path.isfile(os.path.join(root, p)) and \
+            bool(git(root, "ls-files", "--", p).strip())
+        out.append((p, first_changed_line(root, p) if tracked else 1))
+    return out
+
+
+def where(root):
+    """'on <branch>', or 'here (detached HEAD)' when there's no branch."""
+    br = current_branch(root)
+    return "on " + br if br else "here (detached HEAD)"
+
+
+def print_status(root, conf, switch, session):
+    slug, sdir, st = session
+    kind = st.get("kind", "?")
+    why = not_open(root, slug, sdir, st, switch)
+    state = why or ("open, root cause rejected" if verdict(root, slug, sdir, switch) == "rejected" else "open")
+    print("session: %s (%s, %s), %s" % (slug, kind, "pasted report" if st.get("ref") == "-" else st.get("ref", "?"),
+                                        state))
+    print("step: %s" % st.get("step", "?"))
+    print("steps: %s" % (shown(root, kind_file(kind)) if read_kind(kind) else "none, the pack has no %s workflow"
+                         % one_line(kind)[:40]))
+    ev = evidence(sdir)
+    print("evidence: %d%s" % (len(ev), " (%s)" % ", ".join("E-%d" % n for n in sorted(ev)) if ev else ""))
+    tries = ["E-%d %s: %s" % (n, ev[n]["attempt"], ev[n].get("outcome", "outcome not recorded"))
+             for n in sorted(ev) if ev[n].get("attempt") in ATTEMPTS]
+    print("attempts: %s" % ("; ".join(tries) if tries else "none yet"))
+    print("confidence: %s" % confidence(ev))
+    hs = hypotheses(os.path.join(sdir, "hypotheses.md"))
+    open_h = ["H-%d" % n for n, _, s in hs if s == "open"]
+    print("hypotheses: %d open%s, %d confirmed, %d ruled out"
+          % (len(open_h), " (%s)" % ", ".join(open_h) if open_h else "",
+             len([1 for h in hs if h[2] == "confirmed"]), len([1 for h in hs if h[2] == "ruled"])))
+    rc = os.path.join(sdir, "root-cause.md")
+    print("root cause: %s" % (shown(root, rc) if os.path.isfile(rc) else "not written yet"))
+    left = changed_in_scope(root, conf)
+    print("experiments in the tree: %s" % (", ".join("%s:%d" % x for x in left) if left else "none"))
+    gaps = unbound_steps(root, conf, kind)
+    if gaps:
+        print("steps with no playbook bindings: %s (%s)" % (", ".join(gaps), shown(root, playbook_path(root, conf))))
+    _, unrecorded, simulated = ap.classify(root, KEY, approvals_path(sdir), switch)
+    for label, rows in (("not written by debug approve or reject", unrecorded),
+                        ("made by a simulated human while the switch is off", simulated)):
+        if rows:
+            print("not counted, %s: %s" % (label, ", ".join(
+                "%s:%d %s" % (shown(root, approvals_path(sdir)), n, p[0]) for n, p in rows)))
+
+
+@command("status", "debug status [slug]")
+def cmd_status(root, words, opts, after):
+    if len(words) > 1 or after is not None:
+        return bad("status")
+    conf = load_conf(root)
+    switch = ap.Switch(root)
+    if ap.switch_line(root, switch):
+        print(ap.switch_line(root, switch))
+    if words:
+        session = find_session(root, conf, words[0])
+        if not session:
+            print("debug: no session %s" % words[0][:64], file=sys.stderr)
+            return 1
+    else:
+        session = current_session(root, conf, switch)
+    if not session:
+        elsewhere = ["%s (%s)" % (s, st.get("branch") or "detached HEAD") for s, d, st in all_sessions(root, conf)
+                     if not not_open(root, s, d, st, switch)]
+        print("no open session %s%s" % (where(root), "; open elsewhere: " + ", ".join(elsewhere) if elsewhere else
+                                        " (start one: %s start <kind> <ref>)" % debug_cmd(root)))
+        return 0
+    print_status(root, conf, switch, session)
     return 0
 
 
