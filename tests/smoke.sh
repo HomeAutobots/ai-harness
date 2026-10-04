@@ -3401,6 +3401,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf 'one\ntwo\nthree\n' > "$K/src/three.c"; commit "$K" "Three"
   fresh 10
   printf 'one\ntwo\nTHREE\n' > "$K/src/three.c"; commit "$K" "Change line 3"
+  mv "$K" "$K.moved"
+  t    "the start record still matches after the clone moves" hasl "$("$K.moved/.agents/bin/verify" --since=HEAD~1 2>&1)" "while debug session bug-10 is open"
+  mv "$K.moved" "$K"
   t    "the finding is at the commit's first changed line" hasl "$("$KV" --since=HEAD~1 2>&1)" "src/three.c:3: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
   t    "the full tier judges commits too" hasl "$("$KV" --tier=full --since=HEAD~1 2>&1)" "src/three.c:3: error: [debug-committed]"
   edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
@@ -3411,6 +3414,12 @@ if [ "$HAVE_PY" -eq 1 ]; then
   edit "$KS/state" 's/^branch: .*/branch: elsewhere/'
   t    "...state's branch moved: still the current session" hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
   t    "...and status still finds it"   hasl "$("$KX" status 2>&1)" "session: bug-10 "
+  mkdir -p "$K/.agents/debug/sessions/bug-99"
+  printf 'kind: bug\nref: #99\nbranch: %s\nseq: 99\nstep: intake\nstatus: open\n' "$KM" > "$K/.agents/debug/sessions/bug-99/state"
+  t    "a session dir made by hand doesn't take the current one's place" hasl "$("$KV" --since=HEAD~1 2>&1)" "while debug session bug-10 is open"
+  git -C "$K" checkout -q -b other
+  t    "...and status lists it as having no start record" hasl "$("$KX" status 2>&1)" "bug-99 (no start record)"
+  git -C "$K" checkout -q "$KM"; git -C "$K" branch -q -D other
   git -C "$K" reset -q --hard "$KB"
   echo "debug: rebases, pulls, and other branches"
   printf 'int a;\n' > "$K/src/a.c"; commit "$K" "A"
@@ -3429,6 +3438,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$KV" --since="$KB" 2>&1 || true)"
   t    "a branch off where the session started: no current session, still reported, naming it" hasl "$out" "src/calc.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/calc.c while debug session bug-12 is open"
   t    "...and the fix undoes it here"  hasl "$out" "git reset --soft $(git -C "$K" rev-parse --short=7 HEAD)~1"
+  KX1=$(git -C "$K" rev-parse HEAD)
+  printf 'int add(int a, int b) { return b + a; }\n' > "$K/src/calc.c"; commit "$K" "Y2"
+  t    "a later turn that started on the branch: a session open on main doesn't flag its commits" test "$("$KV" --since="$KX1" 2>&1)" = "ok verify turn"
   git -C "$K" checkout -q "$KM"
   out="$("$KV" --since="$KB" 2>&1 || true)"
   t    "back on the session's branch, the commit made on the other one is caught" hasl "$out" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 feat) changes src/calc.c while debug session bug-12 is open"

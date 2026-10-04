@@ -363,17 +363,28 @@ def not_open(root, conf, slug, sdir, st, switch):
 
 
 # debug start records where a session started in the git-dir record, beside the approvals, since
-# the state file is the agent's to edit: a line "start <TAB> <slug> <space> <session dir, resolved>
-# <TAB> who <TAB> date <TAB> <branch, or - when detached> <HEAD, or - with no commits> <each local
-# branch tip>...", shas in full and space-separated (the tips like the stop gate's turn snapshot).
-# The session dir in the id keeps two worktrees' sessions of the same name apart (they share the
-# record). A start line never counts as an approval or a close: those are read from the session's
-# approvals file by kind (last_line), and start is none of them.
+# the state file is the agent's to edit: a line "start <TAB> <id> <TAB> who <TAB> date <TAB> <branch,
+# or - when detached> <HEAD, or - with no commits> <each local branch tip>...", shas in full and
+# space-separated (the tips like the stop gate's turn snapshot). The id is "<slug> <worktree> <session
+# dir>": the worktree is its git dir relative to the shared one ('.' for the main one), the dir is
+# relative to the repo's top, so two worktrees' sessions of the same name stay apart (they share the
+# record) and moving the clone changes nothing. A session with no start line is never current
+# (current_session), so a session dir made by hand can't take the real one's place. A start line
+# never counts as an approval or a close: those are read from the session's approvals file by kind
+# (last_line), and start is none of them.
 SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+WORKTREE = {}   # root -> (its worktree's id, the repo's top), worked out once per run
 
 
-def start_id(slug, sdir):
-    return "%s %s" % (slug, os.path.realpath(sdir))
+def start_id(root, slug, sdir):
+    if root not in WORKTREE:
+        got = git(root, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel").splitlines()
+        gd, common, top = (got + ["", "", ""])[:3]
+        gd, common = (os.path.realpath(os.path.join(root, d)) for d in (gd, common))   # relative to root
+        WORKTREE[root] = (os.path.relpath(gd, common), os.path.realpath(top or root))
+    wt, top = WORKTREE[root]
+    text = "%s %s %s" % (slug, wt, os.path.relpath(os.path.realpath(sdir), top))
+    return " ".join(text.splitlines()).replace("\t", " ")   # as new_line() writes a field
 
 
 def start_value(root):
@@ -398,11 +409,11 @@ def start_records(root):
     return out
 
 
-def session_branch(starts, slug, sdir, st):
-    """The branch the session started on: the recorded one, else (a session from before debug
-    recorded starts) its state's."""
-    got = starts.get(start_id(slug, sdir))
-    return got[0] if got else st.get("branch", "")
+def session_branch(root, starts, slug, sdir):
+    """The branch the session started on ('' when detached), from its start line; None when it has
+    none (a session dir debug start didn't make)."""
+    got = starts.get(start_id(root, slug, sdir))
+    return got[0] if got else None
 
 
 def current_session(root, conf, switch):
@@ -410,7 +421,7 @@ def current_session(root, conf, switch):
     (on a detached HEAD, the newest started detached); None when there's none."""
     br, found, starts = current_branch(root), None, start_records(root)
     for slug, sdir, st in all_sessions(root, conf):
-        if session_branch(starts, slug, sdir, st) == br and not not_open(root, conf, slug, sdir, st, switch):
+        if session_branch(root, starts, slug, sdir) == br and not not_open(root, conf, slug, sdir, st, switch):
             found = (slug, sdir, st)
     return found
 
@@ -780,7 +791,7 @@ def session_start(root, starts, slug, sdir):
     """(HEAD when the session started or '', [that and every local branch tip then]), from the start
     line debug start recorded, never the state file (the agent's to edit); ('', []) when the session
     has none (it started before debug recorded starts)."""
-    _, head, shas = starts.get(start_id(slug, sdir), ("", "", []))
+    _, head, shas = starts.get(start_id(root, slug, sdir), ("", "", []))
     shas = verified(root, shas)
     return (head if head in shas else ""), shas
 
@@ -800,7 +811,8 @@ def committed(ctx):
     code (files in DEBUG_SCOPE outside .agents/ and DEBUG_DIR that sync didn't write: in_scope,
     harness_made) while a session is open. With a current session, every such commit not in the
     history of where it started; without one (the agent switched branches), each commit that
-    descends from where an open session started, naming that session. One finding per commit,
+    descends from where an open session started, when the turn started on that session's branch,
+    naming the session. One finding per commit,
     oldest first, at its first file's first changed line; past 5, the fifth names the rest."""
     if ctx.tier not in ("turn", "full") or not ctx.conf["DEBUG_SCOPE"].split() or \
             not os.environ.get("AGENTS_SINCE", "").split():
@@ -808,22 +820,39 @@ def committed(ctx):
     starts = start_records(ctx.root)
     if ctx.slug:
         head, shas = session_start(ctx.root, starts, ctx.slug, ctx.sdir)
-        watch = [(ctx.slug, head, shas)]
         commits = since_commits(ctx.root, shas)
-    else:   # open sessions that recorded where they started, newest first
-        watch = [(slug,) + session_start(ctx.root, starts, slug, sdir) for slug, sdir, st in
-                 reversed(all_sessions(ctx.root, ctx.conf)) if not not_open(ctx.root, ctx.conf, slug, sdir, st, ctx.switch)]
-        watch = [w for w in watch if w[1]]
-        commits = since_commits(ctx.root) if watch else []
+        if not commits:
+            return []
+    else:
+        # No current session: the agent may have branched off one. Only sessions on the branch the
+        # turn started on count (its HEAD then, the stop gate's first --since, is in that branch's
+        # history), so a session left open on main doesn't flag parallel work on other branches.
+        commits = since_commits(ctx.root)
+        if not commits:
+            return []
+        turn = os.environ["AGENTS_SINCE"].split()[0]
+        watch = []   # (slug, start HEAD, [start HEAD and tips]), newest first
+        for slug, sdir, st in reversed(all_sessions(ctx.root, ctx.conf)):
+            br = session_branch(ctx.root, starts, slug, sdir)
+            if not br or not_open(ctx.root, ctx.conf, slug, sdir, st, ctx.switch) or \
+                    not is_ancestor(ctx.root, turn, "refs/heads/" + br):
+                continue
+            head, shas = session_start(ctx.root, starts, slug, sdir)
+            if head:
+                watch.append((slug, head, shas))
+        if not watch:
+            return []
         # each session's commits: made after it started (not in the history of HEAD or a branch then)
-        after = {s: set(git(ctx.root, "rev-list", *commits, "--not", *shas, "--").split()) if commits else set()
-                 for s, _, shas in watch}
+        # and descending from where it started (--ancestry-path from that one commit)
+        after = {s: set(git(ctx.root, "rev-list", *commits, "--not", *shas, "--").split()) &
+                 set(git(ctx.root, "rev-list", "--ancestry-path", *commits, "^" + head, "--").split())
+                 for s, head, shas in watch}
     hits, more = [], False   # (commit, session, {path: line}, [paths]), oldest first
     for c in reversed(commits):
         if ctx.slug:
             slug = ctx.slug
         else:
-            slug = next((s for s, head, _ in watch if c in after[s] and is_ancestor(ctx.root, head, c)), None)
+            slug = next((s for s, _, _ in watch if c in after[s]), None)
             if slug is None:
                 continue
         lines = commit_lines(ctx.root, c)
@@ -1117,7 +1146,7 @@ def cmd_start(root, words, opts, after):
         os.mkdir(os.path.join(sdir, "evidence"))
         write_text(os.path.join(sdir, "report.md"), REPORT % ("pasted" if ref == "-" else ref, kind, got))
         write_text(os.path.join(sdir, "hypotheses.md"), HYPOTHESES)
-        line, _ = ap.new_line(root, "start", start_id(slug, sdir), start_value(root), OFF)
+        line, _ = ap.new_line(root, "start", start_id(root, slug, sdir), start_value(root), OFF)
         ap.record(root, KEY, [line])   # where it started, out of the state file's reach (session_start)
         write_state(sdir, state)
     except Exception as e:   # not only OSError: a report that can't be encoded must not leave a half-made dir
@@ -1127,7 +1156,7 @@ def cmd_start(root, words, opts, after):
     print("started %s (%s, %s): %s" % (slug, kind, "pasted report" if ref == "-" else ref, shown(root, sdir)))
     if older:
         print("note: %s is still open %s; %s is now current"
-              % (older[0], "on this branch" if older[2].get("branch") else "here (detached HEAD)", slug))
+              % (older[0], "on this branch" if current_branch(root) else "here (detached HEAD)", slug))
     print("steps: %s" % shown(root, kind_file(kind)))
     if plan:
         print("plan: %s, task T1 in progress; ask the human with .agents/bin/tasks ask %s T1 '<question>'"
@@ -1708,8 +1737,11 @@ def cmd_status(root, words, opts, after):
         session = current_session(root, conf, switch)
     if not session:
         starts = start_records(root)
-        elsewhere = ["%s (%s)" % (s, session_branch(starts, s, d, st) or "detached HEAD")
-                     for s, d, st in all_sessions(root, conf) if not not_open(root, conf, s, d, st, switch)]
+        elsewhere = []
+        for s, d, st in all_sessions(root, conf):
+            if not not_open(root, conf, s, d, st, switch):
+                br = session_branch(root, starts, s, d)
+                elsewhere.append("%s (%s)" % (s, "no start record" if br is None else br or "detached HEAD"))
         print("no open session %s%s" % (where(root), "; open elsewhere: " + ", ".join(elsewhere) if elsewhere else
                                         " (start one: %s start <kind> <ref>)" % debug_cmd(root)))
         return 0
