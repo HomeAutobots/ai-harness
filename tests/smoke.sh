@@ -2946,11 +2946,21 @@ except d.ConfError as e:
   t    "a second reject sets it aside as rejected-2" bash -c "'$CX' reject bug-12 still the wrong operands | grep -qF 'root-cause.md is now root-cause.rejected-2.md' && test -f '$CS/bug-12/root-cause.rejected-1.md' && test -f '$CS/bug-12/root-cause.rejected-2.md'"
   rcdoc "$CS/bug-12/root-cause.md" reproduced
   (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=plan --force 'Or run .agents/commands/debug approve bug-12 when you have a minute' >/dev/null)
+  qp="$("$C/.agents/bin/tasks" questions --open --plan=bug-12 | sed -n 's/^bug-12 \(Q[0-9]*\) \[open\] (T1, plan gate) .*/\1/p')"
+  if [ "$(id -u)" -ne 0 ]; then   # root reads a mode-000 file anyway
+    chmod 000 "$CS/bug-12/root-cause.md"
+    out="$("$CX" approve bug-12 2>&1)" && rc=0 || rc=$?
+    chmod 644 "$CS/bug-12/root-cause.md"
+    t    "approve refuses a root-cause.md it can't read (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF \"debug: can't read .agents/debug/sessions/bug-12/root-cause.md, so there's nothing to approve\"" _ "$out"
+    tnot "...and records nothing"        grep -q '^rootcause' "$CS/bug-12/approvals"
+  fi
   t    "approve from a person's terminal" test "$("$CX" approve bug-12)" = "approved bug-12"
   t    "...the line goes in approvals and the record" bash -c "grep -q '^rootcause	bug-12	' '$CS/bug-12/approvals' && grep -qxF \"\$(tail -1 '$CS/bug-12/approvals')\" '$C/.git/ai-harness/debug-approvals'"
   t    "...the session is approved"     bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), approved'"
   t    "...its check-in question answered, its task done" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*done' && ! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12'"
   t    "...the unrelated question still open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
+  t    "...and a check-in asked at another gate is answered too" bash -c "test -n '$qp' && '$C/.agents/bin/tasks' questions --plan=bug-12 | grep -q '^bug-12 $qp \[answered '"
   t    "...and the step is the workflow's last" grep -qx 'step: check-in' "$CS/bug-12/state"
   t    "...and no session is current"   hasl "$("$CX" status)" "no open session on $CB"
   tnot "...with no dates in what it printed" bash -c "'$CX' status bug-12 | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'"
@@ -2958,14 +2968,22 @@ except d.ConfError as e:
   printf 'Also check sub().\n' >> "$CS/bug-12/root-cause.md"
   t    "root-cause.md edited after its approval: open again" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause changed since its approval'"
   t    "...and it can be approved again" test "$("$CX" approve bug-12)" = "approved bug-12"
+  EH="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r, s = sys.argv[2], sys.argv[3]; d.use_lib(r); sw = d.ap.Switch(r); line, _ = d.ap.new_line(r, 'rootcause', 'bug-12', '', sw); d.ap.record(r, d.KEY, [line]); d.append_line(d.approvals_path(s), line); print(d.verdict(r, 'bug-12', s, sw))"
+  cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals0"; mv "$CS/bug-12/root-cause.md" "$WORK/debugcli.rc"
+  t    "a recorded approval with no hash approves nothing, even with no root-cause.md" test "$(python3 -B -c "$EH" "$GP" "$C" "$CS/bug-12" 2>&1)" = changed
+  cp "$WORK/debugcli.approvals0" "$CS/bug-12/approvals"; mv "$WORK/debugcli.rc" "$CS/bug-12/root-cause.md"
   cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals"
   grep '^reject	' "$WORK/debugcli.approvals" > "$CS/bug-12/approvals"
   printf 'rootcause\tbug-12\tsomeone\t2026-10-03\t%s\n' "$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$CS/bug-12/root-cause.md")" >> "$CS/bug-12/approvals"
   t    "a forged approvals line doesn't approve" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
   cp "$WORK/debugcli.approvals" "$CS/bug-12/approvals"
   "$CX" start bug PROJ-30 >/dev/null; rcdoc "$CS/bug-proj-30/root-cause.md" evidence-only
-  cp "$CS/bug-12/approvals" "$CS/bug-proj-30/approvals"
-  t    "an approval copied into another session doesn't approve it" bash -c "'$CX' status bug-proj-30 | grep -qxF 'session: bug-proj-30 (bug, PROJ-30), open'"
+  grep '^rootcause	' "$CS/bug-12/approvals" > "$WORK/debugcli.rootcause"
+  rm -rf "$CS/bug-12" "$C/.agents/plans/bug-12"
+  "$CX" start bug '#12' >/dev/null; rcdoc "$CS/bug-12/root-cause.md" evidence-only
+  cp "$WORK/debugcli.rootcause" "$CS/bug-12/approvals"
+  t    "a new bug-12 with the old one's recorded approvals copied in: not approved" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause changed since its approval'"
+  rm -rf "$CS/bug-12" "$C/.agents/plans/bug-12"
   mv "$CS/bug-proj-30/root-cause.md" "$CS/bug-proj-30/rc.real"; ln -s rc.real "$CS/bug-proj-30/root-cause.md"
   trc  "approve refuses a symlinked root-cause.md (2)" 2 "$CX" approve bug-proj-30
   trc  "...so does reject"              2 "$CX" reject bug-proj-30 no
@@ -2974,6 +2992,7 @@ except d.ConfError as e:
   GIT_CEILING_DIRECTORIES="$WORK" "$HARNESS/install.sh" --team --workflow debug "$NG" >/dev/null 2>&1
   out="$(printf 'x\n' | GIT_CEILING_DIRECTORIES="$WORK" "$NG/.agents/commands/debug" start bug - 2>&1)" && rc=0 || rc=$?
   t    "start outside a git repo: 2, says it needs one" bash -c "test $rc = 2 && test \"\$1\" = 'debug: the debug workflow needs a git repository'" _ "$out"
+  t    "status outside a git repo: no session here" bash -c "GIT_CEILING_DIRECTORIES='$WORK' '$NG/.agents/commands/debug' status | grep -qxF 'no open session here (start one: .agents/commands/debug start <kind> <ref>)'"
   # The simulated human (install.sh --simulated-human) approves debug check-ins too.
   SM=$(repo debugsim); mkdir -p "$SM/src"; printf 'int a;\n' > "$SM/src/a.c"; commit "$SM" base
   out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$SM" 2>&1)"

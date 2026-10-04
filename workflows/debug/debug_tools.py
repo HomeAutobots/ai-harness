@@ -295,7 +295,7 @@ def verdict(root, slug, sdir, switch):
     """'approved', 'rejected', 'changed', or '': the session's counted approvals line that debug
     approve or reject recorded last (its place in the git-dir record) decides. An approval binds
     the hash of root-cause.md as it was: once the file differs (or is gone), it's 'changed', and
-    the session is open again."""
+    the session is open again. An approval with no hash binds nothing, so it's 'changed' too."""
     counted, _, _ = ap.classify(root, KEY, approvals_path(sdir), switch)
     best, at = None, None
     for _, parts, p in counted:
@@ -305,7 +305,7 @@ def verdict(root, slug, sdir, switch):
         return ""
     if best[0] == "reject":
         return "rejected"
-    return "approved" if best[4] == sha(os.path.join(sdir, "root-cause.md")) else "changed"
+    return "approved" if best[4] and best[4] == sha(os.path.join(sdir, "root-cause.md")) else "changed"
 
 
 def not_open(root, slug, sdir, st, switch):
@@ -996,9 +996,11 @@ def changed_in_scope(root, conf):
 
 
 def where(root):
-    """'on <branch>', or 'here (detached HEAD)' when there's no branch."""
+    """'on <branch>', 'here (detached HEAD)' when there's no branch, or 'here' outside git."""
     br = current_branch(root)
-    return "on " + br if br else "here (detached HEAD)"
+    if br:
+        return "on " + br
+    return "here (detached HEAD)" if git(root, "rev-parse", "-q", "--verify", "HEAD").strip() else "here"
 
 
 def print_status(root, conf, switch, session):
@@ -1087,15 +1089,15 @@ def checkin(root, session, prog):
 
 
 def checkin_questions(root, slug):
-    """The Q-ids of the plan's open check-in questions: on T1, at gate impl, naming debug approve
-    <slug>. Other questions on T1 are the agent's and stay open."""
+    """The Q-ids of the plan's open check-in questions: on T1, at any gate or none, naming debug
+    approve <slug>. Other questions on T1 are the agent's and stay open."""
     rc, out, _ = tasks_run(root, ["questions", "--open", "--plan=" + slug])
     if rc != 0:
         return []
     asks = re.compile(r"debug approve %s(?![A-Za-z0-9-])" % re.escape(slug))
     got = []
     for line in out.splitlines():
-        m = re.match(r"^(\S+) (Q[0-9]+) \[open\] \(T1, impl gate\) (.*)$", line)
+        m = re.match(r"^(\S+) (Q[0-9]+) \[open\] \(T1(?:, [a-z]* gate)?\) (.*)$", line)
         if m and m.group(1) == slug and asks.search(m.group(3)):
             got.append(m.group(2))
     return got
@@ -1170,6 +1172,10 @@ def cmd_approve(root, words, opts, after):
     slug, sdir, st = session
     rc = os.path.join(sdir, "root-cause.md")
     seen = sha(rc)
+    if not seen:   # an approval binds the file's hash: nothing to bind when it can't be read
+        print("debug: can't read %s, so there's nothing to approve; make it readable" % shown(root, rc),
+              file=sys.stderr)
+        return 1
     if not checkin(root, session, "approving"):
         return 1
     if sha(rc) != seen:   # the approval binds what the check-in judged
