@@ -3765,6 +3765,15 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf '{"key": "%s\\nMIIEowIBAAKCAQEA\\n-----END RSA PRI''VATE KEY-----\\n", "n": 1}\n' "$FAKE_PEM" > "$WORK/debugrun-pemjson.txt"
   n="$(rn cat "$WORK/debugrun-pemjson.txt")"
   t    "a private key on one line (JSON): BEGIN to END masked" bash -c "grep -qxF '{\"key\": \"[masked]\\n\", \"n\": 1}' '$RE/E-$n.log' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  printf 'before\n%s\nMIIEowIBAAKCAQEA\nafter, still masked\n' "$FAKE_PEM" > "$WORK/debugrun-pemopen.txt"
+  n="$(rn cat "$WORK/debugrun-pemopen.txt")"
+  t    "a private key with no END line: the rest of the log is masked" bash -c "test \"\$(tr '\n' '|' < '$RE/E-$n.log')\" = 'before|[masked]|[masked]|[masked]|'"
+  n="$(rn printf '%s\n' "$FAKE_PEM" MIIEowIBAAKCAQEA "-----END RSA PRI""VATE KEY-----")"
+  t    "a private key spread over arguments: masked in the command line too" bash -c "test -n '$n' && ! grep -q MIIEowIBAAKCAQEA '$RE/E-$n.md' && ! grep -q MIIEowIBAAKCAQEA '$RE/E-$n.log'"
+  printf 'secret\tzz[[:punct:]]q[0-9]{8}\tOdd rule: remove it\n' > "$R/.agents/guard.patterns"
+  out="$("$RX" run gather-evidence -- true 2>&1)"; n="$(printf '%s\n' "$out" | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
+  t    "a secret rule debug run can't use is named, in the entry and in what run printed" bash -c "grep -qxF 'not masked: 1 secret rule debug run can'\''t use (Odd rule)' '$RE/E-$n.md' && printf '%s\n' \"\$1\" | grep -qxF 'not masked: 1 secret rule debug run can'\''t use (Odd rule)'" _ "$out"
+  rm -f "$R/.agents/guard.patterns"
   n="$(rn env DB_PASSWORD=s3cr3tValue99xyz true)"
   t    "a VAR=value secret in the command line is masked" bash -c "grep -qxF \"command: env 'DB_PASSWORD=[masked]' true\" '$RE/E-$n.md' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
   n="$(rn sh -c 'true
@@ -3773,10 +3782,12 @@ export API_TOKEN=9f8e7d6c5b4a39281706')"
   printf 'id %s\n' "$FAKE_AWS" > "$RE/E-90.log"; printf 'id %s\n' "$FAKE_AWS" > "$RE/E-91.log.masking"
   n="$(rn true)"
   t    "a raw log a killed run left (no .md), and a stale .masking file, are deleted by the next run" bash -c "test -n '$n' && test ! -e '$RE/E-90.log' && test ! -e '$RE/E-91.log.masking'"
-  "$RX" run gather-evidence -- sh -c 'echo held; sleep 3' > "$WORK/debugrun.held.out" 2>&1 & bgrun=$!
-  i=0; while [ "$(find "$RE" -name 'E-*.log' -newer "$WORK/debugrun.held.out" | wc -l)" -eq 0 ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-  n="$(rn true)"; rc=0; wait "$bgrun" || rc=$?
-  t    "...but not the log of a run still going" bash -c "test $rc = 0 && test -n '$n' && n2=\$(sed -n '1s/^E-\([0-9]*\) .*/\1/p' '$WORK/debugrun.held.out') && test -n \"\$n2\" && grep -qx held '$RE/E-'\$n2.log && grep -qx held '$RE/E-'\$n2.md"
+  t    "...and its number isn't used again (E-91)" test "$n" = 91
+  rm -f "$WORK/debugrun.held"
+  "$RX" run gather-evidence -- sh -c 'echo held; : > "$1"; sleep 3' _ "$WORK/debugrun.held" > "$WORK/debugrun.held.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -e "$WORK/debugrun.held" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  n="$(rn true)"; rc=0; ran=0; kill -0 "$bgrun" 2>/dev/null && ran=1; wait "$bgrun" || rc=$?
+  t    "...but not the log of a run still going" bash -c "test $ran = 1 && test $rc = 0 && test -n '$n' && n2=\$(sed -n '1s/^E-\([0-9]*\) .*/\1/p' '$WORK/debugrun.held.out') && test -n \"\$n2\" && grep -qx held '$RE/E-'\$n2.log && grep -qx held '$RE/E-'\$n2.md"
   printf 'DB_Password = "s3cr3tValue99xyz"\n' > "$WORK/debugrun-case.txt"
   n="$(rn cat "$WORK/debugrun-case.txt")"
   t    "a rule that ignores case masks any case" grep -qx 'DB_Password = "\[masked\]"' "$RE/E-$n.log"
@@ -3886,6 +3897,41 @@ except OSError:
     t  "a SIG$sig while the command starts: it's still stopped ($((128 + $(kill -l $sig))))" test "$out" = "$((128 + $(kill -l $sig))) stopped"
     case "$out" in *" running "*) kill "${out##* }" 2>/dev/null || true ;; esac
   done
+  GE='import os, signal, subprocess, sys
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+kids, real_hold, real = [], d.hold_signals, subprocess.Popen
+def popen(*a, **k):
+    p = real(*a, **k); kids.append(p.pid); return p
+subprocess.Popen = popen
+def hold():   # the signal lands in the time-out handler, before it holds signals
+    d.hold_signals = real_hold; os.kill(os.getpid(), signal.SIGTERM); real_hold()
+d.hold_signals = hold
+old = d.catch_signals()
+with open(os.devnull, "wb") as fh:
+    rc = d.run_captured(["sleep", "30"], ".", fh, 1)[0]
+d.restore_signals(old)
+try:
+    os.kill(kids[0], 0); print(rc, "running", kids[0])
+except OSError:
+    print(rc, "stopped")'
+  out="$(python3 -B -c "$GE" "$GP" 2>&1)" || true
+  t    "a SIGTERM as the time limit hits: the command is still stopped (143)" test "$out" = "143 stopped"
+  case "$out" in *" running "*) kill "${out##* }" 2>/dev/null || true ;; esac
+  GB='import os, signal, subprocess, sys
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+def popen(*a, **k): raise SystemExit("started")
+subprocess.Popen = popen
+old = d.catch_signals()
+os.kill(os.getpid(), signal.SIGHUP)   # before the command starts
+with open(os.devnull, "wb") as fh:
+    print(d.run_captured(["true"], ".", fh, 0)[0])
+d.restore_signals(old)'
+  t    "a signal before the command starts: it isn't started (129)" test "$(python3 -B -c "$GB" "$GP" 2>&1)" = 129
+  GN='import signal, sys
+sys.modules["fcntl"] = None; del signal.SIGHUP   # as on a Python without them (Windows)
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+print(len(d.STOP_SIGNALS), d.run_lock(sys.argv[2]))'
+  t    "the pack still loads without fcntl or SIGHUP (the checks need it)" test "$(python3 -B -c "$GN" "$GP" "$WORK" 2>&1)" = "2 None"
   GK='import signal, subprocess, sys, time
 sys.path.insert(0, sys.argv[1]); import debug_tools as d
 signal.alarm(20)   # the old code waited forever
@@ -3986,7 +4032,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and stops it after"            bash -c "test -n '$hung' && ! kill -0 '$hung' 2>/dev/null"
   t    "crash: when attaching is refused, the tool launches the program" bash -c "grep -qF 'ptrace scope 1' '$QK/crash.md' && grep -qF 'pkill -INT -P \$!' '$QK/crash.md'"
   t    "crash: unbuffered through env (debug run runs argv as is)" grep -qF '`env PYTHONUNBUFFERED=1 <command>`' "$QK/crash.md"
-  t    "every bisect turns a crash into a plain failure, with its own limit" bash -c "for k in bug test crash field; do grep -qF 'timeout -k 5 60 <command>; rc=\$?; [ \"\$rc\" -eq 0 ] || exit 1' '$QK/'\$k.md || exit 1; done"
+  t    "every bisect turns a crash into a plain failure, with its own limit" bash -c "for k in bug test crash field; do grep -qF 'timeout -k 5 60 <command>; rc=\$?; [ \"\$rc\" -ne 127 ] || exit 255; [ \"\$rc\" -eq 0 ] || exit 1' '$QK/'\$k.md || exit 1; done"
   t    "every workflow uses the shared playbook's bindings that fit it" bash -c "for k in bug test crash field; do grep -qF 'the bindings that fit this one' '$QK/'\$k.md || exit 1; done"
   t    "crash: the root cause names the faulting path:line and the bad state" grep -qF 'names the faulting `path:line` and the bad state that reached it' "$QK/crash.md"
   echo "debug: the field issue workflow"

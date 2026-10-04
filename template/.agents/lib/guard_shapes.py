@@ -20,13 +20,14 @@ POSIX_CLASSES = (("[:space:]", r"\s"), ("[:blank:]", r" \t"), ("[:alpha:]", "A-Z
 EDGE = "\"'`()[]{}<>,;:=. \t/\\@#?&+!|*$%^~"   # what guard's plausible() trims: not [A-Za-z0-9_-]
 WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")   # what guard's redact() keeps
 _SHAPES = []
+SKIPPED = []   # what each secret rule shapes() couldn't turn into a Python regex is called (guard still has them)
 _LINES = []   # each rule's looser twins (_prefilters), for finding the lines worth a look
 
 
 def shapes():
     """[(regex, what)] for guard's secret rules: .agents/core/guard.patterns, then the project's own
     .agents/guard.patterns, from the .agents/ this file is in. Read once, each ERE turned into a
-    Python regex; one that doesn't translate is skipped (guard still has it)."""
+    Python regex; one that doesn't translate is skipped (guard still has it) and named in SKIPPED."""
     if _SHAPES:
         return _SHAPES[0]
     out = []
@@ -42,15 +43,16 @@ def shapes():
             if line.startswith("#") or len(f) < 2 or f[0] != "secret" or not f[1]:
                 continue
             ere = f[1]
+            what = (f[2] if len(f) > 2 else "").split(":")[0].strip() or "secret"
             for posix, py in POSIX_CLASSES:
                 ere = ere.replace(posix, py)
-            if "[:" in ere:
-                continue
             try:
+                if "[:" in ere:
+                    raise re.error("a POSIX class with no Python twin")
                 rx = re.compile(ere)
             except re.error:
+                SKIPPED.append(what)
                 continue
-            what = (f[2] if len(f) > 2 else "").split(":")[0].strip() or "secret"
             out.append((rx, what))
     _SHAPES.append(out)
     return out
