@@ -606,13 +606,14 @@ def cmd_start(root, words, opts, after):
         write_text(os.path.join(sdir, "report.md"), REPORT % ("pasted" if ref == "-" else ref, kind, got))
         write_text(os.path.join(sdir, "hypotheses.md"), HYPOTHESES)
         write_state(sdir, state)
-    except OSError as e:
+    except Exception as e:   # not only OSError: a report that can't be encoded must not leave a half-made dir
         shutil.rmtree(sdir, ignore_errors=True)
-        raise ConfError("can't write the session %s: %s" % (shown(root, sdir), e.strerror or e))
+        raise ConfError("can't write the session %s: %s" % (shown(root, sdir), getattr(e, "strerror", None) or e))
     plan = open_plan(root, slug, kind, ref)
     print("started %s (%s, %s): %s" % (slug, kind, "pasted report" if ref == "-" else ref, shown(root, sdir)))
     if older:
-        print("note: %s is still open on this branch; %s is now current" % (older[0], slug))
+        print("note: %s is still open %s; %s is now current"
+              % (older[0], "on this branch" if older[2].get("branch") else "here (detached HEAD)", slug))
     print("steps: %s" % shown(root, kind_file(kind)))
     if plan:
         print("plan: %s, task T1 in progress; ask the human with .agents/bin/tasks ask %s T1 '<question>'"
@@ -624,6 +625,153 @@ def cmd_start(root, words, opts, after):
               "Expected and Actual out of it in report.md")
     else:
         print("next: intake: no playbook binding and no report text; ask the human to paste the report")
+    return 0
+
+
+# ------------------------------------------------------------------ evidence
+
+def evidence(sdir):
+    """{n: {step, attempt, outcome, command, exit, head}} from the header of each evidence/E-<n>.md
+    (the lines before its first '## ')."""
+    ed = os.path.join(sdir, "evidence")
+    try:
+        names = os.listdir(ed)
+    except OSError:
+        return {}
+    out = {}
+    for name in names:
+        m = re.fullmatch(r"E-([0-9]+)\.md", name)
+        if not m:
+            continue
+        meta = {}
+        for l in read_lines(os.path.join(ed, name)):
+            if l.startswith("## "):
+                break
+            k, sep, v = l.partition(": ")
+            if sep and k in ("step", "attempt", "outcome", "command", "exit", "head"):
+                meta[k] = v
+        out[int(m.group(1))] = meta
+    return out
+
+
+def policy_block(root, cmdline):
+    """What the policy hook would say about this command line (.agents/bin/policy test), so debug
+    run never gets around .agents/policy.conf; '' when it's allowed or harness.conf turns the policy
+    hook off. AGENTS_HOOKS is left out of the test's environment: set inline on the debug command,
+    it would turn the check off for that one call while the hook stays on. A test that fails is a
+    tooling problem (ConfError), never a pass."""
+    pol = os.path.join(root, ".agents", "bin", "policy")
+    if not os.path.isfile(pol):
+        return ""
+    env = dict(os.environ)
+    env.pop("AGENTS_HOOKS", None)
+    p = subprocess.run(["bash", pol, "test", cmdline], cwd=root, env=env, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, errors="replace")
+    if p.returncode == 0:
+        return ""
+    if p.returncode != 2:
+        raise ConfError("couldn't check the command against .agents/policy.conf, so it didn't run: %s"
+                        % ((p.stderr.strip().splitlines() or [""])[-1][:300] or "policy test exited %d" % p.returncode))
+    if "note: the policy hook is off" in p.stdout:
+        return ""
+    first = (p.stdout.strip().splitlines() or ["blocked"])[0]
+    return first[len("blocked: "):] if first.startswith("blocked: ") else first
+
+
+def tail_lines(path, n=TAIL):
+    """The last n lines of a file, each cut at 1000 characters. Reads at most its last MiB, so a
+    huge log costs no more than a small one."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - (1 << 20)))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    if size > (1 << 20) and len(lines) > 1:
+        lines = lines[1:]   # the first one started before the part read
+    return [l if len(l) <= 1000 else l[:1000] + " ..." for l in lines[-n:]]
+
+
+@command("run", "debug run <step> [--attempt=reproduce|confirm] -- <command...>", ("--attempt=",))
+def cmd_run(root, words, opts, after):
+    attempt = opts.get("--attempt=")
+    if len(words) != 1 or not after or (attempt is not None and attempt not in ATTEMPTS):
+        return bad("run")
+    conf = load_conf(root)
+    cur = current_session(root, conf, ap.Switch(root))
+    if not cur:
+        return no_session(root)
+    slug, sdir, st = cur
+    meta, step = read_kind(st.get("kind", "")), words[0]
+    if not meta or step not in meta["steps"]:
+        print("debug: %s isn't a step of the %s workflow (%s)" % (step[:40], st.get("kind", "?"),
+              " ".join(meta["steps"]) if meta else "its kind file is gone"), file=sys.stderr)
+        return 2
+    cmdline = shlex.join(after)
+    why = policy_block(root, cmdline)
+    if why:
+        print("debug: not run: %s" % why, file=sys.stderr)
+        return 2
+    ev = evidence(sdir)
+    n = max(ev) + 1 if ev else 1
+    md, log = (os.path.join(sdir, "evidence", "E-%d%s" % (n, ext)) for ext in (".md", ".log"))
+    os.makedirs(os.path.dirname(md), exist_ok=True)
+    with open(log, "wb") as fh:
+        try:
+            rc = subprocess.run(after, cwd=root, stdout=fh, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL).returncode
+        except OSError as e:
+            fh.write(("debug: couldn't run %s: %s\n" % (after[0], e.strerror or e)).encode("utf-8", "replace"))
+            rc = 127
+        except KeyboardInterrupt:
+            rc = 130
+    rc = rc if rc >= 0 else 128 - rc   # killed by a signal
+    head = git(root, "rev-parse", "-q", "--verify", "HEAD").strip()[:12] or "none"
+    if git(root, "status", "--porcelain").strip():
+        head += ", with uncommitted changes"
+    tail = tail_lines(log)
+    header = ["# E-%d" % n, "step: " + step] + (["attempt: " + attempt] if attempt else []) + \
+             ["command: " + one_line(cmdline), "exit: %d" % rc, "head: " + head]
+    write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
+                             ["", "Full output: E-%d.log" % n]) + "\n")
+    st["step"] = step
+    write_state(sdir, st)
+    print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
+    for l in tail:
+        print(l)
+    if attempt:
+        print("record the outcome: %s outcome E-%d reproduced|partial|not-reproduced" % (debug_cmd(root), n))
+    return rc
+
+
+@command("outcome", "debug outcome <E-n> reproduced|partial|not-reproduced")
+def cmd_outcome(root, words, opts, after):
+    m = re.fullmatch(r"E-([0-9]+)", words[0]) if len(words) == 2 else None
+    if not m or words[1] not in OUTCOMES or after is not None:
+        return bad("outcome")
+    conf = load_conf(root)
+    cur = current_session(root, conf, ap.Switch(root))
+    if not cur:
+        return no_session(root)
+    slug, sdir, _ = cur
+    n = int(m.group(1))
+    meta = evidence(sdir).get(n)
+    if meta is None:
+        print("debug: session %s has no E-%d" % (slug, n), file=sys.stderr)
+        return 1
+    if meta.get("attempt") not in ATTEMPTS:
+        print("debug: E-%d isn't an attempt; run one with debug run <step> --attempt=reproduce -- <command>" % n,
+              file=sys.stderr)
+        return 1
+    path = os.path.join(sdir, "evidence", "E-%d.md" % n)
+    lines = read_lines(path)
+    end = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
+    header = [l for l in lines[:end] if not l.startswith("outcome: ")]
+    at = next(i for i, l in enumerate(header) if l.startswith("attempt: "))
+    write_text(path, "\n".join(header[:at + 1] + ["outcome: " + words[1]] + header[at + 1:] + lines[end:]) + "\n")
+    print("E-%d: %s (%s attempt)" % (n, words[1], meta["attempt"]))
     return 0
 
 

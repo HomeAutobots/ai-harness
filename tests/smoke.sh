@@ -2746,6 +2746,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "on a detached HEAD, start works" bash -c "'$CX' start bug PROJ-12 >/dev/null"
   tnot "...state has no branch line"     grep -q '^branch:' "$CS/bug-proj-12/state"
   t    "...and it's the current session there" test "$(python3 -B -c "$CC" "$GP" "$C" 2>&1)" = "bug-proj-12"
+  t    "...a second one there notes the first as open here" hasl "$("$CX" start bug PROJ-13)" "note: bug-proj-12 is still open here (detached HEAD); bug-proj-13 is now current"
   git -C "$C" checkout -q "$CB"
   t    "...not on the branch"            test "$(python3 -B -c "$CC" "$GP" "$C" 2>&1)" = "bug-proj-11"
   edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS=""/'
@@ -2760,6 +2761,35 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...while an issue ref still starts" hasl "$("$CX" start bug '#12')" "started bug-12-3"
   cp "$WORK/debugcli.git.conf" "$C/.agents/git.conf"
   rm -rf "$CS" "$C"/.agents/plans/bug-*
+  trc  "run with no session: exit 2"    2 "$CX" run reproduce -- true
+  "$CX" start bug '#12' >/dev/null
+  trc  "run needs -- and a command"     2 "$CX" run reproduce
+  trc  "run needs a step of the workflow" 2 "$CX" run lunch -- true
+  trc  "run with a bad --attempt"       2 "$CX" run reproduce --attempt=maybe -- true
+  out="$("$CX" run reproduce --attempt=reproduce -- sh -c 'echo adding; echo "add(2,2) = 0"; exit 3' 2>&1)" && rc=0 || rc=$?
+  t    "run passes the command's exit code through" test "$rc" = 3
+  t    "...prints the entry, then the output's tail" bash -c "printf '%s\n' \"\$1\" | sed -n 1p | grep -qxF 'E-1 (reproduce, reproduce attempt, exit 3): .agents/debug/sessions/bug-12/evidence/E-1.md' && printf '%s\n' \"\$1\" | grep -qxF 'add(2,2) = 0'" _ "$out"
+  t    "...and asks for the outcome"    hasl "$out" "record the outcome: .agents/commands/debug outcome E-1 reproduced|partial|not-reproduced"
+  t    "E-1.md: step, attempt, command, exit" bash -c "grep -qx 'step: reproduce' '$CS/bug-12/evidence/E-1.md' && grep -qx 'attempt: reproduce' '$CS/bug-12/evidence/E-1.md' && grep -q '^command: sh -c ' '$CS/bug-12/evidence/E-1.md' && grep -qx 'exit: 3' '$CS/bug-12/evidence/E-1.md'"
+  t    "E-1.log: the full output"       grep -qx adding "$CS/bug-12/evidence/E-1.log"
+  seq 1 100 > "$WORK/hundred.txt"
+  "$CX" run gather-evidence -- cat "$WORK/hundred.txt" >/dev/null
+  t    "an entry keeps the last 60 lines, the log all of them" bash -c "! grep -qx 40 '$CS/bug-12/evidence/E-2.md' && grep -qx 41 '$CS/bug-12/evidence/E-2.md' && test \$(wc -l < '$CS/bug-12/evidence/E-2.log') -eq 100"
+  t    "run moves the session's step"   grep -qx 'step: gather-evidence' "$CS/bug-12/state"
+  trc  "a missing command: exit 127, still evidence" 127 "$CX" run isolate -- no-such-command-xyz
+  t    "...E-3 says why"                grep -q "couldn't run no-such-command-xyz" "$CS/bug-12/evidence/E-3.log"
+  trc  "the policy still applies inside debug run" 2 "$CX" run isolate -- git clean -fdx
+  tnot "...and a blocked command records nothing" test -e "$CS/bug-12/evidence/E-4.md"
+  trc  "...even with AGENTS_HOOKS=off set on the debug command" 2 env AGENTS_HOOKS=off "$CX" run isolate -- git clean -ndx
+  cp "$C/.agents/hooks/hook.py" "$WORK/debugcli.hook.py"; printf 'raise RuntimeError("broken")\n' > "$C/.agents/hooks/hook.py"
+  trc  "a policy test that fails: infra (3), not run" 3 "$CX" run isolate -- true
+  cp "$WORK/debugcli.hook.py" "$C/.agents/hooks/hook.py"
+  tnot "...and nothing recorded"        test -e "$CS/bug-12/evidence/E-4.md"
+  trc  "outcome needs an attempt"       1 "$CX" outcome E-2 reproduced
+  trc  "outcome needs a known value"    2 "$CX" outcome E-1 maybe
+  t    "outcome records it"             bash -c "'$CX' outcome E-1 not-reproduced | grep -qxF 'E-1: not-reproduced (reproduce attempt)' && grep -qx 'outcome: not-reproduced' '$CS/bug-12/evidence/E-1.md'"
+  "$CX" outcome E-1 reproduced >/dev/null
+  t    "...and replaces an earlier one" bash -c "test \$(grep -c '^outcome: ' '$CS/bug-12/evidence/E-1.md') = 1 && grep -qx 'outcome: reproduced' '$CS/bug-12/evidence/E-1.md'"
 fi
 }
 group grp_debug_cli
