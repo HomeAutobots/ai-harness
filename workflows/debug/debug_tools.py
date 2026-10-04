@@ -292,14 +292,20 @@ def approvals_path(sdir):
 
 
 def verdict(root, slug, sdir, switch):
-    """'approved', 'rejected', or '': the session's counted approvals line that debug approve or
-    reject recorded last (its place in the git-dir record) decides."""
+    """'approved', 'rejected', 'changed', or '': the session's counted approvals line that debug
+    approve or reject recorded last (its place in the git-dir record) decides. An approval binds
+    the hash of root-cause.md as it was: once the file differs (or is gone), it's 'changed', and
+    the session is open again."""
     counted, _, _ = ap.classify(root, KEY, approvals_path(sdir), switch)
-    best, at = "", None
+    best, at = None, None
     for _, parts, p in counted:
         if parts[1] == slug and parts[0] in ("rootcause", "reject") and (at is None or p >= at):
-            best, at = ("approved" if parts[0] == "rootcause" else "rejected"), p
-    return best
+            best, at = parts, p
+    if best is None:
+        return ""
+    if best[0] == "reject":
+        return "rejected"
+    return "approved" if best[4] == sha(os.path.join(sdir, "root-cause.md")) else "changed"
 
 
 def not_open(root, slug, sdir, st, switch):
@@ -504,11 +510,21 @@ def tasks_path(root):
     return os.path.join(root, ".agents", "bin", "tasks")
 
 
-def tasks_cli(root, *args):
-    """Run .agents/bin/tasks: '' when it worked, else what it said on stderr (never empty)."""
-    r = subprocess.run(["bash", tasks_path(root)] + list(args), cwd=root, stdin=subprocess.DEVNULL,
+def tasks_run(root, args, tool=None):
+    """Run .agents/bin/tasks: (exit code, stdout, stderr). tool sets AGENTS_TOOL, which progress.log
+    credits (the tasks CLI says agent when it's unset)."""
+    env = dict(os.environ)
+    if tool:
+        env["AGENTS_TOOL"] = tool
+    r = subprocess.run(["bash", tasks_path(root)] + list(args), cwd=root, env=env, stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, errors="replace")
-    return "" if r.returncode == 0 else (one_line(r.stderr) or "tasks exited %d" % r.returncode)
+    return r.returncode, r.stdout, r.stderr
+
+
+def tasks_cli(root, *args, **kw):
+    """Run .agents/bin/tasks: '' when it worked, else what it said on stderr (never empty)."""
+    rc, _, err = tasks_run(root, args, kw.get("tool"))
+    return "" if rc == 0 else (one_line(err) or "tasks exited %d" % rc)
 
 
 def open_plan(root, slug, kind, ref):
@@ -557,6 +573,9 @@ def cmd_start(root, words, opts, after):
     kind, ref = words
     if opts.get("--file=", None) == "":
         return bad("start")
+    if git(root, "rev-parse", "--is-inside-work-tree").strip() != "true":   # start commits, diffs against HEAD
+        print("debug: the debug workflow needs a git repository", file=sys.stderr)
+        return 2
     conf = load_conf(root)
     meta = read_kind(kind)
     if not meta:
@@ -776,7 +795,7 @@ def cmd_run(root, words, opts, after):
     write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
                              ["", "Full output: E-%d.log" % n]) + "\n")
     st = read_state(sdir)   # fresh: the session may have been closed while the command ran
-    if st.get("status") == "open":
+    if st.get("status") != "closed":   # an approval that no longer counts doesn't freeze the step
         st["step"] = step
         write_state(sdir, st)
     print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
@@ -986,7 +1005,9 @@ def print_status(root, conf, switch, session):
     slug, sdir, st = session
     kind = st.get("kind", "?")
     why = not_open(root, slug, sdir, st, switch)
-    state = why or ("open, root cause rejected" if verdict(root, slug, sdir, switch) == "rejected" else "open")
+    v = verdict(root, slug, sdir, switch)
+    state = why or {"rejected": "open, root cause rejected",
+                    "changed": "open, root cause changed since its approval"}.get(v, "open")
     print("session: %s (%s, %s), %s" % (slug, kind, "pasted report" if st.get("ref") == "-" else st.get("ref", "?"),
                                         state))
     print("step: %s" % st.get("step", "?"))
@@ -1065,26 +1086,58 @@ def checkin(root, session, prog):
     return False
 
 
+def checkin_questions(root, slug):
+    """The Q-ids of the plan's open check-in questions: on T1, at gate impl, naming debug approve
+    <slug>. Other questions on T1 are the agent's and stay open."""
+    rc, out, _ = tasks_run(root, ["questions", "--open", "--plan=" + slug])
+    if rc != 0:
+        return []
+    asks = re.compile(r"debug approve %s(?![A-Za-z0-9-])" % re.escape(slug))
+    got = []
+    for line in out.splitlines():
+        m = re.match(r"^(\S+) (Q[0-9]+) \[open\] \(T1, impl gate\) (.*)$", line)
+        if m and m.group(1) == slug and asks.search(m.group(3)):
+            got.append(m.group(2))
+    return got
+
+
 def finish_plan(root, slug, answer, done):
-    """The session's plan: answer its open questions (the check-in request), and set T1 done when the
-    session is over, or back in progress when it isn't. Quiet: a missing plan changes nothing."""
-    tasks_cli(root, "answer", slug, "T1", answer)
-    tasks_cli(root, "set", slug, "T1", "done" if done else "doing")
+    """The session's plan: answer its open check-in questions, and set T1 done when the session is
+    over, or back in progress when it isn't. Credited to the person (AGENTS_TOOL=human). A missing
+    plan changes nothing; a step that fails on a plan that's there is a note on stderr."""
+    plan = os.path.join(".agents", "plans", slug)
+    if not os.path.isfile(tasks_path(root)) or not os.path.isdir(os.path.join(root, plan)):
+        return
+    steps = [("answer", slug, q, answer) for q in checkin_questions(root, slug)]
+    for step in steps + [("set", slug, "T1", "done" if done else "doing")]:
+        err = tasks_cli(root, *step, tool="human")
+        if err:
+            print("note: couldn't update the plan %s: %s" % (plan, err), file=sys.stderr)
+            return
+
+
+SESSION_FILES = ("state", "hypotheses.md", "approvals", "root-cause.md")
 
 
 def judged_session(root, conf, switch, slug, verb):
-    """(slug, dir, state) of an open session with a root cause, or None after saying why."""
+    """(slug, dir, state) of an open session with a root cause, or the exit code after saying why:
+    1 when there's nothing to judge, 2 when the session dir or one of its files is a symlink."""
     session = find_session(root, conf, slug)
     if not session:
         print("debug: no session %s (%s status lists the open one)" % (slug[:64], debug_cmd(root)), file=sys.stderr)
-        return None
+        return 1
+    links = [n for n in ("",) + SESSION_FILES if os.path.islink(os.path.join(session[1], n) if n else session[1])]
+    if links:
+        print("debug: %s: %s is a symlink, so it won't %s it; make it a plain file" % (
+            slug, ", ".join(n or "the session dir" for n in links), verb), file=sys.stderr)
+        return 2
     why = not_open(root, session[0], session[1], session[2], switch)
     if why:
         print("debug: %s is %s" % (slug, why), file=sys.stderr)
-        return None
+        return 1
     if not os.path.isfile(os.path.join(session[1], "root-cause.md")):
         print("debug: %s has no root-cause.md yet, so there's nothing to %s" % (slug, verb), file=sys.stderr)
-        return None
+        return 1
     return session
 
 
@@ -1098,6 +1151,11 @@ def last_entry(sdir):
     return max([int(m.group(1)) for m in (re.fullmatch(r"E-([0-9]+)\.(?:md|log)", x) for x in names) if m] + [0])
 
 
+def last_step(st, fallback):
+    meta = read_kind(st.get("kind", ""))
+    return meta["steps"][-1] if meta else fallback
+
+
 @command("approve", "debug approve <slug>")
 def cmd_approve(root, words, opts, after):
     if len(words) != 1 or after is not None:
@@ -1107,15 +1165,20 @@ def cmd_approve(root, words, opts, after):
         return 2
     conf = load_conf(root)
     session = judged_session(root, conf, switch, words[0], "approve")
-    if not session:
-        return 1
+    if isinstance(session, int):
+        return session
+    slug, sdir, st = session
+    rc = os.path.join(sdir, "root-cause.md")
+    seen = sha(rc)
     if not checkin(root, session, "approving"):
         return 1
-    slug, sdir, st = session
-    line, sim = ap.new_line(root, "rootcause", slug, sha(os.path.join(sdir, "root-cause.md")), switch)
+    if sha(rc) != seen:   # the approval binds what the check-in judged
+        print("debug: root-cause.md changed while checking; run approve again", file=sys.stderr)
+        return 1
+    line, sim = ap.new_line(root, "rootcause", slug, seen, switch)
     ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
     append_line(approvals_path(sdir), line)
-    st.update(status="approved", step="check-in")
+    st.update(status="approved", step=last_step(st, st.get("step", "")))
     write_state(sdir, st)
     finish_plan(root, slug, "approved", True)
     print("approved %s%s" % (slug, ap.SIMULATED if sim else ""))
@@ -1132,8 +1195,8 @@ def cmd_reject(root, words, opts, after):
         return 2
     conf = load_conf(root)
     session = judged_session(root, conf, switch, words[0], "reject")
-    if not session:
-        return 1
+    if isinstance(session, int):
+        return session
     slug, sdir, st = session
     rc = os.path.join(sdir, "root-cause.md")
     line, sim = ap.new_line(root, "reject", slug, sha(rc), switch)
@@ -1143,12 +1206,12 @@ def cmd_reject(root, words, opts, after):
     while os.path.exists(os.path.join(sdir, "root-cause.rejected-%d.md" % k)):
         k += 1
     os.rename(rc, os.path.join(sdir, "root-cause.rejected-%d.md" % k))   # experiments are allowed again
-    with open(os.path.join(sdir, "hypotheses.md"), "a", encoding="utf-8") as fh:
-        fh.write("\n## Check-in: root cause rejected (root-cause.rejected-%d.md)\n- why: %s\n"
-                 "- next: look again: more evidence, new or revised hypotheses, then a new root-cause.md\n" % (k, why))
     # Confirmation attempts made so far were for the rejected cause: they no longer confirm.
     st.update(status="open", step="hypothesize", confirm_after=str(max(last_entry(sdir), confirm_after(st))))
     write_state(sdir, st)
+    with open(os.path.join(sdir, "hypotheses.md"), "a", encoding="utf-8") as fh:
+        fh.write("\n## Check-in: root cause rejected (root-cause.rejected-%d.md)\n- why: %s\n"
+                 "- next: look again: more evidence, new or revised hypotheses, then a new root-cause.md\n" % (k, why))
     finish_plan(root, slug, "rejected: " + why, False)
     print("rejected %s%s: root-cause.md is now root-cause.rejected-%d.md, and the reason is in hypotheses.md"
           % (slug, ap.SIMULATED if sim else "", k))

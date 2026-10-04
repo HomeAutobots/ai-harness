@@ -2924,9 +2924,13 @@ except d.ConfError as e:
   for v in CLAUDECODE GEMINI_CLI CURSOR_AGENT; do
     trc "approve refuses with $v set" 2 env "$v=1" "$CX" approve bug-12
   done
+  recn=$({ cat "$C/.git/ai-harness/debug-approvals" 2>/dev/null || true; } | wc -c)
   out="$(CLAUDECODE=1 "$CX" reject bug-12 nope 2>&1)" && rc=0 || rc=$?
   t    "...so does reject"              bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \"debug: rejecting a root cause is the human's step, and this shell was started by Claude Code (CLAUDECODE is set)\"" _ "$out"
   tnot "...recording nothing"           test -e "$CS/bug-12/approvals"
+  t    "...not even in the git dir"     test "$({ cat "$C/.git/ai-harness/debug-approvals" 2>/dev/null || true; } | wc -c)" = "$recn"
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 'Which compiler builds the release?' >/dev/null)
   trc  "reject needs a reason"          2 "$CX" reject bug-12
   out="$("$CX" reject bug-12 'the caller passes the wrong operands' 2>&1)"
   t    "reject sends the root cause back" hasl "$out" "rejected bug-12: root-cause.md is now root-cause.rejected-1.md"
@@ -2935,20 +2939,41 @@ except d.ConfError as e:
   t    "...and it's recorded in the git dir" grep -q '^reject	bug-12	' "$C/.git/ai-harness/debug-approvals"
   t    "...the confirm attempt for the rejected cause no longer confirms" bash -c "'$CX' status | grep -qxF 'confidence: reproduced' && grep -qx 'confirm_after: $cn' '$CS/bug-12/state'"
   t    "...its check-in task is back in progress" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
+  t    "...the check-in question answered, credited to the person" bash -c "! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12' && grep -q 'human: answered Q1: rejected: the caller' '$C/.agents/plans/bug-12/progress.log'"
+  t    "...another question on T1 stays open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
+  trc  "the agent re-asks for the check-in (--force): recorded" 0 bash -c "cd '$C' && .agents/bin/tasks ask bug-12 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-12'"
   rcdoc "$CS/bug-12/root-cause.md" reproduced
-  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
+  t    "a second reject sets it aside as rejected-2" bash -c "'$CX' reject bug-12 still the wrong operands | grep -qF 'root-cause.md is now root-cause.rejected-2.md' && test -f '$CS/bug-12/root-cause.rejected-1.md' && test -f '$CS/bug-12/root-cause.rejected-2.md'"
+  rcdoc "$CS/bug-12/root-cause.md" reproduced
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
   t    "approve from a person's terminal" test "$("$CX" approve bug-12)" = "approved bug-12"
   t    "...the line goes in approvals and the record" bash -c "grep -q '^rootcause	bug-12	' '$CS/bug-12/approvals' && grep -qxF \"\$(tail -1 '$CS/bug-12/approvals')\" '$C/.git/ai-harness/debug-approvals'"
   t    "...the session is approved"     bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), approved'"
-  t    "...its check-in question answered, its task done" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*done' && ! '$C/.agents/bin/tasks' questions --open | grep -q 'bug-12'"
+  t    "...its check-in question answered, its task done" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*done' && ! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12'"
+  t    "...the unrelated question still open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
+  t    "...and the step is the workflow's last" grep -qx 'step: check-in' "$CS/bug-12/state"
   t    "...and no session is current"   hasl "$("$CX" status)" "no open session on $CB"
   tnot "...with no dates in what it printed" bash -c "'$CX' status bug-12 | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'"
   trc  "approving it again: exit 1"     1 "$CX" approve bug-12
+  printf 'Also check sub().\n' >> "$CS/bug-12/root-cause.md"
+  t    "root-cause.md edited after its approval: open again" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause changed since its approval'"
+  t    "...and it can be approved again" test "$("$CX" approve bug-12)" = "approved bug-12"
   cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals"
   grep '^reject	' "$WORK/debugcli.approvals" > "$CS/bug-12/approvals"
   printf 'rootcause\tbug-12\tsomeone\t2026-10-03\t%s\n' "$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$CS/bug-12/root-cause.md")" >> "$CS/bug-12/approvals"
   t    "a forged approvals line doesn't approve" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
   cp "$WORK/debugcli.approvals" "$CS/bug-12/approvals"
+  "$CX" start bug PROJ-30 >/dev/null; rcdoc "$CS/bug-proj-30/root-cause.md" evidence-only
+  cp "$CS/bug-12/approvals" "$CS/bug-proj-30/approvals"
+  t    "an approval copied into another session doesn't approve it" bash -c "'$CX' status bug-proj-30 | grep -qxF 'session: bug-proj-30 (bug, PROJ-30), open'"
+  mv "$CS/bug-proj-30/root-cause.md" "$CS/bug-proj-30/rc.real"; ln -s rc.real "$CS/bug-proj-30/root-cause.md"
+  trc  "approve refuses a symlinked root-cause.md (2)" 2 "$CX" approve bug-proj-30
+  trc  "...so does reject"              2 "$CX" reject bug-proj-30 no
+  rm -rf "$CS/bug-proj-30" "$C/.agents/plans/bug-proj-30"
+  NG="$WORK/debugnogit"; mkdir -p "$NG"
+  GIT_CEILING_DIRECTORIES="$WORK" "$HARNESS/install.sh" --team --workflow debug "$NG" >/dev/null 2>&1
+  out="$(printf 'x\n' | GIT_CEILING_DIRECTORIES="$WORK" "$NG/.agents/commands/debug" start bug - 2>&1)" && rc=0 || rc=$?
+  t    "start outside a git repo: 2, says it needs one" bash -c "test $rc = 2 && test \"\$1\" = 'debug: the debug workflow needs a git repository'" _ "$out"
   # The simulated human (install.sh --simulated-human) approves debug check-ins too.
   SM=$(repo debugsim); mkdir -p "$SM/src"; printf 'int a;\n' > "$SM/src/a.c"; commit "$SM" base
   out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$SM" 2>&1)"
@@ -2966,6 +2991,8 @@ except d.ConfError as e:
   t    "...in the line itself"         grep -q '^rootcause	bug-1	[^	]* (simulated human)	' "$SMS/approvals"
   mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
   t    "...and it counts only while the switch is on" bash -c "'$SMX' status bug-1 | grep -qxF 'session: bug-1 (bug, #1), open'"
+  "$SMX" run isolate -- true >/dev/null
+  t    "...and run still moves the step of an approval that doesn't count" grep -qx 'step: isolate' "$SMS/state"
   cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
 fi
 }
