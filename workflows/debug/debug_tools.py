@@ -28,6 +28,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -463,10 +464,11 @@ def read_playbook(path):
 
 
 def unbound_steps(root, conf, kind):
-    """The kind's bindable steps whose playbook section is missing or has no bindings."""
+    """The kind's bindable steps whose playbook section is missing or has no binding: a known key
+    (BINDINGS) with a value."""
     meta = read_kind(kind) or {"bindable": []}
     sections = read_playbook(playbook_path(root, conf))[0]
-    return [s for s in meta["bindable"] if not sections.get(s)]
+    return [s for s in meta["bindable"] if not any(k in BINDINGS and v for _, k, v in sections.get(s, []))]
 
 
 def ticket_pattern(root):
@@ -494,23 +496,32 @@ def new_slug(root, conf, kind, ref, text):
     return slug
 
 
+def tasks_path(root):
+    return os.path.join(root, ".agents", "bin", "tasks")
+
+
 def tasks_cli(root, *args):
-    """Run .agents/bin/tasks; True when it worked. False without it (an older install)."""
-    tasks = os.path.join(root, ".agents", "bin", "tasks")
-    if not os.path.isfile(tasks):
-        return False
-    return subprocess.run(["bash", tasks] + list(args), cwd=root, capture_output=True).returncode == 0
+    """Run .agents/bin/tasks: '' when it worked, else what it said on stderr (never empty)."""
+    r = subprocess.run(["bash", tasks_path(root)] + list(args), cwd=root, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, errors="replace")
+    return "" if r.returncode == 0 else (one_line(r.stderr) or "tasks exited %d" % r.returncode)
 
 
 def open_plan(root, slug, kind, ref):
     """A plan ledger named after the session with one task in progress, so a question to the human
-    (tasks ask) or the check-in pauses the stop gate. Its path, or '' without the tasks CLI."""
+    (tasks ask) or the check-in pauses the stop gate. Its path, or '' when there's no tasks CLI (an
+    older install) or a step failed (said on stderr; the session stands without a plan)."""
+    if not os.path.isfile(tasks_path(root)):
+        return ""
     what = "the pasted report" if ref == "-" else ref
-    if tasks_cli(root, "new", slug, "Debug %s %s" % (kind, what)) and \
-            tasks_cli(root, "add", slug, "Find the root cause of %s (debug session %s)" % (what, slug)) and \
-            tasks_cli(root, "set", slug, "T1", "doing"):
-        return os.path.join(".agents", "plans", slug)
-    return ""
+    for step in (("new", slug, "Debug %s %s" % (kind, what)),
+                 ("add", slug, "Find the root cause of %s (debug session %s)" % (what, slug)),
+                 ("set", slug, "T1", "doing")):
+        err = tasks_cli(root, *step)
+        if err:
+            print("debug: couldn't open the plan: %s" % err, file=sys.stderr)
+            return ""
+    return os.path.join(".agents", "plans", slug)
 
 
 REPORT = """# Report: %s
@@ -540,50 +551,68 @@ def cmd_start(root, words, opts, after):
     if len(words) != 2 or after is not None:
         return bad("start")
     kind, ref = words
+    if opts.get("--file=", None) == "":
+        return bad("start")
     conf = load_conf(root)
+    meta = read_kind(kind)
+    if not meta:
+        print("debug: no such workflow: %s (shipped: %s)" % (kind[:40], " ".join(shipped_kinds())),
+              file=sys.stderr)
+        return 2
     on = conf["DEBUG_KINDS"].split()
     if kind not in on:
         print("debug: the %s workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: %s)"
               % (kind[:40], " ".join(on) or "empty"), file=sys.stderr)
         return 2
-    meta = read_kind(kind)
-    if not meta:
-        print("debug: this pack has no %s workflow (it has: %s)" % (kind[:40], " ".join(shipped_kinds())),
-              file=sys.stderr)
-        return 2
-    ticket = ticket_pattern(root)
-    if ref != "-" and not re.fullmatch(r"#[0-9]+", ref) and not ticket.fullmatch(ref):
-        print("debug: %s isn't a ref: give a ticket key (%s), #<n> for a GitHub or GitLab issue, or - to "
-              "read the report from stdin or --file" % (ref[:40], ticket.pattern), file=sys.stderr)
-        return 2
+    if ref != "-" and not re.fullmatch(r"#[0-9]+", ref):
+        ticket = ticket_pattern(root)   # only here, so a broken GIT_TICKET doesn't block #<n> or -
+        if not ticket.fullmatch(ref):
+            print("debug: %s isn't a ref: give a ticket key (%s), #<n> for a GitHub or GitLab issue, or - "
+                  "to read the report from stdin or --file" % (ref[:40], ticket.pattern), file=sys.stderr)
+            return 2
     text = ""
     if "--file=" in opts:
-        path = os.path.join(root, opts["--file="])
+        typed = opts["--file="]   # from the caller's working directory: bin/debug doesn't cd
         try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
+            with open(os.path.abspath(os.path.expanduser(typed)), "rb") as fh:
+                text = fh.read().decode("utf-8", "replace")
         except OSError as e:
-            print("debug: can't read %s: %s" % (opts["--file="], e.strerror), file=sys.stderr)
+            print("debug: can't read %s: %s" % (typed, e.strerror), file=sys.stderr)
             return 2
     elif ref == "-":
-        text = sys.stdin.read()
+        if sys.stdin.isatty():
+            print("debug: paste the report, then Ctrl-D", file=sys.stderr)
+        text = sys.stdin.buffer.read().decode("utf-8", "replace")
     text = text.strip("\n")
     if ref == "-" and not text.strip():
         print("debug: the report is empty: pipe it in, or pass --file=<path>", file=sys.stderr)
         return 2
+    older = current_session(root, conf, ap.Switch(root))
     slug = new_slug(root, conf, kind, ref, text)
     sdir = os.path.join(sessions_dir(root, conf), slug)
-    os.makedirs(os.path.join(sdir, "evidence"))
     got = text or ("(not fetched yet: run the playbook's intake binding for %s, or ask the human to paste "
                    "the report)" % ref)
-    write_text(os.path.join(sdir, "report.md"), REPORT % ("pasted" if ref == "-" else ref, kind, got))
-    write_text(os.path.join(sdir, "hypotheses.md"), HYPOTHESES)
-    write_state(sdir, {"kind": kind, "ref": ref, "branch": current_branch(root),
-                       "start": git(root, "rev-parse", "-q", "--verify", "HEAD").strip() or "none",
-                       "seq": str(1 + max([seq_of(st) for _, _, st in all_sessions(root, conf)] + [0])),
-                       "step": meta["steps"][0], "status": "open"})
+    state = {"kind": kind, "ref": ref, "branch": current_branch(root),
+             "start": git(root, "rev-parse", "-q", "--verify", "HEAD").strip() or "none",
+             "seq": str(1 + max([seq_of(st) for _, _, st in all_sessions(root, conf)] + [0])),
+             "step": meta["steps"][0], "status": "open"}
+    try:
+        os.makedirs(sessions_dir(root, conf), exist_ok=True)
+        os.mkdir(sdir)   # fails when it exists, so the cleanup below only ever removes this new one
+    except OSError as e:
+        raise ConfError("can't write the session %s: %s" % (shown(root, sdir), e.strerror or e))
+    try:   # state last: a session counts only once it exists, and a failed write leaves no dir behind
+        os.mkdir(os.path.join(sdir, "evidence"))
+        write_text(os.path.join(sdir, "report.md"), REPORT % ("pasted" if ref == "-" else ref, kind, got))
+        write_text(os.path.join(sdir, "hypotheses.md"), HYPOTHESES)
+        write_state(sdir, state)
+    except OSError as e:
+        shutil.rmtree(sdir, ignore_errors=True)
+        raise ConfError("can't write the session %s: %s" % (shown(root, sdir), e.strerror or e))
     plan = open_plan(root, slug, kind, ref)
     print("started %s (%s, %s): %s" % (slug, kind, "pasted report" if ref == "-" else ref, shown(root, sdir)))
+    if older:
+        print("note: %s is still open on this branch; %s is now current" % (older[0], slug))
     print("steps: %s" % shown(root, kind_file(kind)))
     if plan:
         print("plan: %s, task T1 in progress; ask the human with .agents/bin/tasks ask %s T1 '<question>'"

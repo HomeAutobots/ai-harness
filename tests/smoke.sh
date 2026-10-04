@@ -2705,34 +2705,59 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "start --help: its usage, exit 0" bash -c "'$CX' start --help | grep -qxF 'usage: debug start <kind> <ref | -> [--file=<path>]'"
   trc  "start with an unknown option: exit 3" 3 "$CX" start bug '#12' --force
   tnot "...and nothing made"             test -e "$CS"
-  trc  "start needs a workflow that's on" 2 "$CX" start crash '#12'
-  trc  "start needs a ticket key, #<n>, or -" 2 "$CX" start bug 'not a ref'
+  out="$("$CX" start crash '#12' 2>&1)" && rc=0 || rc=$?
+  t    "start needs a workflow the pack ships (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF 'debug: no such workflow: crash (shipped: bug)'" _ "$out"
+  out="$("$CX" start bug 'not a ref' 2>&1)" && rc=0 || rc=$?
+  t    "start needs a ticket key, #<n>, or - (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"^debug: not a ref isn't a ref: give a ticket key\"" _ "$out"
   trc  "start - needs a report"          2 bash -c "printf '' | '$CX' start bug -"
+  trc  "start with an empty --file=: usage (2)" 2 "$CX" start bug PROJ-10 --file=
+  out="$(cd "$C/src" && "$CX" start bug PROJ-10 --file=nope.txt 2>&1)" && rc=0 || rc=$?
+  t    "start with a missing --file: 2, the path as typed" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"^debug: can't read nope.txt\"" _ "$out"
+  tnot "...and nothing made"             test -e "$CS"
   out="$("$CX" start bug '#12')"
   t    "start #12 opens bug-12"          hasl "$out" "started bug-12 (bug, #12): .agents/debug/sessions/bug-12"
   t    "...names the skeleton"           hasl "$out" "steps: .agents/builtin/workflows/debug/kinds/bug.md"
   t    "...opens a plan to ask in"       bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
   t    "...and says what's next"         hasl "$out" "next: intake: no playbook binding and no report text; ask the human to paste the report"
-  t    "state: kind, ref, start commit, branch, step" bash -c "grep -qx 'kind: bug' '$CS/bug-12/state' && grep -qx 'ref: #12' '$CS/bug-12/state' && grep -qx \"start: \$(git -C '$C' rev-parse HEAD)\" '$CS/bug-12/state' && grep -qx 'branch: $CB' '$CS/bug-12/state' && grep -qx 'step: intake' '$CS/bug-12/state'"
+  tnot "...with no note when it's the only session" hasl "$out" "note:"
+  t    "state: kind, ref, start commit, branch, seq, step, status" bash -c "grep -qx 'kind: bug' '$CS/bug-12/state' && grep -qx 'ref: #12' '$CS/bug-12/state' && grep -qx \"start: \$(git -C '$C' rev-parse HEAD)\" '$CS/bug-12/state' && grep -qx 'branch: $CB' '$CS/bug-12/state' && grep -qx 'seq: 1' '$CS/bug-12/state' && grep -qx 'step: intake' '$CS/bug-12/state' && grep -qx 'status: open' '$CS/bug-12/state'"
   t    "report.md has the fixed sections" bash -c "grep -qx '## As received' '$CS/bug-12/report.md' && grep -qx '## Expected' '$CS/bug-12/report.md' && grep -qx '## Actual' '$CS/bug-12/report.md'"
   out="$(printf 'add(2, 2) returns 0\nexpected 4\n' | "$CX" start bug -)"
   t    "a pasted report: a slug from its first words" hasl "$out" "started bug-add-2-2-returns-0 (bug, pasted report)"
   t    "...it's the starting record"    grep -qx 'add(2, 2) returns 0' "$CS/bug-add-2-2-returns-0/report.md"
   t    "...and next says so"            hasl "$out" "no playbook binding, so the report as received is the starting record"
+  t    "a pasted report with a non-UTF-8 byte starts" bash -c "printf 'bad \377 byte\n' | '$CX' start bug - >/dev/null && grep -q '^bad .* byte$' '$CS/bug-bad-byte/report.md'"
   printf 'Crash on empty input\n' > "$WORK/report.txt"
   t    "a ref with --file keeps the report text" bash -c "'$CX' start bug PROJ-7 --file='$WORK/report.txt' >/dev/null && grep -qx 'Crash on empty input' '$CS/bug-proj-7/report.md'"
-  t    "the same ref again gets its own slug" hasl "$("$CX" start bug '#12')" "started bug-12-2"
+  t    "a relative --file is read from the working directory" bash -c "cd '$C/src' && printf 'X\n' > r.txt && '$CX' start bug PROJ-9 --file=r.txt >/dev/null && grep -qx X '$CS/bug-proj-9/report.md'"
+  rm -f "$C/src/r.txt"
+  out="$("$CX" start bug '#12')"
+  t    "the same ref again gets its own slug" hasl "$out" "started bug-12-2"
+  t    "...and a note names the session it replaces as current" hasl "$out" "note: bug-proj-9 is still open on this branch; bug-12-2 is now current"
   printf '## intake\n- run: gh issue view <n>\n' >> "$C/.agents/debug/playbook.md"
   t    "with an intake binding, next says to use it" hasl "$("$CX" start bug PROJ-8)" "next: intake: use the playbook's intake bindings (.agents/debug/playbook.md)"
   git -C "$C" checkout -q .agents/debug/playbook.md
+  printf '## intake\n- note: ask in chat\n- run:\n' >> "$C/.agents/debug/playbook.md"
+  t    "...but not an unknown key or an empty value" hasl "$("$CX" start bug PROJ-11)" "next: intake: no playbook binding and no report text"
+  git -C "$C" checkout -q .agents/debug/playbook.md
+  GP="$C/.agents/builtin/workflows/debug"
+  CC="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r = sys.argv[2]; d.use_lib(r); c = d.current_session(r, d.load_conf(r), d.ap.Switch(r)); print(c[0] if c else '')"
+  git -C "$C" checkout -q --detach
+  t    "on a detached HEAD, start works" bash -c "'$CX' start bug PROJ-12 >/dev/null"
+  tnot "...state has no branch line"     grep -q '^branch:' "$CS/bug-proj-12/state"
+  t    "...and it's the current session there" test "$(python3 -B -c "$CC" "$GP" "$C" 2>&1)" = "bug-proj-12"
+  git -C "$C" checkout -q "$CB"
+  t    "...not on the branch"            test "$(python3 -B -c "$CC" "$GP" "$C" 2>&1)" = "bug-proj-11"
   edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS=""/'
-  trc  "DEBUG_KINDS empty turns every workflow off" 2 "$CX" start bug '#20'
+  out="$("$CX" start bug '#20' 2>&1)" && rc=0 || rc=$?
+  t    "DEBUG_KINDS empty turns every workflow off (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF \"debug: the bug workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: empty)\"" _ "$out"
   edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS="bug"/'
   cp "$C/.agents/git.conf" "$WORK/debugcli.git.conf"
   printf 'GIT_TICKET="(PROJ-[0-9]+"\n' >> "$C/.agents/git.conf"
   out="$("$CX" start bug PROJ-1 2>&1)" && rc=0 || rc=$?
   t    "an invalid GIT_TICKET: infra (3), naming it" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q '^infra: GIT_TICKET in .agents/git.conf isn.t a valid Python regex'" _ "$out"
   tnot "...and no session made"          test -e "$CS/bug-proj-1"
+  t    "...while an issue ref still starts" hasl "$("$CX" start bug '#12')" "started bug-12-3"
   cp "$WORK/debugcli.git.conf" "$C/.agents/git.conf"
   rm -rf "$CS" "$C"/.agents/plans/bug-*
 fi
