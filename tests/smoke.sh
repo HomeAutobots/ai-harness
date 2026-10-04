@@ -1458,8 +1458,16 @@ out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-both.diff" .agents/bin/verify --t
 t    "...a project file in the same run still counts" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
 sed "s|^\([-+][-+][-+]\) |\1 $(cd "$PV" && pwd -P)/|" "$WORK/py-black-both.diff" > "$WORK/py-black-abs.diff"   # real black names files by absolute path
 out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-abs.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
-t    "...named by absolute path too: the project file counts, as a repo path" bash -c "printf '%s' \"\$1\" | grep -q '^app.py:1: error: not formatted the way black formats it'" _ "$out"
+t    "...named by absolute path too: the project file counts, as a repo path throughout" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
 tnot "...and the harness file doesn't" hasl "$out" 'approvals.py:1: error'
+printf 'x=1\n' > "$PV/café.py"
+sed "s|app\.py|café.py|g" "$WORK/py-black-abs.diff" > "$WORK/py-black-utf8.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-utf8.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...a file with a non-ASCII name still counts" hasl "$out" 'café.py:1: error: not formatted the way black formats it (run: black café.py) [black-format]'
+rm -f "$PV/café.py"
+mkdir -p "$WORK/pynogit"; cp -R "$PV/.agents" "$WORK/pynogit/"; printf 'def add(a,b):\n    return a + b\n' > "$WORK/pynogit/app.py"
+out="$(cd "$WORK/pynogit" && env PATH="$WORK/pystub:$PYNP" STUB_FMT_DIFF="$WORK/py-black.diff" AGENTS_ROOT="$WORK/pynogit" PY_FORMAT=black bash -c '. .agents/stacks/python/lib.sh; py_format_check_all' 2>&1)" && rc=0 || rc=$?
+t    "absence: outside git, black's whole-project findings all count" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'" _ "$out"
 git -C "$PV" checkout -q pyproject.toml
 printf 'def add(a, b):\n    return a + b + 0\n' > "$PV/app.py"
 out="$(pyv "$PV" STUB_MYPY_OUT='other.py:2: error: Returning Any  [no-any-return]' .agents/bin/verify --no-cache 2>&1 || true)"
