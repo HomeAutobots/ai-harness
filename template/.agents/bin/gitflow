@@ -905,16 +905,37 @@ hook_pre_push() {
   return $bad
 }
 
+# is_hooks_path <word>: the word names core.hooksPath, as git -c, --config-env, or git config take
+# it (git config names ignore case; quotes are the shell's)
+is_hooks_path() {
+  case "$(printf '%s' "$1" | tr -d "\"'" | tr '[:upper:]' '[:lower:]')" in
+    core.hookspath|core.hookspath=*) return 0 ;;
+  esac
+  return 1
+}
+HOOKS_OFF_MSG="commit hooks can't be switched off: core.hooksPath decides which git hooks run, and setting it is the human's step"
+
 # check-cmd <command>: would this command break the workflow if an agent ran it? Exit 2 + reason.
 cmd_check_cmd() {
   # shellcheck disable=SC2086,SC2048  # split the command into words on purpose (no globbing: set -f)
   set -- $*
   local tool="${1:-}" sub b a prev="" name="" base="" force=0 lease=0 remote="" refs="" dst r
+  local skip=0 cfsub="" key="" vals=0 cfwrite=0 cfread=0 cfsect=0
   case "$tool" in
     git)
       shift
+      # Global options before the subcommand. -c core.hooksPath=... (or --config-env) for one
+      # command skips the commit hooks just as --no-verify does.
       while [ $# -gt 0 ]; do
-        case "$1" in -C|-c) shift 2 ;; --*=*|-P|--no-pager|--bare) shift ;; *) break ;; esac
+        case "$1" in
+          -c|--config-env) is_hooks_path "${2:-}" && { echo "$HOOKS_OFF_MSG; run it without $1 ${2:-}"; return 2; }
+                           shift; [ $# -eq 0 ] || shift ;;
+          --config-env=*) is_hooks_path "${1#--config-env=}" && { echo "$HOOKS_OFF_MSG; run it without $1"; return 2; }
+                          shift ;;
+          -C|--git-dir|--work-tree|--namespace|--attr-source|--super-prefix) shift; [ $# -eq 0 ] || shift ;;
+          -*) shift ;;   # -p, --no-pager, --bare, --git-dir=x...: a subcommand never starts with -
+          *) break ;;
+        esac
       done
       sub="${1:-}"; [ $# -gt 0 ] && shift
       b="$(current_branch)"
@@ -944,6 +965,37 @@ cmd_check_cmd() {
           may commit || { echo "committing is the human's step in this repo (GIT_AGENT_MAY: $GIT_AGENT_MAY)"; return 2; }
           [ -n "$b" ] && protected "$b" && { echo "$b is protected; commit on a branch: .agents/bin/gitflow start <ticket> <summary>"; return 2; }
           for a in "$@"; do case "$a" in -n|--no-verify) echo "commit hooks can't be skipped"; return 2 ;; esac; done ;;
+        config)
+          # Setting, unsetting, or removing core.hooksPath (any scope or file) switches the commit
+          # hooks off or points them elsewhere; reading it is fine. Positionals: an optional
+          # subcommand (git 2.46's set, unset, get...; a key always has a dot), the key, values.
+          for a in "$@"; do
+            if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+            case "$a" in
+              -f|--file|--blob|-t|--type|--default|--comment|--value) skip=1 ;;
+              '>'|'>>'|[0-9]'>'|[0-9]'>>'|'&>'|'<') skip=1 ;;   # a redirect and its target aren't values
+              *'>'*|'<'*) ;;                                    # a redirect with its target attached
+              --unset|--unset-all|--add|--replace-all) cfwrite=1 ;;
+              --remove-section|--rename-section) cfsect=1 ;;
+              --get|--get-all|--get-regexp|--get-urlmatch|-l|--list) cfread=1 ;;
+              -*) ;;
+              *)
+                if [ -z "$cfsub$key" ]; then
+                  case "$a" in
+                    set|unset) cfsub="$a"; cfwrite=1; continue ;;
+                    rename-section|remove-section) cfsub="$a"; cfsect=1; continue ;;
+                    get|list|edit|get-color|get-colorbool) cfsub="$a"; cfread=1; continue ;;
+                  esac
+                fi
+                if [ -z "$key" ]; then key="$a"; else vals=$((vals + 1)); fi ;;
+            esac
+          done
+          if [ "$cfsect" -eq 1 ]; then
+            [ "$(printf '%s' "$key" | tr -d "\"'" | tr '[:upper:]' '[:lower:]')" = core ] \
+              && { echo "$HOOKS_OFF_MSG (removing or renaming the core section drops it)"; return 2; }
+          elif is_hooks_path "$key" && { [ "$cfwrite" -eq 1 ] || { [ "$cfread" -eq 0 ] && [ "$vals" -gt 0 ]; }; }; then
+            echo "$HOOKS_OFF_MSG"; return 2
+          fi ;;
         checkout|switch|branch)
           for a in "$@"; do
             case "$prev" in -b|-B|-c|-C|--create|--orphan) name="$a" ;; esac

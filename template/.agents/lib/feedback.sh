@@ -347,6 +347,9 @@ agents_lint() {
 }
 
 # agents_step <name> <cmd...>: run a command quietly; on failure print a FAIL line and its output.
+# Returns the command's exit code, except 2 comes back as 1: verify reads 2 as a policy block, and
+# for a test binary, make, or a linter, 2 is just a failure. A check that means a policy block
+# returns 2 itself, never through agents_step.
 agents_step() {
   local name="$1" raw rc=0
   shift
@@ -361,5 +364,6 @@ agents_step() {
     cat "$raw"
   fi
   rm -f "$raw"
+  [ "$rc" -eq 2 ] && rc=1
   return $rc
 }

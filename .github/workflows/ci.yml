@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck gawk mawk original-awk cmake ninja-build \
-            clang-tidy clang-format cppcheck ccache
+            clang-tidy clang-format cppcheck ccache python3-venv
 
       - name: Tools (macOS), with stock bash 3.2 first on PATH
         if: runner.os == 'macOS'
@@ -31,8 +31,21 @@ jobs:
           ln -s /bin/bash "$RUNNER_TEMP/stockbash/bash"
           echo "$RUNNER_TEMP/stockbash" >> "$GITHUB_PATH"
 
+      # The python stack's real-tool tests (grp_python_real) need ruff, pytest, and mypy. They go in
+      # a venv, and only those three are linked onto PATH, so the suite's python3 stays the
+      # system one. Pinned to the versions the suite was checked with.
+      - name: Python tools for the python stack's tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytools"
+          "$RUNNER_TEMP/pytools/bin/python" -m pip install -q 'ruff==0.15.19' 'pytest==8.4.1' 'mypy==1.18.2'
+          mkdir -p "$RUNNER_TEMP/pytools-bin"
+          ln -s "$RUNNER_TEMP/pytools/bin/ruff" "$RUNNER_TEMP/pytools/bin/pytest" "$RUNNER_TEMP/pytools/bin/mypy" "$RUNNER_TEMP/pytools-bin/"
+          echo "$RUNNER_TEMP/pytools-bin" >> "$GITHUB_PATH"
+
       - name: Show versions
-        run: bash --version | head -1; awk --version 2>&1 | head -1 || true; python3 --version
+        run: |
+          bash --version | head -1; awk --version 2>&1 | head -1 || true; python3 --version
+          ruff --version; pytest --version; mypy --version
 
       - name: Lint
         run: bash tests/lint.sh
