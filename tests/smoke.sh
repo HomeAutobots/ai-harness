@@ -3895,6 +3895,20 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$QX" run gather-evidence --timeout=20 -- bash -c "${recipe//<dump>/ps -o pid= -p}" 2>&1)" && rc=0 || rc=$?
   t    "crash: the steps' thread-dump recipe dumps the running process, then stops it" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qE '^ *[0-9]+\$'" _ "$out" "$recipe"
   t    "crash: the root cause names the faulting path:line and the bad state" grep -qF 'names the faulting `path:line` and the bad state that reached it' "$QK/crash.md"
+  echo "debug: the field issue workflow"
+  kindchk field "intake gather-evidence reproduce hypothesize isolate root-cause check-in" "intake, gather-evidence, reproduce, isolate"
+  t    "field: scrubbing lives in the gather-evidence binding, errors and exit code included" bash -c "grep -qF 'run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub' '$QK/field.md' && grep -qF \"bash -c 'set -o pipefail; <line>'\" '$QK/field.md'"
+  t    "field: evidence-only is acceptable, with what would confirm it" bash -c "grep -qF 'Confidence will often be \`evidence-only\`' '$QK/field.md' && grep -qF 'what logging or telemetry' '$QK/field.md'"
+  t    "field: raw customer data stays out of the root cause" grep -qF 'Raw customer data never goes in `root-cause.md` or the ticket' "$QK/field.md"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$Q/src/calc.c"; commit "$Q" "add adds"
+  "$QX" start field - <<< 'totals are wrong on v1' >/dev/null
+  recipe="$(sed -n "s/.*debug run reproduce --attempt=reproduce -- bash -c '\(cd .*\)'\`\$/\1/p" "$QK/field.md")"
+  recipe="${recipe//<ver>/v1}"
+  (cd "$Q" && git worktree add -q --detach ../repro-v1 HEAD~1)
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/cat src/calc.c}" 2>&1)" && rc=0 || rc=$?
+  t    "field: the steps' old-version recipe runs the old version from a worktree" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | grep -qxF 'int add(int a, int b) { return a - b; }'" _ "$out" "$recipe"
+  (cd "$Q" && git worktree remove --force ../repro-v1)
+  t    "...and the worktree is gone after"  bash -c "test ! -e '$WORK/repro-v1' && ! git -C '$Q' worktree list | grep -q repro-v1"
 fi
 }
 group grp_debug_kinds
