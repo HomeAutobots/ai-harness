@@ -10,9 +10,10 @@ Something went wrong where the software runs for real (production, a customer's 
 the field), and that system can't be run here. So evidence comes before reproduction: logs,
 telemetry, and config from there first, then a local attempt built from what they show. Go through
 the steps in order the first time; 2 to 5 loop until a hypothesis holds. For each step with a
-playbook section, read that section of the playbook first and use its bindings; what's below is
-the fallback when the section is empty, and the rule either way. The `debug` skill has the shared
-rules (evidence, experiments, the check-in).
+playbook section, read that section first: the playbook is shared by every workflow, so use
+the bindings that fit this one (a plain line like `For field issues:` above some says which
+workflow they're for); what's below is the fallback when none fit, and the rule either way. The
+`debug` skill has the shared rules (evidence, experiments, the check-in).
 
 | # | Step | Playbook section | Produces |
 |---|---|---|---|
@@ -84,10 +85,11 @@ rules (evidence, experiments, the check-in).
   `debug run isolate --timeout=0 -- bash -c 'git bisect start <bad> <good> && git bisect run <test>; rc=$?; git bisect reset; exit $rc'`.
   Keep `<test>` out of the project tree (a script in the session dir works: git ignores it and
   `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
-  out that commit's `.agents/`, or none. A `<test>` that can hang needs its own limit
-  (`timeout 60 <command>`, `gtimeout` on macOS with Homebrew's coreutils): a limit on the whole
-  `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect (`git status`
-  says so), run `git bisect reset` first.
+  out that commit's `.agents/`, or none. `git bisect run` gives up on an exit code of 128 or
+  more (a crash), so `<test>` turns any failure into 1, and one that can hang gets its own limit:
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -eq 0 ] || exit 1` (`gtimeout` on macOS with
+  Homebrew's coreutils). A limit on the whole `debug run` stops it before `git bisect reset`. If
+  HEAD is ever left mid-bisect (`git status` says so), run `git bisect reset` first.
 - Experiments happen here, in this repo, never on the field system. They're fine until
   `root-cause.md` exists; keep track of them so you can revert them. Don't put one in a file that
   already had uncommitted changes. If you must, undo your own lines by hand; never `git checkout`

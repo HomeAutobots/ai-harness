@@ -7,9 +7,11 @@ bindable: intake reproduce gather-evidence isolate
 # Failing test or CI
 
 A test fails, here or in CI. Go through the steps in order the first time; 3 to 5 loop until a
-hypothesis holds. For each step with a playbook section, read that section of the playbook first
-and use its bindings; what's below is the fallback when the section is empty, and the rule either
-way. The `debug` skill has the shared rules (evidence, experiments, the check-in).
+hypothesis holds. For each step with a playbook section, read that section first: the playbook is
+shared by every workflow, so use the bindings that fit this one (a plain line like
+`For field issues:` above some says which workflow they're for); what's below is the fallback when
+none fit, and the rule either way. The `debug` skill has the shared rules (evidence, experiments,
+the check-in).
 
 | # | Step | Playbook section | Produces |
 |---|---|---|---|
@@ -42,8 +44,9 @@ way. The `debug` skill has the shared rules (evidence, experiments, the check-in
   number the playbook gives, else 20) and count:
   `debug run reproduce --attempt=reproduce -- bash -c 'p=0; f=0; for i in $(seq 20); do if <command>; then p=$((p+1)); echo "run $i: pass"; else f=$((f+1)); echo "run $i: fail"; fi; done; echo "passed $p, failed $f"; [ "$f" -eq 0 ]'`.
   Every run failing is `reproduced`, some is `partial` (an intermittent failure), none is
-  `not-reproduced`. Give it a `--timeout` of about 20 times one run; if it still hits the limit,
-  the `run <i>:` lines say how far it got.
+  `not-reproduced`. Give it a `--timeout` of about 20 times one run, and ask your tool for a
+  longer command timeout than that; if it still hits the limit, the `run <i>:` lines say how far it
+  got.
 - A pass here is a finding in itself: the difference between CI and here is the next place to
   look. Record it and go on to evidence.
 - A test that can hang gets a limit: `--timeout=<sec>` on `debug run` (it exits 124, and the entry
@@ -84,10 +87,11 @@ way. The `debug` skill has the shared rules (evidence, experiments, the check-in
   Keep `<test>` out of the project tree (a script in the session dir works: git ignores it and
   `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
   out that commit's `.agents/`, or none. For a flaky test, `<test>` runs it several times and fails
-  if any run fails, or the bisect lands on noise. A test that can hang needs its own limit inside
-  `<test>` (`timeout 60 <command>`, `gtimeout` on macOS with Homebrew's coreutils): a limit on the
-  whole `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect
-  (`git status` says so), run `git bisect reset` first.
+  if any run fails, or the bisect lands on noise. `git bisect run` gives up on an exit code of 128
+  or more (a crash), so `<test>` turns any failure into 1, and a test that can hang gets its own
+  limit: `timeout -k 5 60 <command>; rc=$?; [ "$rc" -eq 0 ] || exit 1` (`gtimeout` on macOS with
+  Homebrew's coreutils). A limit on the whole `debug run` stops it before `git bisect reset`. If
+  HEAD is ever left mid-bisect (`git status` says so), run `git bisect reset` first.
 - At the first red commit, check what changed: the test, the code it tests, or neither (a
   dependency, the CI config): `debug run isolate -- git show --stat <commit>`.
 - Order and shared state: run the test alone, then with the tests that ran before it in CI, and

@@ -693,7 +693,7 @@ def rc_format(ctx):
     elif stated[1] != want:
         out.append(finding(rel, stated[0], "debug-format",
                            "Confidence: %s, but the recorded attempts support %s" % (stated[1][:40] or "(empty)", want),
-                           "confirmed needs a confirmation attempt that reproduced the bug through the cause "
+                           "confirmed needs a confirmation attempt that reproduced the problem through the cause "
                            "(%s run isolate --attempt=confirm -- ...)%s, reproduced needs a reproduction "
                            "attempt that reproduced it, anything else is evidence-only. Say what the attempts "
                            "show, or record the attempt"
@@ -1918,7 +1918,7 @@ def confirm_after(st):
 
 def confidence(ev, st):
     """What the recorded attempts support: confirmed when a confirmation attempt after the state's
-    confirm_after triggered the bug through the stated cause, reproduced when any attempt
+    confirm_after triggered the problem through the stated cause, reproduced when any attempt
     reproduced it (a confirmation attempt is a reproduction too), else evidence-only. debug reject
     writes confirm_after; it sits in the state file an agent can edit, which is accepted, since the
     outcomes it judges are agent-recorded too."""

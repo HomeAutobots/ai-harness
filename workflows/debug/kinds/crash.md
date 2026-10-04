@@ -8,9 +8,11 @@ bindable: intake reproduce gather-evidence isolate
 
 The program dies (a segfault, an abort, an uncaught exception, a sanitizer report) or stops making
 progress (a hang, a deadlock, a busy loop). Go through the steps in order the first time; 3 to 5
-loop until a hypothesis holds. For each step with a playbook section, read that section of the
-playbook first and use its bindings; what's below is the fallback when the section is empty, and
-the rule either way. The `debug` skill has the shared rules (evidence, experiments, the check-in).
+loop until a hypothesis holds. For each step with a playbook section, read that section first: the
+playbook is shared by every workflow, so use the bindings that fit this one (a plain line like
+`For field issues:` above some says which workflow they're for); what's below is the fallback when
+none fit, and the rule either way. The `debug` skill has the shared rules (evidence, experiments,
+the check-in).
 
 | # | Step | Playbook section | Produces |
 |---|---|---|---|
@@ -43,14 +45,16 @@ the rule either way. The `debug` skill has the shared rules (evidence, experimen
   `debug run reproduce --attempt=reproduce --timeout=60 -- <command>`. Exit 124, with
   `timed out: after 60s` in the entry, is a reproduced hang; finishing in time is not.
 - Output to a file is block-buffered, so a program stopped at the limit, or one that crashes, can
-  lose what it printed last. Run it unbuffered where you can (`python3 -u`, `PYTHONUNBUFFERED=1`,
-  `stdbuf -oL -eL <command>` on Linux, `gstdbuf` on macOS with Homebrew's coreutils).
+  lose what it printed last. Run it unbuffered where you can (`python3 -u`,
+  `env PYTHONUNBUFFERED=1 <command>`, `stdbuf -oL -eL <command>` on Linux, `gstdbuf` on macOS with
+  Homebrew's coreutils).
 - Memory errors: a sanitizer build (AddressSanitizer, UndefinedBehaviorSanitizer) stops at the
   first bad access, with a stack, where a plain build crashes later or not at all. Use the one the
   playbook binds (a cpp-cmake project has an ASan+UBSan build for its full tier); don't set one up
   from scratch without asking.
-- A crash that depends on timing: run it several times inside one entry and count, the way a flaky
-  test is counted. Some runs crashing is `partial`.
+- A crash that depends on timing: run it several times inside one entry and count:
+  `debug run reproduce --attempt=reproduce -- bash -c 'f=0; for i in $(seq 20); do <command>; rc=$?; echo "run $i: exit $rc"; [ "$rc" -eq 0 ] || f=$((f+1)); done; echo "failed $f of 20"; [ "$f" -eq 0 ]'`.
+  Every run crashing is `reproduced`, some is `partial`, none is `not-reproduced`.
 - If it won't reproduce, note what differs from the report (input, platform, build flags, load)
   and move on to evidence.
 
@@ -64,12 +68,18 @@ the rule either way. The `debug` skill has the shared rules (evidence, experimen
   `debug run gather-evidence -- lldb --batch -c <core> -o 'bt all' <binary>`. In gdb,
   `-ex 'thread apply all bt'` shows every thread.
 - A hang: a thread dump taken while it hangs, from the same entry that runs it:
-  `debug run gather-evidence --timeout=120 -- bash -c '<command> & pid=$!; sleep 20; <dump> $pid; kill -KILL $pid'`,
+  `debug run gather-evidence --timeout=90 -- bash -c '<command> & pid=$!; sleep 20; <dump>; rc=$?; kill -KILL $pid; exit $rc'`,
   where `<command>` is the program itself (behind `make run` or a pipeline, `$!` is a shell, not
-  the program) and `<dump>` is what the playbook binds (`py-spy dump --pid`, `jstack`,
-  `gdb -batch -ex "thread apply all bt" -p`, `lldb --batch -o "bt all" -p`). Attaching may need
-  permission (Linux's ptrace scope, often 1, lets a debugger attach only to its own children;
-  developer mode on macOS); if it's refused, say so rather than working around it.
+  the program) and `<dump>` is the playbook's thread-dump binding with `$pid` for its `<pid>`
+  (`py-spy dump --pid $pid`, `jstack $pid`, `gdb -batch -ex "thread apply all bt" -p $pid`,
+  `lldb --batch -o "bt all" -p $pid`). The entry's exit code is the dump's.
+- Attaching may be refused. On Linux with ptrace scope 1 (common) a debugger may attach only to its
+  own children, and the dump above runs beside the program, not above it; macOS may want developer
+  mode. Then launch the program under the tool, so the tool is its parent:
+  `debug run gather-evidence --timeout=90 -- bash -c 'gdb -batch -ex run -ex "thread apply all bt" --args <binary> <args> & sleep 20; pkill -INT -P $!; wait $!'`
+  (SIGINT stops the program inside gdb, which then prints every thread), or
+  `py-spy record --duration 20 --format raw -o <file> -- <command>` for Python. If that's refused
+  too, say so rather than working around it.
 - Every item worth citing is a `debug run gather-evidence -- <command>` entry. Reading code is fine
   without one; cite it as `path:line`. Stop when you have enough to form hypotheses.
 
@@ -92,10 +102,13 @@ the rule either way. The `debug` skill has the shared rules (evidence, experimen
   `debug run isolate --timeout=0 -- bash -c 'git bisect start <bad> <good> && git bisect run <test>; rc=$?; git bisect reset; exit $rc'`.
   Keep `<test>` out of the project tree (a script in the session dir works: git ignores it and
   `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
-  out that commit's `.agents/`, or none. For a hang, `<test>` needs its own limit
-  (`timeout 60 <command>`, `gtimeout` on macOS with Homebrew's coreutils; its exit 124 counts as
-  bad): a limit on the whole `debug run` stops it before `git bisect reset`. If HEAD is ever left
-  mid-bisect (`git status` says so), run `git bisect reset` first.
+  out that commit's `.agents/`, or none. `git bisect run` gives up on an exit code of 128 or
+  more, which is what a crash exits with (139 for a segfault, 134 for an abort), and on a hang it
+  waits forever. So `<test>` turns any failure into 1 and gives the program its own limit:
+  `timeout -k 5 60 <command>; rc=$?; [ "$rc" -eq 0 ] || exit 1` (`gtimeout` on macOS with
+  Homebrew's coreutils; `-k 5` kills it 5 seconds after the limit if it ignores SIGTERM). A limit
+  on the whole `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect
+  (`git status` says so), run `git bisect reset` first.
 - An old version: never check it out in place, since the session follows the branch. From the repo
   root, `git worktree add --detach ../repro-<ver> <ver>`, run it there with
   `debug run isolate -- bash -c 'cd "$(git rev-parse --show-toplevel)/../repro-<ver>" && <command>'`

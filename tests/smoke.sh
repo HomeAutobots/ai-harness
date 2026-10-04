@@ -3951,7 +3951,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
     b="$(sed -n 's/^bindable: //p' "$f")"
     for s in $b; do printf '## %s\n- run: echo %s\n\n' "$s" "$s"; done > "$QP"
     t    "$k: a binding for each bindable step passes the playbook check" test "$("$Q/.agents/bin/verify" --tier=full --no-cache 2>&1)" = "ok verify full"
-    tnot "$k: ...and status lists none" hasl "$("$QX" status)" "steps with no playbook bindings"
+    out="$("$QX" status 2>&1)"
+    t    "$k: ...and status, still on the session," hasl "$out" "session: $slug ($k, "
+    tnot "$k: ...lists none" hasl "$out" "steps with no playbook bindings"
     git -C "$Q" checkout -q .agents/debug/playbook.md
     "$QX" close "$slug" abandoned >/dev/null
   }
@@ -3960,19 +3962,32 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "test: intake fetches the failed CI log" grep -qF 'gh run view <run-id> --log-failed' "$QK/test.md"
   recipe="$(sed -n "s/.*-- bash -c '\(p=0; f=0; .*\)'\`\.\$/\1/p" "$QK/test.md")"
   "$QX" start test - <<< 'add test flakes' >/dev/null
-  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/[ \$((i % 4)) -ne 0 ]}" 2>&1)" && rc=0 || rc=$?
+  fake='[ $((i % 4)) -ne 0 ]'   # fails every 4th run
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/$fake}" 2>&1)" && rc=0 || rc=$?
   t    "test: the steps' run-it-N-times recipe counts passes and fails" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'passed 15, failed 5'" _ "$out" "$recipe"
   t    "test: a flaky failure is partial, a pass here a finding" bash -c "grep -qF 'some is \`partial\`' '$QK/test.md' && grep -qF 'A pass here is a finding in itself' '$QK/test.md'"
+  t    "test: a long count asks the agent's tool for a longer timeout" grep -qF 'ask your tool for a' "$QK/test.md"
   t    "test: the test, flakiness, and the environment are causes too" bash -c "grep -qF 'the test is wrong' '$QK/test.md' && grep -qF 'not the code' '$QK/test.md'"
   echo "debug: the crash and hang workflow"
   kindchk crash "intake reproduce gather-evidence hypothesize isolate root-cause check-in" "intake, reproduce, gather-evidence, isolate"
   t    "crash: a hang is reproduced with a time limit" grep -qF 'debug run reproduce --attempt=reproduce --timeout=60 -- <command>' "$QK/crash.md"
   t    "crash: a core file is read in batch mode" bash -c "grep -qF 'gdb -batch -ex bt <binary> <core>' '$QK/crash.md' && grep -qF \"lldb --batch -c <core> -o 'bt all' <binary>\" '$QK/crash.md'"
-  recipe="$(sed -n "s/.*debug run gather-evidence --timeout=120 -- bash -c '\(.*\)'\`,\$/\1/p" "$QK/crash.md")"
+  recipe="$(sed -n "s/.*debug run reproduce --attempt=reproduce -- bash -c '\(f=0; .*\)'\`\.\$/\1/p" "$QK/crash.md")"
   "$QX" start crash - <<< 'the server hangs' >/dev/null
+  fake='[ $((i % 5)) -ne 0 ]'   # fails every 5th run
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/$fake}" 2>&1)" && rc=0 || rc=$?
+  t    "crash: the steps' repeat-and-count recipe counts the runs that fail" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'failed 4 of 20'" _ "$out" "$recipe"
+  recipe="$(sed -n "s/.*debug run gather-evidence --timeout=90 -- bash -c '\(<command> .*\)'\`,\$/\1/p" "$QK/crash.md")"
   recipe="${recipe//<command>/sleep 30}"; recipe="${recipe//sleep 20/sleep 1}"
-  out="$("$QX" run gather-evidence --timeout=20 -- bash -c "${recipe//<dump>/ps -o pid= -p}" 2>&1)" && rc=0 || rc=$?
-  t    "crash: the steps' thread-dump recipe dumps the running process, then stops it" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qE '^ *[0-9]+\$'" _ "$out" "$recipe"
+  dump='ps -o pid= -p $pid'
+  out="$("$QX" run gather-evidence --timeout=20 -- bash -c "${recipe//<dump>/$dump}" 2>&1)" && rc=0 || rc=$?
+  t    "crash: the steps' thread-dump recipe dumps the running process, exits with the dump's code" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qE '^ *[0-9]+\$'" _ "$out" "$recipe"
+  hung="$(printf '%s\n' "$out" | sed -n 2p | tr -d ' ')"
+  t    "...and stops it after"            bash -c "test -n '$hung' && ! kill -0 '$hung' 2>/dev/null"
+  t    "crash: when attaching is refused, the tool launches the program" bash -c "grep -qF 'ptrace scope 1' '$QK/crash.md' && grep -qF 'pkill -INT -P \$!' '$QK/crash.md'"
+  t    "crash: unbuffered through env (debug run runs argv as is)" grep -qF '`env PYTHONUNBUFFERED=1 <command>`' "$QK/crash.md"
+  t    "every bisect turns a crash into a plain failure, with its own limit" bash -c "for k in bug test crash field; do grep -qF 'timeout -k 5 60 <command>; rc=\$?; [ \"\$rc\" -eq 0 ] || exit 1' '$QK/'\$k.md || exit 1; done"
+  t    "every workflow uses the shared playbook's bindings that fit it" bash -c "for k in bug test crash field; do grep -qF 'the bindings that fit this one' '$QK/'\$k.md || exit 1; done"
   t    "crash: the root cause names the faulting path:line and the bad state" grep -qF 'names the faulting `path:line` and the bad state that reached it' "$QK/crash.md"
   echo "debug: the field issue workflow"
   kindchk field "intake gather-evidence reproduce hypothesize isolate root-cause check-in" "intake, gather-evidence, reproduce, isolate"
@@ -3991,6 +4006,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   echo "debug: which workflows are on"
   Z=$(repo debugkinds-new); "$HARNESS/install.sh" --team --workflow debug "$Z" >/dev/null 2>&1
   t    "a new install turns all four on" grep -qx 'DEBUG_KINDS="bug test crash field"' "$Z/.agents/harness.conf"
+  t    "...and starts a crash session"   bash -c "printf 'New install crash\n' | '$Z/.agents/commands/debug' start crash - | grep -q '^started crash-new-install-crash '"
   tnot "...and the comment no longer says the others come later" grep -q 'come later' "$Z/.agents/harness.conf"
   edit "$Q/.agents/harness.conf" '/^DEBUG_KINDS=/d'
   t    "upgrade: no DEBUG_KINDS line, all four are on" bash -c "for k in bug test crash field; do printf 'Missing key %s\n' \$k | '$QX' start \$k - | grep -q \"^started \$k-missing-key-\$k \" || exit 1; done"
@@ -4009,7 +4025,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "harness-tailor looks for the CI CLI" grep -qF 'gh run view <run-id> --log-failed' "$HT"
   t    "...debuggers, thread dumps, and sanitizer builds" bash -c "grep -qF 'lldb --batch' '$HT' && grep -qF 'py-spy dump --pid <pid>' '$HT' && grep -qF 'ASan+UBSan' '$HT'"
   t    "...log pulls through the repo's scrubber" grep -qF 'run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub' "$HT"
-  t    "...and its AGENTS.md line names all four" grep -qF 'Investigating a bug report, a failing test, a crash, or a production issue: use the `debug` skill.' "$HT"
+  t    "...replacing an older debug line in AGENTS.md" grep -qF 'replace an older `debug` line if there is one' "$HT"
+  t    "...never runs a binding that pulls field data to prove it" grep -qF '(unverified: pulls field data; first run in a session)' "$HT"
+  t    "...and marks bindings for one workflow with a plain line" grep -qF '`For field issues:`' "$HT"
+  t    "the skill runs a binding's pipe with pipefail" grep -qF "bash -c 'set -o pipefail; <line>'" "$DS"
 fi
 }
 group grp_debug_kinds
