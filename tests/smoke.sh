@@ -10,7 +10,7 @@ trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
-unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK   # hygiene: the debug pack reads them from harness.conf only (tested)
+unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK DEBUG_RUN_TIMEOUT   # hygiene: the debug pack reads them from harness.conf only (tested)
 # shellcheck disable=SC2046  # one name per word
 unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT $(compgen -v PY_ || true)   # the python stack reads these; an activated venv mustn't decide its tests
 
@@ -3771,6 +3771,77 @@ if [ "$HAVE_PY" -eq 1 ]; then
   n="$(rn sh -c '(sleep 1; echo late) & echo now')"
   sleep 2
   t    "what a process left running writes later isn't in the log" bash -c "grep -qx now '$RE/E-$n.log' && ! grep -q late '$RE/E-$n.log'"
+  echo "debug run: time limit"
+  enum(){ printf '%s\n' "$1" | sed -n '1s/^E-\([0-9]*\) .*/\1/p'; }   # enum <run output>: its entry's number
+  t    "a new install sets DEBUG_RUN_TIMEOUT=600" grep -qx 'DEBUG_RUN_TIMEOUT="600"' "$R/.agents/harness.conf"
+  s0=$SECONDS
+  out="$("$RX" run reproduce --attempt=reproduce --timeout=1 -- sh -c 'echo started; sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child" 2>&1)" && rc=0 || rc=$?
+  n="$(enum "$out")"
+  t    "past --timeout: exit 124, within a few seconds" bash -c "test $rc = 124 && test $((SECONDS - s0)) -lt 10"
+  t    "...the entry is still recorded: exit 124 and a timed-out line" bash -c "grep -qx 'exit: 124' '$RE/E-$n.md' && grep -qx 'timed out: after 1s' '$RE/E-$n.md'"
+  t    "...with the output so far in the log and the tail" bash -c "grep -qx started '$RE/E-$n.log' && grep -qx started '$RE/E-$n.md'"
+  t    "...run prints the entry line, then the timed-out note" bash -c "printf '%s\n' \"\$1\" | sed -n 1p | grep -qF 'E-$n (reproduce, reproduce attempt, exit 124): ' && printf '%s\n' \"\$1\" | sed -n 2p | grep -qx 'timed out: after 1s'" _ "$out"
+  t    "...and still asks for the outcome" hasl "$out" "record the outcome: .agents/commands/debug outcome E-$n reproduced|partial|not-reproduced"
+  tnot "...a child it started doesn't survive" kill -0 "$(cat "$WORK/debugrun.child")"
+  "$RX" outcome "E-$n" reproduced >/dev/null
+  t    "a hang reproduced this way is a reproduction" bash -c "'$RX' status | grep -qxF 'confidence: reproduced'"
+  s0=$SECONDS
+  out="$("$RX" run reproduce --timeout=1 -- sh -c 'trap "" TERM; echo $$ > "$1"; sleep 30' _ "$WORK/debugrun.stubborn" 2>&1)" && rc=0 || rc=$?
+  t    "a command that ignores SIGTERM is killed after the grace period (124)" bash -c "test $rc = 124 && test $((SECONDS - s0)) -lt 15"
+  tnot "...and doesn't survive"          kill -0 "$(cat "$WORK/debugrun.stubborn")"
+  edit "$R/.agents/harness.conf" 's/^DEBUG_RUN_TIMEOUT=.*/DEBUG_RUN_TIMEOUT="1"/'
+  trc  "DEBUG_RUN_TIMEOUT applies without --timeout (124)" 124 "$RX" run reproduce -- sleep 3
+  trc  "...--timeout wins over it"       0 "$RX" run reproduce --timeout=10 -- sleep 3
+  trc  "...--timeout=0 means no limit"   0 "$RX" run reproduce --timeout=0 -- sleep 3
+  edit "$R/.agents/harness.conf" 's/^DEBUG_RUN_TIMEOUT=.*/DEBUG_RUN_TIMEOUT="0"/'
+  trc  "DEBUG_RUN_TIMEOUT=0 means no limit" 0 "$RX" run reproduce -- sleep 3
+  GP="$R/.agents/builtin/workflows/debug"
+  GC="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print('[%s]' % d.load_conf(sys.argv[2])[sys.argv[3]])"
+  edit "$R/.agents/harness.conf" '/^DEBUG_RUN_TIMEOUT=/d'
+  t    "upgrade: no DEBUG_RUN_TIMEOUT line means 600" test "$(python3 -B -c "$GC" "$GP" "$R" DEBUG_RUN_TIMEOUT 2>&1)" = "[600]"
+  printf 'DEBUG_RUN_TIMEOUT=""\n' >> "$R/.agents/harness.conf"
+  t    "...and so does an empty one"     test "$(python3 -B -c "$GC" "$GP" "$R" DEBUG_RUN_TIMEOUT 2>&1)" = "[600]"
+  nmd=$(find "$RE" -name 'E-*.md' | wc -l | tr -d ' ')
+  for v in abc -1 1.5 '' 1234567890; do
+    out="$("$RX" run reproduce --timeout="$v" -- true 2>&1)" && rc=0 || rc=$?
+    t  "--timeout='$v': exit 3, saying why" bash -c "test $rc = 3 && printf '%s\n' \"\$1\" | grep -qxF \"debug: run: --timeout takes a whole number of seconds (0 means no limit), not '$v'\"" _ "$out"
+  done
+  trc  "--timeout with no value: an unknown option (3)" 3 "$RX" run reproduce --timeout -- true
+  printf 'DEBUG_RUN_TIMEOUT="soon"\n' >> "$R/.agents/harness.conf"
+  out="$("$RX" run reproduce -- true 2>&1)" && rc=0 || rc=$?
+  t    "a DEBUG_RUN_TIMEOUT that isn't a number: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qxF \"infra: DEBUG_RUN_TIMEOUT: 'soon' isn't a whole number of seconds (0 means no limit)\"" _ "$out"
+  t    "...and nothing ran for any of these" test "$(find "$RE" -name 'E-*.md' | wc -l | tr -d ' ')" = "$nmd"
+  out="$("$R/.agents/bin/verify" --no-cache 2>&1)" && rc=0 || rc=$?
+  t    "...and verify says so too (3)"   bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qF \"DEBUG_RUN_TIMEOUT: 'soon' isn't a whole number of seconds\"" _ "$out"
+  edit "$R/.agents/harness.conf" '/^DEBUG_RUN_TIMEOUT=/d'
+  rm -f "$WORK/debugrun.child2"
+  "$RX" run gather-evidence -- sh -c 'echo before; sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child2" > "$WORK/debugrun.term.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.child2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  kill -TERM "$bgrun"; rc=0; wait "$bgrun" || rc=$?
+  n="$(enum "$(cat "$WORK/debugrun.term.out")")"
+  t    "debug run stopped with SIGTERM: stops its command, records the entry (143)" bash -c "test $rc = 143 && test -n '$n' && grep -qx 'exit: 143' '$RE/E-$n.md' && grep -qx before '$RE/E-$n.log'"
+  tnot "...and the command's child doesn't survive" kill -0 "$(cat "$WORK/debugrun.child2")"
+  rm -f "$WORK/debugrun.stubborn2"
+  "$RX" run reproduce --timeout=1 -- sh -c 'trap "" TERM; echo $$ > "$1"; sleep 30' _ "$WORK/debugrun.stubborn2" > "$WORK/debugrun.grace.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.stubborn2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 2   # past the limit, inside the grace period
+  kill -TERM "$bgrun" 2>/dev/null || true; rc=0; wait "$bgrun" || rc=$?
+  n="$(enum "$(cat "$WORK/debugrun.grace.out")")"
+  t    "SIGTERM during the grace period: still 124, and the entry is written" bash -c "test $rc = 124 && test -n '$n' && grep -qx 'exit: 124' '$RE/E-$n.md'"
+  tnot "...and the command is still killed" kill -0 "$(cat "$WORK/debugrun.stubborn2")"
+  rm -f "$WORK/debugrun.child3"
+  "$RX" run gather-evidence -- sh -c 'sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child3" > "$WORK/debugrun.hup.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.child3" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  kill -HUP "$bgrun"; rc=0; wait "$bgrun" || rc=$?
+  t    "SIGHUP too: the command stopped, the entry recorded (129)" bash -c "test $rc = 129 && ! kill -0 \$(cat '$WORK/debugrun.child3') 2>/dev/null && grep -qx 'exit: 129' '$RE/E-$(enum "$(cat "$WORK/debugrun.hup.out")").md'"
+  out="$("$RX" run reproduce --timeout=1 -- sh -c "echo id $FAKE_AWS; sleep 30" 2>&1)" && rc=0 || rc=$?
+  t    "timed out and masked: both notes, in that order" bash -c "test $rc = 124 && test \"\$(printf '%s\n' \"\$1\" | sed -n 2,3p | tr '\n' '|')\" = 'timed out: after 1s|masked: 2 possible secrets|'" _ "$out"
+  DK="$R/.agents/builtin/workflows/debug/kinds/bug.md"; DS="$R/.agents/skills/debug/SKILL.md"
+  t    "the bug steps bisect with no time limit, so git bisect reset always runs" grep -qF "debug run isolate --timeout=0 -- bash -c 'git bisect start" "$DK"
+  t    "...and give a test that can hang a limit of its own" grep -qF '`debug run` stops it before `git bisect reset`' "$DK"
+  t    "the skill names the time limit"  grep -qF -- '--timeout=<sec>' "$DS"
 fi
 }
 group grp_debug_run

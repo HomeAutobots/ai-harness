@@ -11,3 +11,6 @@ DEBUG_KINDS="bug"
 DEBUG_SCOPE="**"
 # Check-ins that need your approval (debug approve): rootcause. Empty means an agent review only.
 DEBUG_ASK="rootcause"
+# Seconds debug run gives a command before it stops it (exit 124, still recorded). 0 means no limit;
+# debug run --timeout=<sec> sets it for one run.
+DEBUG_RUN_TIMEOUT="600"

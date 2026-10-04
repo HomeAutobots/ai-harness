@@ -70,10 +70,13 @@ the rule either way. The `debug` skill has the shared rules (evidence, experimen
   hypothesis's status with it.
 - To bisect, with no tracked changes at all (`git status --untracked-files=no` prints nothing),
   run the whole bisect inside one entry, so HEAD is back on the branch when it ends:
-  `debug run isolate -- bash -c 'git bisect start <bad> <good> && git bisect run <test>; rc=$?; git bisect reset; exit $rc'`.
+  `debug run isolate --timeout=0 -- bash -c 'git bisect start <bad> <good> && git bisect run <test>; rc=$?; git bisect reset; exit $rc'`.
   Keep `<test>` out of the project tree (a script in the session dir works: git ignores it and
   `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
-  out that commit's `.agents/`, or none.
+  out that commit's `.agents/`, or none. A `<test>` that can hang needs its own limit
+  (`timeout 60 <command>`, `gtimeout` on macOS with Homebrew's coreutils): a limit on the whole
+  `debug run` stops it before `git bisect reset`. If HEAD is ever left mid-bisect (`git status`
+  says so), run `git bisect reset` first.
 - Experiments are fine until `root-cause.md` exists; keep track of them so you can revert them.
   Don't put one in a file that already had uncommitted changes. If you must, undo your own lines
   by hand; never `git checkout` that file.

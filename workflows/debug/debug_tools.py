@@ -16,6 +16,8 @@ is a tooling problem (exit 3):
   DEBUG_KINDS   the workflows that are on (default bug)
   DEBUG_SCOPE   globs where experiments must be gone before the check-in (default **)
   DEBUG_ASK     check-ins that need the human: rootcause (default); empty means agent review only
+  DEBUG_RUN_TIMEOUT  seconds debug run gives its command before it stops it (default 600; 0 means
+                no limit; empty means the default)
 
   debug_tools.py cli <root> <command> [args...]             the debug command (bin/debug)
   debug_tools.py check <edit|turn|full> <root> [files...]   the verify checks; with AGENTS_SINCE
@@ -25,8 +27,11 @@ Exit: 0 clean, 1 findings, 2 usage or a policy block (an approvals line debug di
 simulated one while the switch is off; a simulated-human switch that doesn't count; a command
 .agents/policy.conf blocks), 3 tooling problem or an unknown option. debug run exits with
 its command's exit code, so its 2 or 3 can come from the command too: a run that happened prints its
-"E-<n> (...)" line first. Its command gets no stdin (/dev/null) and has no time limit, and E-<n>.log
-keeps all of its output with no size cap; only the entry (E-<n>.md) is cut to the last lines. What
+"E-<n> (...)" line first. Its command gets no stdin (/dev/null) and runs in its own process group,
+which debug run stops (SIGTERM, then SIGKILL) past --timeout or DEBUG_RUN_TIMEOUT, recording the
+entry with exit 124 and exiting 124, or when debug run itself gets SIGINT, SIGTERM, or SIGHUP
+(128 plus the signal). E-<n>.log keeps all of the output with no size cap; only the entry (E-<n>.md)
+is cut to the last lines. What
 guard's secret rules match in the output and the command line is masked in both files ([masked],
 through the harness's .agents/lib/guard_shapes.py).
 """
@@ -37,18 +42,22 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 
 PACK = os.path.dirname(os.path.abspath(__file__))
-DEFAULTS = {"DEBUG_DIR": ".agents/debug", "DEBUG_KINDS": "bug", "DEBUG_SCOPE": "**", "DEBUG_ASK": "rootcause"}
+DEFAULTS = {"DEBUG_DIR": ".agents/debug", "DEBUG_KINDS": "bug", "DEBUG_SCOPE": "**", "DEBUG_ASK": "rootcause",
+            "DEBUG_RUN_TIMEOUT": "600"}
 DEFAULT_TICKET = r"[A-Z][A-Z0-9]+-[0-9]+"
 HEADINGS = ("Summary", "Cause", "Evidence", "Reproduction", "Ruled out", "Fix direction")
 ATTEMPTS = ("reproduce", "confirm")
 OUTCOMES = ("reproduced", "partial", "not-reproduced")
 BINDINGS = ("skill", "run", "context")
 CLOSE_REASONS = ("abandoned", "duplicate", "reviewed")
+GRACE = 3   # seconds a stopped command's process group gets between SIGTERM and SIGKILL
 TAIL = 60   # lines of a command's output kept in its evidence entry (E-<n>.md). Checks must never
             # read E-<n>.log: checks/state.sh leaves *.log out of verify's cache key.
 STATE_KEYS = ("kind", "ref", "start", "branch", "seq", "step", "status", "note", "confirm_after")
@@ -127,10 +136,16 @@ def load_conf(root):
     """DEBUG_* from .agents/harness.conf over the defaults (an install from before a key has no
     line for it). Never the environment: checks/state.sh (verify's cache key) and the stop gate's
     settings note read only the file, and DEBUG_* is a common name. An empty DEBUG_DIR means the
-    default, as in checks/state.sh. A check-in or workflow this pack doesn't know raises ConfError."""
+    default, as in checks/state.sh, and so does an empty DEBUG_RUN_TIMEOUT. A check-in or workflow this
+    pack doesn't know, or a time limit that isn't a whole number of seconds (at most 9 digits), raises
+    ConfError."""
     conf = dict(DEFAULTS)
     conf.update(read_conf(os.path.join(root, ".agents", "harness.conf"), "DEBUG_"))
-    conf["DEBUG_DIR"] = conf["DEBUG_DIR"] or DEFAULTS["DEBUG_DIR"]
+    for k in ("DEBUG_DIR", "DEBUG_RUN_TIMEOUT"):
+        conf[k] = conf[k] or DEFAULTS[k]
+    if not re.fullmatch(r"[0-9]{1,9}", conf["DEBUG_RUN_TIMEOUT"]):
+        raise ConfError("DEBUG_RUN_TIMEOUT: '%s' isn't a whole number of seconds (0 means no limit)"
+                        % conf["DEBUG_RUN_TIMEOUT"][:40])
     for w in conf["DEBUG_ASK"].split():
         if w != "rootcause":
             raise ConfError("DEBUG_ASK: unknown check-in '%s' (rootcause)" % w)
@@ -1530,6 +1545,100 @@ def mask_log(log):
     return n
 
 
+class Stopped(Exception):
+    """debug run got SIGTERM or SIGHUP while its command ran."""
+
+
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+def hold_signals():
+    """Ignore SIGINT, SIGTERM, and SIGHUP until restore_signals(): once the command ended or is being
+    stopped, another signal mustn't cut short stopping it, masking its log, or writing its entry."""
+    for s in (signal.SIGINT,) + STOP_SIGNALS:
+        signal.signal(s, signal.SIG_IGN)
+
+
+def stopped(signum, frame):
+    hold_signals()
+    raise Stopped(signum)
+
+
+def catch_signals():
+    """Make SIGTERM and SIGHUP raise Stopped (SIGINT raises KeyboardInterrupt already), unless one is
+    ignored already (nohup). The handlers they had, for restore_signals()."""
+    old = {s: signal.getsignal(s) for s in (signal.SIGINT,) + STOP_SIGNALS}
+    for s in STOP_SIGNALS:
+        if old[s] != signal.SIG_IGN:
+            signal.signal(s, stopped)
+    return old
+
+
+def restore_signals(old):
+    for s, h in old.items():
+        signal.signal(s, signal.SIG_DFL if h is None else h)
+
+
+def stop_group(proc, first=signal.SIGTERM):
+    """Stop a command debug run started in its own process group: first (SIGTERM, or SIGINT for a
+    Ctrl-C, so a test runner can print what it has) to the group, then SIGKILL to whatever is left
+    after GRACE seconds. Returns once the group is gone or killed, with the command itself reaped."""
+    try:
+        os.killpg(proc.pid, first)
+    except OSError:
+        pass
+    end = time.monotonic() + GRACE
+    while time.monotonic() < end:
+        proc.poll()   # reap the command, so only live members keep the group
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            break
+        except OSError:
+            pass
+        time.sleep(0.05)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    proc.wait()
+
+
+def run_captured(argv, root, fh, limit):
+    """Run argv from root, stdout and stderr to fh, stdin /dev/null, in a session and process group of
+    its own (start_new_session), so a time limit or a signal stops everything it started. Call it
+    between catch_signals() and restore_signals(): it returns with the signals held (hold_signals()).
+    (exit code, timed out): the command's code (128 plus the signal that killed it), 124 past limit
+    seconds (0 means no limit), 128 plus the signal when debug run got SIGINT, SIGTERM, or SIGHUP; 127
+    or 126 when it couldn't start, as a shell says it, with the reason written to fh."""
+    try:
+        proc = subprocess.Popen(argv, cwd=root, stdout=fh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+    except OSError as e:
+        hold_signals()
+        fh.write(("debug: couldn't run %s: %s\n" % (argv[0], e.strerror or e)).encode("utf-8", "replace"))
+        return (127 if isinstance(e, FileNotFoundError) else 126), False
+    except (KeyboardInterrupt, Stopped) as e:   # before it started
+        hold_signals()
+        return (130 if isinstance(e, KeyboardInterrupt) else 128 + e.args[0]), False
+    try:
+        rc = proc.wait(timeout=limit or None)
+        hold_signals()
+        return (rc if rc >= 0 else 128 - rc), False
+    except subprocess.TimeoutExpired:
+        hold_signals()
+        stop_group(proc)
+        return 124, True
+    except KeyboardInterrupt:
+        hold_signals()
+        stop_group(proc, signal.SIGINT)
+        return 130, False
+    except Stopped as e:
+        stop_group(proc)
+        return 128 + e.args[0], False
+
+
 def new_entry(sdir):
     """(n, fd of evidence/E-<n>.log, created with O_EXCL): the next number after every E-<n>.md and
     E-<n>.log there, reserved before the command runs, so two runs at once never share one. A log
@@ -1545,12 +1654,19 @@ def new_entry(sdir):
             n += 1
 
 
-@command("run", "debug run <step> [--attempt=reproduce|confirm] -- <command...>", ("--attempt=",))
+@command("run", "debug run <step> [--attempt=reproduce|confirm] [--timeout=<sec>] -- <command...>",
+         ("--attempt=", "--timeout="))
 def cmd_run(root, words, opts, after):
-    attempt = opts.get("--attempt=")
+    attempt, limit = opts.get("--attempt="), opts.get("--timeout=")
     if len(words) != 1 or not after or (attempt is not None and attempt not in ATTEMPTS):
         return bad("run")
+    if limit is not None and not re.fullmatch(r"[0-9]{1,9}", limit):
+        print("debug: run: --timeout takes a whole number of seconds (0 means no limit), not '%s'" % limit[:40],
+              file=sys.stderr)
+        print(usage_text("run"), file=sys.stderr)
+        return 3
     conf = load_conf(root)
+    limit = int(limit if limit is not None else conf["DEBUG_RUN_TIMEOUT"])
     use_shapes(root)   # before anything runs: without the rules, nothing is captured
     switch = ap.Switch(root)
     cur = current_session(root, conf, switch)
@@ -1574,34 +1690,31 @@ def cmd_run(root, words, opts, after):
         head += ", with uncommitted changes"
     n, fd = new_entry(sdir)
     md, log = (os.path.join(sdir, "evidence", "E-%d%s" % (n, ext)) for ext in (".md", ".log"))
-    with os.fdopen(fd, "wb") as fh:
-        try:
-            rc = subprocess.run(after, cwd=root, stdout=fh, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL).returncode
-        except OSError as e:   # as a shell says it: 127 not found, 126 found but it can't run
-            fh.write(("debug: couldn't run %s: %s\n" % (after[0], e.strerror or e)).encode("utf-8", "replace"))
-            rc = 127 if isinstance(e, FileNotFoundError) else 126
-        except KeyboardInterrupt:
-            rc = 130
-    rc = rc if rc >= 0 else 128 - rc   # killed by a signal
-    masked = mask_log(log)   # before the tail is read and anything is printed
-    tail = tail_lines(log)
-    shown_cmd, k = gs.mask(one_line(cmdline).encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
-    masked += k
-    notes = ["masked: %d possible secret%s" % (masked, "" if masked == 1 else "s")] if masked else []
-    header = ["# E-%d" % n, "step: " + step] + (["attempt: " + attempt] if attempt else []) + \
-             ["command: " + shown_cmd, "exit: %d" % rc, "head: " + head] + notes
-    write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
-                             ["", "Full output: E-%d.log" % n]) + "\n")
-    st = read_state(sdir)   # fresh: the session may have been closed while the command ran
-    if not not_open(root, conf, slug, sdir, st, switch):   # a recorded close or approval freezes the step
-        st["step"] = step
-        write_state(sdir, st)
-    print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
-    for l in notes + tail:
-        print(l)
-    if attempt:
-        print("record the outcome: %s outcome E-%d reproduced|partial|not-reproduced" % (debug_cmd(root), n))
+    old = catch_signals()   # until the entry is written: a signal stops the command, and the entry still counts
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            rc, timed_out = run_captured(after, root, fh, limit)   # returns with the signals held
+        masked = mask_log(log)   # before the tail is read and anything is printed
+        tail = tail_lines(log)
+        shown_cmd, k = gs.mask(one_line(cmdline).encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
+        masked += k
+        notes = (["timed out: after %ds" % limit] if timed_out else []) + \
+            (["masked: %d possible secret%s" % (masked, "" if masked == 1 else "s")] if masked else [])
+        header = ["# E-%d" % n, "step: " + step] + (["attempt: " + attempt] if attempt else []) + \
+                 ["command: " + shown_cmd, "exit: %d" % rc, "head: " + head] + notes
+        write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
+                                 ["", "Full output: E-%d.log" % n]) + "\n")
+        st = read_state(sdir)   # fresh: the session may have been closed while the command ran
+        if not not_open(root, conf, slug, sdir, st, switch):   # a recorded close or approval freezes the step
+            st["step"] = step
+            write_state(sdir, st)
+        print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
+        for l in notes + tail:
+            print(l)
+        if attempt:
+            print("record the outcome: %s outcome E-%d reproduced|partial|not-reproduced" % (debug_cmd(root), n))
+    finally:
+        restore_signals(old)
     return rc
 
 
