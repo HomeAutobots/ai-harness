@@ -175,6 +175,7 @@ t    "core block rendered"             grep -q '^## Harness rules' "$P/AGENTS.md
 t    "core block has no version string" bash -c "! grep -q 'ai-harness [0-9]' '$P/AGENTS.md'"
 t    "skills index lists all built-ins" bash -c "grep -q '\`plan-task\`' '$P/AGENTS.md' && grep -q '\`review-diff\`' '$P/AGENTS.md' && grep -q '\`harness-tailor\`' '$P/AGENTS.md' && grep -q '\`validate\`' '$P/AGENTS.md'"
 t    "CLAUDE.md imports AGENTS.md"     grep -q '^@AGENTS.md$' "$P/CLAUDE.md"
+t    "the managed blocks carry no TODO(harness-tailor) marker (sync counts every one)" bash -c "! sed -n '/harness:[a-z]*:start/,/harness:[a-z]*:end/p' '$P/AGENTS.md' | grep -qF 'TODO(harness-tailor)'"
 t    "claude skill is a symlink"       test -L "$P/.claude/skills/review-diff"
 t    "version recorded"                grep -qx "$(cat "$HARNESS/VERSION")" "$P/.agents/HARNESS_VERSION"
 t    "sync --check clean"              "$P/.agents/bin/sync" --check

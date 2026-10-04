@@ -1,6 +1,6 @@
 ---
 name: harness-tailor
-description: Proposes the per-repo tailoring of the ai-harness for human review. Fills AGENTS.md with facts an agent can't infer (commands, boundaries, non-obvious conventions), writes the tiered check scripts in .agents/checks/ and proves they run, folds legacy instruction files (CLAUDE.md, .cursorrules, copilot-instructions, GEMINI.md) into AGENTS.md, and baselines existing lint findings. Use right after installing or upgrading the harness, when AGENTS.md or .agents/checks still contain TODO(harness-tailor), or when asked to set up, refresh, or re-tailor the AI harness. It proposes; a human approves.
+description: Proposes the per-repo tailoring of the ai-harness for human review. Fills AGENTS.md with facts an agent can't infer (commands, boundaries, non-obvious conventions), writes the tiered check scripts in .agents/checks/ and proves they run, folds legacy instruction files (CLAUDE.md, .cursorrules, copilot-instructions, GEMINI.md) into AGENTS.md, and baselines existing lint findings. Use right after installing or upgrading the harness, when AGENTS.md or .agents/checks still have the harness-tailor TODO markers install left, or when asked to set up, refresh, or re-tailor the AI harness. It proposes; a human approves.
 ---
 
 # Tailor the harness to this repo
