@@ -44,9 +44,11 @@ One `## <step>` section per step that takes bindings (`intake`, `reproduce`, `ga
 - `context:` is a doc to read first, repo-relative and inside the repo.
 
 Plain lines are notes (say, why a command can't run here), and so is anything in a ``` or ~~~
-fence. An empty section means the generic guidance in the session's kind file; `debug status` lists the
-steps with no bindings. Like `.agents/context/`, the playbook is committed in team mode and stays
-local in local mode.
+fence. Every workflow reads the same sections, so a plain line like `For field issues:` above
+some bindings says which workflow they're for, and an agent uses the bindings that fit its session's
+workflow. A section with none that fit means the generic guidance in the session's kind file;
+`debug status` lists the steps with no bindings. Like `.agents/context/`, the playbook is committed
+in team mode and stays local in local mode.
 
 ## The workflows
 | Kind | For | Steps | What's different |
@@ -94,8 +96,10 @@ question and sets T1 done.
   `--timeout` (else `DEBUG_RUN_TIMEOUT`, 600 seconds; `0` means no limit) the whole group gets
   SIGTERM, then SIGKILL 3 seconds later; the entry is still recorded, with `exit: 124` and
   `timed out: after <n>s`, and `debug run` exits 124. Ctrl-C, SIGTERM, or SIGHUP to `debug run`
-  stops the group the same way and records the entry (exit 128 plus the signal). A `--timeout`
-  that isn't a whole number of seconds exits 3 before anything runs.
+  stops the group the same way and records the entry (exit 128 plus the signal). A command still
+  there 3 seconds after SIGKILL (stuck in the kernel) is left, and the entry says
+  `still running: the command didn't stop`. A `--timeout` that isn't a whole number of seconds
+  prints why and the usage and exits 2 before anything runs.
 - `debug outcome E-<n> reproduced|partial|not-reproduced`: records an attempt's outcome (again to
   change it).
 - `debug status [slug]`: kind, step, steps file, evidence, attempts and outcomes, computed
@@ -125,7 +129,7 @@ sessions are quiet.
 
 ## Confidence
 Computed from the recorded attempts, and `root-cause.md` must state the same:
-- `confirmed`: a confirmation attempt (`--attempt=confirm`) reproduced the bug through the stated cause.
+- `confirmed`: a confirmation attempt (`--attempt=confirm`) reproduced the problem through the stated cause.
 - `reproduced`: an attempt of either kind reproduced it.
 - `evidence-only`: neither; the cause rests on evidence and analysis. A partial reproduction counts here.
 
@@ -226,15 +230,21 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
   happened prints its `E-<n> (...)` line first.
 - **Secrets in captured output are masked.** Before `debug run` writes the entry, it replaces
   what guard's secret rules match (`.agents/core/guard.patterns` and your `.agents/guard.patterns`,
-  the `secret` lines) with `[masked]`, in the log, the tail, and the command line, the way guard
-  redacts a line it prints: `export API_TOKEN=[masked]`. The entry then says
+  the `secret` lines) with `[masked]`, in the log, the tail, and the command line (each argument
+  on its own: `env 'DB_PASSWORD=[masked]' make test`), the way guard redacts a line it prints:
+  `export API_TOKEN=[masked]`. A private key is masked from its `BEGIN` line through its `END`
+  line, or from `BEGIN` to `END` when it's on one line (JSON's `\n`), as one secret. The entry then
+  says
   `masked: <n> possible secrets`, and so does `debug run`. Placeholders guard skips (`${TOKEN}`,
   `your-key`) stay. With nothing matched, the log is byte for byte what the command wrote.
   Customer data (ids, emails) isn't a secret shape: scrub it in the playbook's `gather-evidence`
   binding (`run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub`, run as
-  `bash -c 'set -o pipefail; <line>'` so errors are scrubbed and a failed pull isn't exit 0). A harness without
-  `.agents/lib/guard_shapes.py` (re-run `install.sh`) makes `debug run` refuse (exit 3) rather than
-  capture unmasked output.
+  `bash -c 'set -o pipefail; <line>'` so errors are scrubbed and a failed pull isn't exit 0). A
+  harness without `.agents/lib/guard_shapes.py` or without secret rules in
+  `.agents/core/guard.patterns` (re-run `install.sh`) makes `debug run` refuse (exit 3) rather than
+  capture unmasked output. A raw `E-<n>.log` with no `E-<n>.md` (a `debug run` killed with SIGKILL
+  before it masked it) and a stale `E-<n>.log.masking` are deleted by the next `debug run` in that
+  session, unless another `debug run` there is still going (`evidence/.lock`).
 - **A time limit on every run.** A long bisect needs `--timeout=0` (the steps files say so): a
   limit that stops it mid-way also stops it before `git bisect reset`, and HEAD stays mid-bisect
   until you run `git bisect reset`. Keep a limit under the agent tool's own command timeout
@@ -256,10 +266,16 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
 - **Moving the clone** keeps its sessions: the record names worktrees and session dirs relative to
   the repo.
 - **Known gaps.**
-  - Masking works line by line, so a secret split across a line break isn't caught, and neither
-    is a private key's body (only its `BEGIN` line). It knows only the shapes guard knows, and the
-    output sits unmasked in `E-<n>.log` while the command runs, until `debug run` rewrites it; a
-    `debug run` killed before then (SIGKILL) leaves it that way.
+  - Masking works line by line, so a secret split across a line break isn't caught (a private
+    key is the exception: everything from its `BEGIN` line to its `END` line is masked, and a key
+    with no `END` masks the rest of the log). It knows only the shapes guard knows, so a `set -x`
+    trace, a debug dump of an HTTP request (`Authorization: Bearer ...`), or a URL with a password
+    in it gets through unless the value has a shape guard knows. The output sits unmasked in
+    `E-<n>.log` while the command runs, until `debug run` rewrites it; a `debug run` killed before
+    then (SIGKILL) leaves it that way until the next `debug run` in that session deletes it.
+  - Masking a huge log takes time after the command ends (about 1 second per 12 MB, slower with
+    text that isn't ASCII). An agent tool whose own timeout kills `debug run` while it masks
+    leaves the raw log (as SIGKILL does, above). `E-<n>.log` has no size cap yet (roadmap row 66).
   - A `debug run` killed with SIGKILL can't stop its command, which keeps running in its own
     process group; SIGINT, SIGTERM, and SIGHUP are passed on. An agent tool that kills its whole
     process group on its own timeout reaches `debug run` but not the command. A process that leaves
