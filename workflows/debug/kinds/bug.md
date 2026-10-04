@@ -6,7 +6,10 @@ bindable: intake reproduce gather-evidence isolate
 
 # Bug report
 
-Someone saw the software do the wrong thing. Seven steps; 3 to 5 loop until a hypothesis holds.
+Someone saw the software do the wrong thing. Go through the steps in order the first time; 3 to 5
+loop until a hypothesis holds. For each step with a playbook section, read that section of the
+playbook first and use its bindings; what's below is the fallback when the section is empty, and
+the rule either way. The `debug` skill has the shared rules (evidence, experiments, the check-in).
 
 | # | Step | Playbook section | Produces |
 |---|---|---|---|
@@ -17,3 +20,64 @@ Someone saw the software do the wrong thing. Seven steps; 3 to 5 loop until a hy
 | 5 | isolate | `isolate` | each hypothesis confirmed or ruled out, citing E-ids |
 | 6 | root-cause | (judgment) | `root-cause.md` |
 | 7 | check-in | (none) | the human approves or rejects |
+
+## 1. intake
+- With a binding (a ticket CLI such as `gh issue view <n>`, `glab issue view <n>`, a Jira CLI, or
+  an MCP server), fetch the ticket, comments included, and put it under "As received" unchanged.
+  Run a command binding through `debug run intake -- ...` so the fetch is evidence too.
+- Without one, the text `debug start` saved under "As received" is the record. If there's none,
+  ask the human to paste it.
+- Fill in Expected and Actual, plus the version, environment, and steps the reporter gave.
+  Anything unclear goes under "Unclear" and to the human
+  (`.agents/bin/tasks ask <slug> T1 '<question>'`).
+
+## 2. reproduce
+- Follow the reporter's steps as literally as the repo allows: the same input through a test, the
+  CLI with the same arguments, the app or simulator the playbook names, at the version reported if
+  it differs from `HEAD` (say so if you can't get it).
+- Record it: `debug run reproduce --attempt=reproduce -- <command>`, then
+  `debug outcome E-<n> reproduced|partial|not-reproduced`. Partial means some of the symptoms.
+- At least one attempt with its outcome recorded is required; a reproduction isn't. If it won't
+  reproduce, note what differs from the report (environment, data, timing) and move on to evidence.
+
+## 3. gather-evidence
+- Collect what the symptoms point at: logs, the failing output, the code path from the entry point
+  the report names, recent history of that code (`git log -L`, `git log -S`, `git blame`), config.
+- Every item worth citing is a `debug run gather-evidence -- <command>` entry. Reading code is
+  fine without one; cite it as `path:line` instead.
+- Tie each entry to a symptom in report.md. Stop when you have enough to form hypotheses, not when
+  you've read everything.
+
+## 4. hypothesize
+- Write `hypotheses.md`: every cause that fits the evidence, not just the first. For each, what
+  observation would confirm it and what would rule it out, before you test it.
+- Order them by how cheap they are to test and how well they fit.
+
+## 5. isolate
+- Test one hypothesis at a time against its confirm and rule-out conditions: a focused test, a
+  bisect, temporary logging or an assert, a smaller input. Each result is an E-id; set the
+  hypothesis's status with it.
+- To bisect: `git bisect start <bad> <good>`, then `debug run isolate -- git bisect run <test>`,
+  then `git bisect reset` right away. The session follows the branch, so while HEAD is detached
+  `debug` finds no session.
+- Experiments are fine until `root-cause.md` exists; keep track of them so you can revert them.
+- A ruled-out hypothesis sends you back to step 3 or 4. When one holds, trigger the bug through
+  that cause on purpose: `debug run isolate --attempt=confirm -- <command>` and its outcome. It
+  raises confidence; it never blocks.
+
+## 6. root-cause
+- Revert your experiments first. `debug status` lists every uncommitted change in scope, yours or
+  not: one that was there before the session is the human's, so ask them to commit or stash it,
+  never revert it.
+- Write `root-cause.md` with the fixed headings (the `debug` skill lists them), citing only E-ids
+  and H-ids that exist, and the Confidence line `debug status` computes.
+- Validate it with the `validate` skill before the check-in.
+
+## 7. check-in
+- With `rootcause` in `DEBUG_ASK`: ask the human with
+  `.agents/bin/tasks ask <slug> T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve <slug>'`
+  and wait. A rejection reopens the session at
+  hypothesize, with the reason at the end of hypotheses.md; go back to step 3 or 4.
+- With `DEBUG_ASK` empty: `debug close <slug> reviewed` once the validate review passes.
+- An approved session is closed. Don't edit root-cause.md after that: any change reopens the
+  session for a new approval. The fix starts from the fix direction, in the repo's own process.

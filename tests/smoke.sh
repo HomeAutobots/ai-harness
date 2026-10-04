@@ -2617,6 +2617,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$HARNESS/install.sh" --team "$Z" >/dev/null 2>&1
   t    "absence: no gated pack, no record and no switch" bash -c "! ls '$Z'/.git/ai-harness/*-approvals >/dev/null 2>&1 && test ! -e '$Z/.git/ai-harness/simulated-human'"
   tnot "absence: the install summary says nothing about it" bash -c "'$HARNESS/install.sh' --team '$Z' 2>&1 | grep -q 'simulated human'"
+  tnot "absence: no debug skill without --workflow debug" test -e "$Z/.agents/skills/debug"
 fi
 }
 group grp_approvals
@@ -3007,7 +3008,7 @@ except d.ConfError as e:
   commit "$SM" harness
   SMX="$SM/.agents/commands/debug"; SMS="$SM/.agents/debug/sessions/bug-1"
   "$SMX" start bug '#1' >/dev/null
-  t    "verify notes the simulated human while a session is open" bash -c "'$SM/.agents/bin/verify' | sed -n 2p | grep -q '^note: simulated human is on in this clone (install.sh --simulated-human, run from a Claude Code shell): a shell with its token can approve debug check-ins'"
+  t    "verify notes the simulated human while a session is open" bash -c "out=\$('$SM/.agents/bin/verify'); test \"\$(printf '%s\n' \"\$out\" | sed -n 1p)\" = 'ok verify turn' && printf '%s\n' \"\$out\" | sed -n 2p | grep -q '^note: simulated human is on in this clone (install.sh --simulated-human, run from a Claude Code shell): a shell with its token can approve debug check-ins'"
   "$SMX" run reproduce --attempt=reproduce -- true >/dev/null; "$SMX" outcome E-1 not-reproduced >/dev/null
   printf '## H-1: a is never set\n- status: confirmed (E-1)\n' >> "$SMS/hypotheses.md"
   rcdoc "$SMS/root-cause.md" evidence-only
@@ -3107,6 +3108,14 @@ except d.ConfError as e:
   t    "...and verify stays quiet"     test "$("$C/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
   cp "$WORK/debugcli.conf" "$C/.agents/harness.conf"
   "$CX" close bug-15 abandoned >/dev/null; "$CX" close bug-16 abandoned >/dev/null
+  echo "debug: skill, steps, and playbook"
+  t    "the debug skill is installed"   test -f "$C/.agents/skills/debug/SKILL.md"
+  t    "...and listed in AGENTS.md"     grep -q '^- `debug`: ' "$C/AGENTS.md"
+  t    "the skill names the check-in command" grep -qF '.agents/commands/debug approve <slug>' "$C/.agents/skills/debug/SKILL.md"
+  t    "...and asks for it with --force, so a re-ask after a reject is recorded" grep -qF "tasks ask <slug> T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve <slug>'" "$C/.agents/skills/debug/SKILL.md"
+  t    "the bug steps have a section per step" bash -c "for s in intake reproduce gather-evidence hypothesize isolate root-cause check-in; do grep -q \"^## [0-9]\\. \$s\$\" '$C/.agents/builtin/workflows/debug/kinds/bug.md' || exit 1; done"
+  t    "the seeded playbook has a section per bindable step" bash -c "for s in intake reproduce gather-evidence isolate; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
+  t    "harness-tailor drafts the playbook" grep -qF '.agents/debug/playbook.md' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
 fi
 }
 group grp_debug_cli
