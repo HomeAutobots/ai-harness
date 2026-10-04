@@ -3732,9 +3732,11 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$RX" run gather-evidence -- echo "id $FAKE_AWS" 2>&1)"
   t    "a secret in the command line is masked in the entry too" bash -c "grep -qxF \"command: echo 'id [masked]'\" '$RE/E-2.md' && grep -qx 'id \[masked\]' '$RE/E-2.log' && grep -qx 'masked: 2 possible secrets' '$RE/E-2.md'"
   tnot "...and nowhere in either file"  grep -qF "$FAKE_AWS" "$RE/E-2.log" "$RE/E-2.md"
-  printf '%s\nMIIEowIBAAKCAQEA\n' "$FAKE_PEM" > "$WORK/debugrun-pem.txt"
+  printf '%s\nMIIEowIBAAKCAQEA\nqL0w9Zx+/AbC==\n\n-----END RSA PRI''VATE KEY-----\nafter the key\n' "$FAKE_PEM" > "$WORK/debugrun-pem.txt"
+  printf '[masked]\n[masked]\n[masked]\n\n[masked]\nafter the key\n' > "$WORK/debugrun-pem.want"
   "$RX" run gather-evidence -- cat "$WORK/debugrun-pem.txt" >/dev/null
-  t    "one masked: 'possible secret'"  bash -c "grep -qx 'masked: 1 possible secret' '$RE/E-3.md' && test \"\$(sed -n 1p '$RE/E-3.log')\" = '[masked]'"
+  t    "a private key: BEGIN to END masked as one secret ('possible secret')" bash -c "grep -qx 'masked: 1 possible secret' '$RE/E-3.md' && cmp -s '$WORK/debugrun-pem.want' '$RE/E-3.log'"
+  tnot "...its body gone from both files" grep -qF -e MIIEowIBAAKCAQEA -e qL0w9Zx "$RE/E-3.log" "$RE/E-3.md"
   printf 'id %s\r\nnext\n' "$FAKE_AWS" > "$WORK/debugrun-crlf.txt"; printf 'id [masked]\r\nnext\n' > "$WORK/debugrun-crlf.want"
   "$RX" run gather-evidence -- cat "$WORK/debugrun-crlf.txt" >/dev/null
   t    "a key at the end of a CRLF line: the line ending stays" cmp -s "$WORK/debugrun-crlf.want" "$RE/E-4.log"
@@ -3760,6 +3762,21 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$RX" run gather-evidence -- sh -c 'echo key; rm -f .agents/debug/sessions/bug-1/evidence/E-*.log' 2>&1)" && rc=0 || rc=$?
   t    "a log that can't be masked: deleted, nothing recorded, infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q \"^infra: couldn't mask secrets in E-8.log, so it's deleted and nothing was recorded\" && test ! -e '$RE/E-8.log' && test ! -e '$RE/E-8.md'" _ "$out"
   rn(){ "$RX" run gather-evidence -- "$@" 2>&1 | sed -n '1s/^E-\([0-9]*\) .*/\1/p'; }   # rn <cmd...>: its entry's number
+  printf '{"key": "%s\\nMIIEowIBAAKCAQEA\\n-----END RSA PRI''VATE KEY-----\\n", "n": 1}\n' "$FAKE_PEM" > "$WORK/debugrun-pemjson.txt"
+  n="$(rn cat "$WORK/debugrun-pemjson.txt")"
+  t    "a private key on one line (JSON): BEGIN to END masked" bash -c "grep -qxF '{\"key\": \"[masked]\\n\", \"n\": 1}' '$RE/E-$n.log' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  n="$(rn env DB_PASSWORD=s3cr3tValue99xyz true)"
+  t    "a VAR=value secret in the command line is masked" bash -c "grep -qxF \"command: env 'DB_PASSWORD=[masked]' true\" '$RE/E-$n.md' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  n="$(rn sh -c 'true
+export API_TOKEN=9f8e7d6c5b4a39281706')"
+  t    "...and so is one on its own line inside an argument" bash -c "test -n '$n' && grep -q '^command: .*API_TOKEN=\[masked\]' '$RE/E-$n.md' && ! grep -qF 9f8e7d6c5b4a39281706 '$RE/E-$n.md'"
+  printf 'id %s\n' "$FAKE_AWS" > "$RE/E-90.log"; printf 'id %s\n' "$FAKE_AWS" > "$RE/E-91.log.masking"
+  n="$(rn true)"
+  t    "a raw log a killed run left (no .md), and a stale .masking file, are deleted by the next run" bash -c "test -n '$n' && test ! -e '$RE/E-90.log' && test ! -e '$RE/E-91.log.masking'"
+  "$RX" run gather-evidence -- sh -c 'echo held; sleep 3' > "$WORK/debugrun.held.out" 2>&1 & bgrun=$!
+  i=0; while [ "$(find "$RE" -name 'E-*.log' -newer "$WORK/debugrun.held.out" | wc -l)" -eq 0 ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  n="$(rn true)"; rc=0; wait "$bgrun" || rc=$?
+  t    "...but not the log of a run still going" bash -c "test $rc = 0 && test -n '$n' && n2=\$(sed -n '1s/^E-\([0-9]*\) .*/\1/p' '$WORK/debugrun.held.out') && test -n \"\$n2\" && grep -qx held '$RE/E-'\$n2.log && grep -qx held '$RE/E-'\$n2.md"
   printf 'DB_Password = "s3cr3tValue99xyz"\n' > "$WORK/debugrun-case.txt"
   n="$(rn cat "$WORK/debugrun-case.txt")"
   t    "a rule that ignores case masks any case" grep -qx 'DB_Password = "\[masked\]"' "$RE/E-$n.log"
@@ -3774,6 +3791,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   sleep 2
   t    "what a process left running writes later isn't in the log" bash -c "grep -qx now '$RE/E-$n.log' && ! grep -q late '$RE/E-$n.log'"
   echo "debug run: time limit"
+  gone(){ test -s "$1" && ! kill -0 "$(cat "$1")" 2>/dev/null; }   # gone <pid file>: it names a process, and that's gone
   enum(){ printf '%s\n' "$1" | sed -n '1s/^E-\([0-9]*\) .*/\1/p'; }   # enum <run output>: its entry's number
   t    "a new install sets DEBUG_RUN_TIMEOUT=600" grep -qx 'DEBUG_RUN_TIMEOUT="600"' "$R/.agents/harness.conf"
   s0=$SECONDS
@@ -3784,13 +3802,13 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...with the output so far in the log and the tail" bash -c "grep -qx started '$RE/E-$n.log' && grep -qx started '$RE/E-$n.md'"
   t    "...run prints the entry line, then the timed-out note" bash -c "printf '%s\n' \"\$1\" | sed -n 1p | grep -qF 'E-$n (reproduce, reproduce attempt, exit 124): ' && printf '%s\n' \"\$1\" | sed -n 2p | grep -qx 'timed out: after 1s'" _ "$out"
   t    "...and still asks for the outcome" hasl "$out" "record the outcome: .agents/commands/debug outcome E-$n reproduced|partial|not-reproduced"
-  tnot "...a child it started doesn't survive" kill -0 "$(cat "$WORK/debugrun.child")"
+  t    "...a child it started doesn't survive" gone "$WORK/debugrun.child"
   "$RX" outcome "E-$n" reproduced >/dev/null
   t    "a hang reproduced this way is a reproduction" bash -c "'$RX' status | grep -qxF 'confidence: reproduced'"
   s0=$SECONDS
   out="$("$RX" run reproduce --timeout=1 -- sh -c 'trap "" TERM; echo $$ > "$1"; sleep 30' _ "$WORK/debugrun.stubborn" 2>&1)" && rc=0 || rc=$?
   t    "a command that ignores SIGTERM is killed after the grace period (124)" bash -c "test $rc = 124 && test $((SECONDS - s0)) -lt 15"
-  tnot "...and doesn't survive"          kill -0 "$(cat "$WORK/debugrun.stubborn")"
+  t    "...and doesn't survive"          gone "$WORK/debugrun.stubborn"
   edit "$R/.agents/harness.conf" 's/^DEBUG_RUN_TIMEOUT=.*/DEBUG_RUN_TIMEOUT="1"/'
   trc  "DEBUG_RUN_TIMEOUT applies without --timeout (124)" 124 "$RX" run reproduce -- sleep 3
   trc  "...--timeout wins over it"       0 "$RX" run reproduce --timeout=10 -- sleep 3
@@ -3806,7 +3824,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   nmd=$(find "$RE" -name 'E-*.md' | wc -l | tr -d ' ')
   for v in abc -1 1.5 '' 1234567890; do
     out="$("$RX" run reproduce --timeout="$v" -- true 2>&1)" && rc=0 || rc=$?
-    t  "--timeout='$v': exit 3, saying why" bash -c "test $rc = 3 && printf '%s\n' \"\$1\" | grep -qxF \"debug: run: --timeout takes a whole number of seconds (0 means no limit), not '$v'\"" _ "$out"
+    t  "--timeout='$v': exit 2, saying why" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | grep -qxF \"debug: run: --timeout takes a whole number of seconds (0 means no limit), not '$v'\"" _ "$out"
   done
   trc  "--timeout with no value: an unknown option (3)" 3 "$RX" run reproduce --timeout -- true
   printf 'DEBUG_RUN_TIMEOUT="soon"\n' >> "$R/.agents/harness.conf"
@@ -3823,7 +3841,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   kill -TERM "$bgrun"; rc=0; wait "$bgrun" || rc=$?
   n="$(enum "$(cat "$WORK/debugrun.term.out")")"
   t    "debug run stopped with SIGTERM: stops its command, records the entry (143)" bash -c "test $rc = 143 && test -n '$n' && grep -qx 'exit: 143' '$RE/E-$n.md' && grep -qx before '$RE/E-$n.log'"
-  tnot "...and the command's child doesn't survive" kill -0 "$(cat "$WORK/debugrun.child2")"
+  t    "...and the command's child doesn't survive" gone "$WORK/debugrun.child2"
   rm -f "$WORK/debugrun.stubborn2"
   "$RX" run reproduce --timeout=1 -- sh -c 'trap "" TERM; echo $$ > "$1"; sleep 30' _ "$WORK/debugrun.stubborn2" > "$WORK/debugrun.grace.out" 2>&1 & bgrun=$!
   i=0; while [ ! -s "$WORK/debugrun.stubborn2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
@@ -3831,19 +3849,80 @@ if [ "$HAVE_PY" -eq 1 ]; then
   kill -TERM "$bgrun" 2>/dev/null || true; rc=0; wait "$bgrun" || rc=$?
   n="$(enum "$(cat "$WORK/debugrun.grace.out")")"
   t    "SIGTERM during the grace period: still 124, and the entry is written" bash -c "test $rc = 124 && test -n '$n' && grep -qx 'exit: 124' '$RE/E-$n.md'"
-  tnot "...and the command is still killed" kill -0 "$(cat "$WORK/debugrun.stubborn2")"
+  t    "...and the command is still killed" gone "$WORK/debugrun.stubborn2"
   rm -f "$WORK/debugrun.child3"
   "$RX" run gather-evidence -- sh -c 'sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child3" > "$WORK/debugrun.hup.out" 2>&1 & bgrun=$!
   i=0; while [ ! -s "$WORK/debugrun.child3" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   sleep 0.5
   kill -HUP "$bgrun"; rc=0; wait "$bgrun" || rc=$?
-  t    "SIGHUP too: the command stopped, the entry recorded (129)" bash -c "test $rc = 129 && ! kill -0 \$(cat '$WORK/debugrun.child3') 2>/dev/null && grep -qx 'exit: 129' '$RE/E-$(enum "$(cat "$WORK/debugrun.hup.out")").md'"
+  t    "SIGHUP too: the command stopped, the entry recorded (129)" bash -c "test $rc = 129 && test -s '$WORK/debugrun.child3' && ! kill -0 \$(cat '$WORK/debugrun.child3') 2>/dev/null && grep -qx 'exit: 129' '$RE/E-$(enum "$(cat "$WORK/debugrun.hup.out")").md'"
+  rm -f "$WORK/debugrun.int"
+  # A background job starts with SIGINT ignored; the helper puts it back, as in a terminal.
+  python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$RX" run gather-evidence -- sh -c 'trap "echo got INT first; exit 7" INT; trap "echo got TERM first; exit 8" TERM; echo $$ > "$1"; while :; do sleep 0.1; done' _ "$WORK/debugrun.int" > "$WORK/debugrun.int.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.int" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  kill -INT "$bgrun"; rc=0; wait "$bgrun" || rc=$?
+  n="$(enum "$(cat "$WORK/debugrun.int.out")")"
+  t    "debug run stopped with SIGINT: SIGINT goes to the command first, the entry is recorded (130)" bash -c "test $rc = 130 && test -n '$n' && grep -qx 'exit: 130' '$RE/E-$n.md' && grep -qx 'got INT first' '$RE/E-$n.log'"
+  t    "...and the command doesn't survive" gone "$WORK/debugrun.int"
+  GW='import os, signal, subprocess, sys
+signal.signal(signal.SIGINT, signal.default_int_handler)   # as in a terminal, not a background job
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+real, kids = subprocess.Popen, []
+def popen(*a, **k):   # the signal lands as the command starts, before run_captured holds it
+    p = real(*a, **k); kids.append(p.pid); os.kill(os.getpid(), getattr(signal, sys.argv[2])); return p
+subprocess.Popen = popen
+old = d.catch_signals()
+with open(os.devnull, "wb") as fh:
+    rc = d.run_captured(["sleep", "30"], ".", fh, 0)[0]
+d.restore_signals(old)
+try:
+    os.kill(kids[0], 0); print(rc, "running", kids[0])
+except OSError:
+    print(rc, "stopped")'
+  for sig in TERM INT; do
+    out="$(python3 -B -c "$GW" "$GP" "SIG$sig" 2>&1)" || true
+    t  "a SIG$sig while the command starts: it's still stopped ($((128 + $(kill -l $sig))))" test "$out" = "$((128 + $(kill -l $sig))) stopped"
+    case "$out" in *" running "*) kill "${out##* }" 2>/dev/null || true ;; esac
+  done
+  GK='import signal, subprocess, sys, time
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+signal.alarm(20)   # the old code waited forever
+class Proc:   # a command that never ends: the group is gone, but it never gets reaped
+    pid = 2 ** 22 + 12345
+    def poll(self): return None
+    def wait(self, timeout=None):
+        if timeout is None: time.sleep(3600)
+        raise subprocess.TimeoutExpired("x", timeout)
+d.GRACE = 1
+print(d.stop_group(Proc()))'
+  t    "a command that won't be reaped: stopping it gives up after the grace period" test "$(python3 -B -c "$GK" "$GP" 2>&1)" = "False"
+  GM='import os, sys
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+d.use_shapes(sys.argv[2])
+def boom(text): raise ValueError("boom")
+d.gs.mask_lines = boom
+log = sys.argv[3]
+with open(log, "w") as fh: fh.write("x\n")
+try:
+    d.mask_log(log)
+except d.ConfError:
+    print("ConfError", os.path.exists(log), os.path.exists(log + ".masking"))'
+  t    "masking that fails in any way: ConfError, no raw log or .masking file left" test "$(python3 -B -c "$GM" "$GP" "$R" "$WORK/debugrun-boom.log" 2>&1)" = "ConfError False False"
+  mv "$R/.agents/core/guard.patterns" "$WORK/debugrun.guard.patterns"
+  out="$("$RX" run gather-evidence -- true 2>&1)" && rc=0 || rc=$?
+  t    "no .agents/core/guard.patterns: infra (3), nothing captured unmasked" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qxF \"infra: this project's harness has no secret rules in .agents/core/guard.patterns, so debug run can't mask secrets; re-run install.sh\"" _ "$out"
+  printf '# no secret rules\n' > "$R/.agents/core/guard.patterns"
+  trc  "...nor any secret rule in it (3)" 3 "$RX" run gather-evidence -- true
+  mv "$WORK/debugrun.guard.patterns" "$R/.agents/core/guard.patterns"
   out="$("$RX" run reproduce --timeout=1 -- sh -c "echo id $FAKE_AWS; sleep 30" 2>&1)" && rc=0 || rc=$?
   t    "timed out and masked: both notes, in that order" bash -c "test $rc = 124 && test \"\$(printf '%s\n' \"\$1\" | sed -n 2,3p | tr '\n' '|')\" = 'timed out: after 1s|masked: 2 possible secrets|'" _ "$out"
   DK="$R/.agents/builtin/workflows/debug/kinds/bug.md"; DS="$R/.agents/skills/debug/SKILL.md"
   t    "the bug steps bisect with no time limit, so git bisect reset always runs" grep -qF "debug run isolate --timeout=0 -- bash -c 'git bisect start" "$DK"
   t    "...and give a test that can hang a limit of its own" grep -qF '`debug run` stops it before `git bisect reset`' "$DK"
   t    "the skill names the time limit"  grep -qF -- '--timeout=<sec>' "$DS"
+  t    "no .masking file is left after any of these runs" test -z "$(find "$R/.agents/debug" -name '*.masking')"
 fi
 }
 group grp_debug_run
