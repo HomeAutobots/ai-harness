@@ -698,10 +698,10 @@ def tail_lines(path, n=TAIL):
             lines = fh.read().decode("utf-8", errors="replace").split("\n")
     except OSError:
         return []
-    if size > window + 1:
-        lines = lines[1:]   # it started before the part read (or is the empty text before a newline)
     if lines and lines[-1] == "":
         lines.pop()
+    if size > window + 1 and len(lines) > 1:   # a lone last line longer than the window stays
+        lines = lines[1:]   # it started before the part read (or is the empty text before a newline)
     lines = [l[:-1] if l.endswith("\r") else l for l in lines[-n:]]
     lines = [l.rsplit("\r", 1)[-1] for l in lines]
     return [l if len(l) <= 1000 else l[:1000] + " ..." for l in lines]

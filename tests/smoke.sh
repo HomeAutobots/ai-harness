@@ -2788,6 +2788,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   cp "$C/.agents/hooks/hook.py" "$WORK/debugcli.hook.py"; printf 'raise RuntimeError("broken")\n' > "$C/.agents/hooks/hook.py"
   trc  "a policy test that fails: infra (3), not run" 3 "$CX" run isolate -- true
   cp "$WORK/debugcli.hook.py" "$C/.agents/hooks/hook.py"
+  mv "$C/.agents/bin/policy" "$WORK/debugcli.policy"
+  trc  "no bin/policy: infra (3), not run" 3 "$CX" run isolate -- true
+  mv "$WORK/debugcli.policy" "$C/.agents/bin/policy"
   tnot "...and nothing recorded"        test -e "$CS/bug-12/evidence/E-4.md"
   cp "$C/.agents/harness.conf" "$WORK/debugcli.harness.conf"
   edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
@@ -2807,12 +2810,17 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and is recorded"             grep -q '^command: echo ' "$CS/bug-12/evidence/E-8.md"
   nmd=$(find "$CS/bug-12/evidence" -name 'E-*.md' | wc -l)
   "$CX" run gather-evidence -- sh -c 'sleep 1; echo AAA' >/dev/null 2>&1 & bgrun=$!
+  i=0; while [ ! -e "$CS/bug-12/evidence/E-$((nmd + 1)).log" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   "$CX" run gather-evidence -- echo BBB >/dev/null
   wait "$bgrun" || true
   t    "two runs at once get two entries" bash -c "test \$(find '$CS/bug-12/evidence' -name 'E-*.md' | wc -l) -eq $((nmd + 2)) && a=\$(grep -lx AAA '$CS'/bug-12/evidence/E-*.md) && b=\$(grep -lx BBB '$CS'/bug-12/evidence/E-*.md) && test -n \"\$a\" && test -n \"\$b\" && test \"\$a\" != \"\$b\""
   "$CX" run hypothesize -- sh -c "printf 'status: closed\n' >> '$CS/bug-12/state'" >/dev/null
   t    "a session closed during a run stays closed" bash -c "grep -qx 'status: closed' '$CS/bug-12/state' && ! grep -qx 'step: hypothesize' '$CS/bug-12/state'"
   edit "$CS/bug-12/state" '/^status: closed$/d'
+  head -c 1100000 /dev/zero | tr '\0' a > "$WORK/big1.txt"
+  out="$("$CX" run gather-evidence -- cat "$WORK/big1.txt")"
+  sed -n '/^## Output/,$p' "$C/$(printf '%s\n' "$out" | sed -n '1s/^E-[0-9]* ([^)]*): //p')" | sed '1,2d' | sed '/^$/,$d' > "$WORK/big1.tail"
+  t    "a last line longer than 1 MiB is still the tail" bash -c "test \$(wc -l < '$WORK/big1.tail') -eq 1 && grep -q '^aaa' '$WORK/big1.tail'"
   trc  "outcome needs an attempt"       1 "$CX" outcome E-2 reproduced
   trc  "outcome needs a known value"    2 "$CX" outcome E-1 maybe
   out="$("$CX" outcome E-99 reproduced 2>&1)" && rc=0 || rc=$?
