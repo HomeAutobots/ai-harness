@@ -438,6 +438,166 @@ def cli(root, a):
     return fn(root, words, opts, after)
 
 
+# ------------------------------------------------------------------ the playbook and starting
+
+def read_playbook(path):
+    """({step: [(line no, key, value)]}, [(line no, heading)], [(line no, text)]): the bindings in
+    each '## <step>' section, every section heading, and every list item in a section that isn't a
+    '<key>: <value>' binding. Lines before the first section, and other lines, are notes."""
+    sections, heads, odd, cur = {}, [], [], None
+    for n, line in enumerate(read_lines(path), 1):
+        if line.startswith("## "):
+            cur = line[3:].strip()
+            heads.append((n, cur))
+            sections.setdefault(cur, [])
+            continue
+        m = re.match(r"^\s*[-*]\s+(.*?)\s*$", line) if cur is not None else None
+        if not m:
+            continue
+        b = re.match(r"^([A-Za-z][\w-]*):\s*(.*)$", m.group(1))
+        if b:
+            sections[cur].append((n, b.group(1), b.group(2).strip().strip("`").strip()))
+        else:
+            odd.append((n, m.group(1)))
+    return sections, heads, odd
+
+
+def unbound_steps(root, conf, kind):
+    """The kind's bindable steps whose playbook section is missing or has no bindings."""
+    meta = read_kind(kind) or {"bindable": []}
+    sections = read_playbook(playbook_path(root, conf))[0]
+    return [s for s in meta["bindable"] if not sections.get(s)]
+
+
+def ticket_pattern(root):
+    """GIT_TICKET from .agents/git.conf (the default when unset), compiled; ConfError when it isn't
+    a valid regex, so the message names the key and the file."""
+    ticket = read_conf(os.path.join(root, ".agents", "git.conf"), "GIT_").get("GIT_TICKET") or DEFAULT_TICKET
+    try:
+        return re.compile(ticket)
+    except re.error as e:
+        raise ConfError("GIT_TICKET in .agents/git.conf isn't a valid Python regex: %s" % e)
+
+
+def new_slug(root, conf, kind, ref, text):
+    """<kind>-<ref> in lowercase (bug-proj-123, bug-42), or <kind>-<first words of the report> for a
+    pasted one; -2, -3... when a session or plan already has that name."""
+    if ref == "-":
+        first = next((l for l in text.splitlines() if l.strip()), "")
+        base = "-".join(re.findall(r"[a-z0-9]+", first.lower())[:6])[:40].strip("-") or "report"
+    else:
+        base = re.sub(r"[^a-z0-9]+", "-", ref.lower()).strip("-")
+    slug, n = "%s-%s" % (kind, base), 2
+    while os.path.exists(os.path.join(sessions_dir(root, conf), slug)) or \
+            os.path.exists(os.path.join(root, ".agents", "plans", slug)):
+        slug, n = "%s-%s-%d" % (kind, base, n), n + 1
+    return slug
+
+
+def tasks_cli(root, *args):
+    """Run .agents/bin/tasks; True when it worked. False without it (an older install)."""
+    tasks = os.path.join(root, ".agents", "bin", "tasks")
+    if not os.path.isfile(tasks):
+        return False
+    return subprocess.run(["bash", tasks] + list(args), cwd=root, capture_output=True).returncode == 0
+
+
+def open_plan(root, slug, kind, ref):
+    """A plan ledger named after the session with one task in progress, so a question to the human
+    (tasks ask) or the check-in pauses the stop gate. Its path, or '' without the tasks CLI."""
+    what = "the pasted report" if ref == "-" else ref
+    if tasks_cli(root, "new", slug, "Debug %s %s" % (kind, what)) and \
+            tasks_cli(root, "add", slug, "Find the root cause of %s (debug session %s)" % (what, slug)) and \
+            tasks_cli(root, "set", slug, "T1", "doing"):
+        return os.path.join(".agents", "plans", slug)
+    return ""
+
+
+REPORT = """# Report: %s
+
+Kind: %s. "As received" is the report exactly as it came; Expected and Actual are pulled out of it.
+
+## As received
+
+%s
+
+## Expected
+
+## Actual
+
+## Unclear
+"""
+
+HYPOTHESES = """# Hypotheses
+
+One section per hypothesis: `## H-<n>: <claim>`, then `- would confirm: ...`, `- would rule out: ...`,
+and `- status: open`, `- status: confirmed (E-<n>)`, or `- status: ruled out (E-<n>)`.
+"""
+
+
+@command("start", "debug start <kind> <ref | -> [--file=<path>]", ("--file=",))
+def cmd_start(root, words, opts, after):
+    if len(words) != 2 or after is not None:
+        return bad("start")
+    kind, ref = words
+    conf = load_conf(root)
+    on = conf["DEBUG_KINDS"].split()
+    if kind not in on:
+        print("debug: the %s workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: %s)"
+              % (kind[:40], " ".join(on) or "empty"), file=sys.stderr)
+        return 2
+    meta = read_kind(kind)
+    if not meta:
+        print("debug: this pack has no %s workflow (it has: %s)" % (kind[:40], " ".join(shipped_kinds())),
+              file=sys.stderr)
+        return 2
+    ticket = ticket_pattern(root)
+    if ref != "-" and not re.fullmatch(r"#[0-9]+", ref) and not ticket.fullmatch(ref):
+        print("debug: %s isn't a ref: give a ticket key (%s), #<n> for a GitHub or GitLab issue, or - to "
+              "read the report from stdin or --file" % (ref[:40], ticket.pattern), file=sys.stderr)
+        return 2
+    text = ""
+    if "--file=" in opts:
+        path = os.path.join(root, opts["--file="])
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError as e:
+            print("debug: can't read %s: %s" % (opts["--file="], e.strerror), file=sys.stderr)
+            return 2
+    elif ref == "-":
+        text = sys.stdin.read()
+    text = text.strip("\n")
+    if ref == "-" and not text.strip():
+        print("debug: the report is empty: pipe it in, or pass --file=<path>", file=sys.stderr)
+        return 2
+    slug = new_slug(root, conf, kind, ref, text)
+    sdir = os.path.join(sessions_dir(root, conf), slug)
+    os.makedirs(os.path.join(sdir, "evidence"))
+    got = text or ("(not fetched yet: run the playbook's intake binding for %s, or ask the human to paste "
+                   "the report)" % ref)
+    write_text(os.path.join(sdir, "report.md"), REPORT % ("pasted" if ref == "-" else ref, kind, got))
+    write_text(os.path.join(sdir, "hypotheses.md"), HYPOTHESES)
+    write_state(sdir, {"kind": kind, "ref": ref, "branch": current_branch(root),
+                       "start": git(root, "rev-parse", "-q", "--verify", "HEAD").strip() or "none",
+                       "seq": str(1 + max([seq_of(st) for _, _, st in all_sessions(root, conf)] + [0])),
+                       "step": meta["steps"][0], "status": "open"})
+    plan = open_plan(root, slug, kind, ref)
+    print("started %s (%s, %s): %s" % (slug, kind, "pasted report" if ref == "-" else ref, shown(root, sdir)))
+    print("steps: %s" % shown(root, kind_file(kind)))
+    if plan:
+        print("plan: %s, task T1 in progress; ask the human with .agents/bin/tasks ask %s T1 '<question>'"
+              % (plan, slug))
+    if "intake" not in unbound_steps(root, conf, kind):
+        print("next: intake: use the playbook's intake bindings (%s)" % shown(root, playbook_path(root, conf)))
+    elif text:
+        print("next: intake: no playbook binding, so the report as received is the starting record; pull "
+              "Expected and Actual out of it in report.md")
+    else:
+        print("next: intake: no playbook binding and no report text; ask the human to paste the report")
+    return 0
+
+
 # ------------------------------------------------------------------ main
 
 def main(argv):
@@ -445,8 +605,6 @@ def main(argv):
         return dispatch(argv[1:])
     except ConfError as e:
         print("infra: %s" % e)
-    except re.error as e:
-        print("infra: GIT_TICKET in .agents/git.conf isn't a valid Python regex: %s" % e)
     except Exception as e:  # a crash is a tooling problem, not findings
         print("infra: debug_tools failed: %s" % e)
     return 3

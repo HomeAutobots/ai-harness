@@ -2693,6 +2693,52 @@ fi
 }
 group grp_debug
 
+grp_debug_cli() {   # the debug command: start, run and outcome, status, approve and reject, close
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflow: the debug command"
+  C=$(repo debugcli)
+  mkdir -p "$C/src"; printf 'int add(int a, int b) { return a - b; }\n' > "$C/src/calc.c"; commit "$C" base
+  "$HARNESS/install.sh" --team --workflow debug "$C" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$C/.agents/checks/$tier.sh"; done
+  commit "$C" harness
+  CX="$C/.agents/commands/debug"; CS="$C/.agents/debug/sessions"; CB="$(git -C "$C" symbolic-ref --short HEAD)"
+  t    "start --help: its usage, exit 0" bash -c "'$CX' start --help | grep -qxF 'usage: debug start <kind> <ref | -> [--file=<path>]'"
+  trc  "start with an unknown option: exit 3" 3 "$CX" start bug '#12' --force
+  tnot "...and nothing made"             test -e "$CS"
+  trc  "start needs a workflow that's on" 2 "$CX" start crash '#12'
+  trc  "start needs a ticket key, #<n>, or -" 2 "$CX" start bug 'not a ref'
+  trc  "start - needs a report"          2 bash -c "printf '' | '$CX' start bug -"
+  out="$("$CX" start bug '#12')"
+  t    "start #12 opens bug-12"          hasl "$out" "started bug-12 (bug, #12): .agents/debug/sessions/bug-12"
+  t    "...names the skeleton"           hasl "$out" "steps: .agents/builtin/workflows/debug/kinds/bug.md"
+  t    "...opens a plan to ask in"       bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
+  t    "...and says what's next"         hasl "$out" "next: intake: no playbook binding and no report text; ask the human to paste the report"
+  t    "state: kind, ref, start commit, branch, step" bash -c "grep -qx 'kind: bug' '$CS/bug-12/state' && grep -qx 'ref: #12' '$CS/bug-12/state' && grep -qx \"start: \$(git -C '$C' rev-parse HEAD)\" '$CS/bug-12/state' && grep -qx 'branch: $CB' '$CS/bug-12/state' && grep -qx 'step: intake' '$CS/bug-12/state'"
+  t    "report.md has the fixed sections" bash -c "grep -qx '## As received' '$CS/bug-12/report.md' && grep -qx '## Expected' '$CS/bug-12/report.md' && grep -qx '## Actual' '$CS/bug-12/report.md'"
+  out="$(printf 'add(2, 2) returns 0\nexpected 4\n' | "$CX" start bug -)"
+  t    "a pasted report: a slug from its first words" hasl "$out" "started bug-add-2-2-returns-0 (bug, pasted report)"
+  t    "...it's the starting record"    grep -qx 'add(2, 2) returns 0' "$CS/bug-add-2-2-returns-0/report.md"
+  t    "...and next says so"            hasl "$out" "no playbook binding, so the report as received is the starting record"
+  printf 'Crash on empty input\n' > "$WORK/report.txt"
+  t    "a ref with --file keeps the report text" bash -c "'$CX' start bug PROJ-7 --file='$WORK/report.txt' >/dev/null && grep -qx 'Crash on empty input' '$CS/bug-proj-7/report.md'"
+  t    "the same ref again gets its own slug" hasl "$("$CX" start bug '#12')" "started bug-12-2"
+  printf '## intake\n- run: gh issue view <n>\n' >> "$C/.agents/debug/playbook.md"
+  t    "with an intake binding, next says to use it" hasl "$("$CX" start bug PROJ-8)" "next: intake: use the playbook's intake bindings (.agents/debug/playbook.md)"
+  git -C "$C" checkout -q .agents/debug/playbook.md
+  edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS=""/'
+  trc  "DEBUG_KINDS empty turns every workflow off" 2 "$CX" start bug '#20'
+  edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS="bug"/'
+  cp "$C/.agents/git.conf" "$WORK/debugcli.git.conf"
+  printf 'GIT_TICKET="(PROJ-[0-9]+"\n' >> "$C/.agents/git.conf"
+  out="$("$CX" start bug PROJ-1 2>&1)" && rc=0 || rc=$?
+  t    "an invalid GIT_TICKET: infra (3), naming it" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q '^infra: GIT_TICKET in .agents/git.conf isn.t a valid Python regex'" _ "$out"
+  tnot "...and no session made"          test -e "$CS/bug-proj-1"
+  cp "$WORK/debugcli.git.conf" "$C/.agents/git.conf"
+  rm -rf "$CS" "$C"/.agents/plans/bug-*
+fi
+}
+group grp_debug_cli
+
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
 HX="$WORK/hx"; mkdir -p "$HX"   # a copy of the harness plus a test pack
