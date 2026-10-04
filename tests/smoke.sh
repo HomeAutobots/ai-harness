@@ -3337,6 +3337,21 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf '\n' >> "$K/.agents/debug/playbook.md"
   t    "harness files aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
   git -C "$K" checkout -q .agents/debug/playbook.md
+  # What sync writes outside .agents/ (an upgrade or a sync during the session) isn't one either.
+  edit "$K/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  (cd "$K" && .agents/bin/sync >/dev/null 2>&1); commit "$K" "copy renders"
+  t    "team mode, copy renders: the lock lists them" hasl "$(cat "$K/.agents/generated.lock")" '".claude/skills/validate": '
+  printf '\nA newer line.\n' >> "$K/.claude/skills/validate/SKILL.md"; rm -rf "$K/.claude/skills/plan-task"
+  printf '{}\n' > "$K/.github/hooks/harness.json"
+  awk '{ print } /<!-- harness:core:start -->/ { print "- A rule from a newer harness." }' "$K/AGENTS.md" > "$K/AGENTS.tmp" && mv "$K/AGENTS.tmp" "$K/AGENTS.md"
+  ln -s ../../.agents/skills/newer "$K/.claude/skills/newer"
+  t    "renders the lock lists, harness-only files, managed blocks, and link mirrors aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
+  ln -s ../../src "$K/.claude/skills/mine"; printf 'A project fact.\n' >> "$K/AGENTS.md"; printf '\n' >> "$K/.claude/settings.json"
+  out="$("$KV" 2>&1 || true)"
+  t    "...but a project line in AGENTS.md is" bash -c "printf '%s' \"\$1\" | grep -qE '^AGENTS\.md:[0-9]+: error: \[debug-experiments-left\]'" _ "$out"
+  t    "...and so are a link sync didn't make, and a config it merges into the project's own" bash -c "printf '%s' \"\$1\" | grep -qF '.claude/skills/mine:1: error: [debug-experiments-left]' && printf '%s' \"\$1\" | grep -qF '.claude/settings.json:'" _ "$out"
+  git -C "$K" reset -q --hard HEAD~1; rm -f "$K/.claude/skills/newer" "$K/.claude/skills/mine"
+  t    "...back to link renders: passes" test "$("$KV" 2>&1)" = "ok verify turn"
   printf 'int probe;\n' > "$K/src/probe.c"
   "$KX" reject bug-7 'not it' >/dev/null
   t    "after a reject sets root-cause.md aside, experiments are fine again" test "$("$KV" 2>&1)" = "ok verify turn"

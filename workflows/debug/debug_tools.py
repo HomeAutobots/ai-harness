@@ -28,6 +28,7 @@ keeps all of its output with no size cap; only the entry (E-<n>.md) is cut to th
 """
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -647,9 +648,9 @@ def undo(p, origin):
 @check
 def experiments_left(ctx):
     """debug-experiments-left (check-in; turn and full once root-cause.md exists): uncommitted changes
-    to files in DEBUG_SCOPE, outside .agents/ and DEBUG_DIR (changed_in_scope()), one finding per file
-    at its first changed line, saying how to revert it. Past 5 files, the fifth finding names the rest.
-    Experiments end when the root cause is written."""
+    to files in DEBUG_SCOPE, outside .agents/ and DEBUG_DIR, that sync didn't make (changed_in_scope()),
+    one finding per file at its first changed line, saying how to revert it. Past 5 files, the fifth
+    finding names the rest. Experiments end when the root cause is written."""
     if not ctx.slug or ctx.tier == "edit" or not os.path.isfile(ctx.path("root-cause.md")):
         return []
     left, kind, scope = changed_in_scope(ctx.root, ctx.conf), "debug-experiments-left", ctx.conf["DEBUG_SCOPE"]
@@ -1303,16 +1304,129 @@ def changed_lines(root):
     return out
 
 
+def in_scope(root, conf, path):
+    """True for project code an experiment or commit can touch: a path (relative to root) in
+    DEBUG_SCOPE, outside .agents/ and DEBUG_DIR."""
+    return not path.startswith(".agents/") and matches_any(path, conf["DEBUG_SCOPE"]) and \
+        not os.path.normpath(os.path.join(root, path)).startswith(debug_dir(root, conf) + os.sep)
+
+
 def changed_in_scope(root, conf):
     """[(path, first changed line, origin)] for the uncommitted changes (changed_lines) to files in
-    DEBUG_SCOPE, leaving out .agents/ and DEBUG_DIR: the experiments a session leaves in the tree.
-    Empty when DEBUG_SCOPE is."""
+    DEBUG_SCOPE, leaving out .agents/, DEBUG_DIR, and changes sync made (harness_made): the
+    experiments a session leaves in the tree. Empty when DEBUG_SCOPE is."""
     if not conf["DEBUG_SCOPE"].split():
         return []
-    dd = debug_dir(root, conf) + os.sep
-    return [(p, n, o) for p, (n, o) in sorted(changed_lines(root).items())
-            if not p.startswith(".agents/") and not os.path.normpath(os.path.join(root, p)).startswith(dd)
-            and matches_any(p, conf["DEBUG_SCOPE"])]
+    left = [(p, n, o) for p, (n, o) in sorted(changed_lines(root).items()) if in_scope(root, conf, p)]
+    made = harness_made(root, [x[0] for x in left], ("HEAD", ":", None))
+    return [x for x in left if x[0] not in made]
+
+
+# Files outside .agents/ that sync writes, so an upgrade or a sync during a session changes them.
+# They're the harness's, not experiments or project code (decision 19), but only what's sync's
+# beyond doubt is left out: a file the project edits by hand would hide a real experiment.
+HARNESS_WHOLE = (".github/hooks/harness.json", ".codex/rules/harness.rules")   # harness.py renders these whole
+RENDER_DIR = re.compile(r"\.(?:claude|github|cursor|codex|gemini)/(?:agents|skills)/")
+RENDER = re.compile(r"\.(?:claude|github|cursor|codex|gemini)/(?:agents|skills)/[^/]+")   # one render
+MIRROR = re.compile(r"\.claude/skills/([^/]+)")   # a link mirror points at ../../.agents/skills/<name>
+BLOCK = re.compile(r"[ \t]*<!-- harness:([a-z0-9-]+):(start|end) -->[ \t\r]*")
+CLAUDE_MARK = "<!-- Shared instructions live in AGENTS.md"
+
+
+def side_entry(root, side, path):
+    """(kind, text) of path (relative to root) on one side of a change: None is the working tree,
+    ':' the index, anything else a commit. kind is 'link' (text: its target), 'file', or 'other';
+    (None, None) when that side doesn't have it."""
+    if side is None:
+        full = os.path.join(root, path)
+        try:
+            if os.path.islink(full):
+                return "link", os.readlink(full)
+            if os.path.isfile(full):
+                with open(full, "rb") as fh:
+                    return "file", fh.read().decode("utf-8", "replace")
+        except OSError:
+            return None, None
+        return ("other", None) if os.path.lexists(full) else (None, None)
+    if side == ":":
+        rc, out, _ = git_run(root, "--literal-pathspecs", "ls-files", "-s", "-z", "--", path)
+        m = re.match(r"(\d+) ([0-9a-f]+) 0\t([^\0]*)\0", out)   # stage 0: a conflicted file isn't sync's
+        typ = "blob"
+    else:
+        rc, out, _ = git_run(root, "--literal-pathspecs", "ls-tree", "-z", side, "--", path)
+        m = re.match(r"(\d+) (\w+) ([0-9a-f]+)\t([^\0]*)\0", out)
+        typ = m.group(2) if m else ""
+    if rc != 0 or not m or m.groups()[-1] != path:   # a dir in the index lists the files under it
+        return None, None
+    if typ != "blob":
+        return "other", None
+    rc, text, _ = git_run(root, "cat-file", "blob", m.groups()[-2])
+    mode = m.group(1)
+    return ("link" if mode == "120000" else "file" if mode.startswith("100") else "other"), text
+
+
+def outside_blocks(text):
+    """AGENTS.md's lines outside the harness's managed blocks (sync's render_block), blank lines left
+    out; None when a block doesn't close (not a file sync rendered)."""
+    out, inside = [], None
+    for line in text.splitlines():
+        m = BLOCK.fullmatch(line)
+        if m and inside is None and m.group(2) == "start":
+            inside = m.group(1)
+        elif m and inside == m.group(1) and m.group(2) == "end":
+            inside = None
+        elif inside is None and line.strip():
+            out.append(line)
+    return None if inside is not None else out
+
+
+def claude_lines(text):
+    """CLAUDE.md's lines minus what sync writes there (its strip_claude): the @AGENTS.md and
+    @.agents/AGENTS.local.md imports, the marker comment, and blank lines."""
+    return [l for l in text.splitlines() if l.strip() and not l.startswith(CLAUDE_MARK)
+            and l.rstrip(" \t\r") not in ("@AGENTS.md", "@.agents/AGENTS.local.md")]
+
+
+INSTRUCTIONS = {"AGENTS.md": outside_blocks, "CLAUDE.md": claude_lines}
+
+
+def harness_made(root, paths, sides):
+    """The paths (relative to root) whose change is sync's, comparing these sides (side_entry's):
+    a file harness.py renders whole (HARNESS_WHOLE); a render .agents/generated.lock records on any
+    side (agents, skill_copies), inside a tool's agents/ or skills/ dir; a link mirror of
+    .agents/skills/; and AGENTS.md or CLAUDE.md when only the harness's parts differ (the managed
+    blocks; sync's imports and marker line). Never a config sync merges into the project's own
+    (.claude/settings.json, .mcp.json, ...): telling its entries apart takes harness.py's rules,
+    which a pack from another library can't count on. No git calls unless a path could be one."""
+    cand = [p for p in paths if p in HARNESS_WHOLE or p in INSTRUCTIONS or RENDER_DIR.match(p)]
+    renders, out = set(), set()
+    if any(RENDER_DIR.match(p) for p in cand):
+        for s in sides:
+            kind, text = side_entry(root, s, ".agents/generated.lock")
+            try:
+                lock = json.loads(text) if kind == "file" else {}
+            except ValueError:
+                lock = {}
+            for key in ("agents", "skill_copies"):
+                got = lock.get(key) if isinstance(lock, dict) else None
+                if isinstance(got, dict):
+                    renders |= {r for r in got if isinstance(r, str) and RENDER.fullmatch(r)}
+    for p in cand:
+        if p in HARNESS_WHOLE or any(p == r or p.startswith(r + "/") for r in renders):
+            out.add(p)
+            continue
+        m, norm = MIRROR.fullmatch(p), INSTRUCTIONS.get(p)
+        if not m and not norm:
+            continue
+        got = [side_entry(root, s, p) for s in sides]
+        if m and any(k for k, _ in got) and \
+                all(k is None or (k == "link" and t == "../../.agents/skills/" + m.group(1)) for k, t in got):
+            out.add(p)
+        elif norm and all(k == "file" for k, _ in got):
+            seen = [norm(t) for _, t in got]
+            if None not in seen and all(x == seen[0] for x in seen):
+                out.add(p)
+    return out
 
 
 def listed(left, most=8):
