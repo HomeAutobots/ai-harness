@@ -9,10 +9,12 @@ Translates each tool's hook protocol into the harness's tool-agnostic checks:
                 after a question to the human, record the question and answer in the ledger
   session-start remind the agent of questions still waiting on the human; tell Codex when the
                 AGENTS.override.md sync wrote in local mode is out of date
-  turn-start    snapshot the working tree (and the simulated-human switch) when a prompt arrives
+  turn-start    snapshot the working tree (and the simulated-human switch, and WORKFLOWS, STACKS
+                and FDD_* in harness.conf) when a prompt arrives
   stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
                 anything; block with the findings until it passes (bounded retries). A
-                simulated-human switch that appeared or changed during the turn is marked flagged
+                simulated-human switch that appeared or changed during the turn is marked flagged;
+                a change to those settings gets a note for the human
 
 Usage: hook.py <event> --tool=<claude|copilot|cursor|codex|gemini>   (JSON payload on stdin)
 
@@ -586,7 +588,44 @@ def turn_start(tool, data, conf):
     write_file(os.path.join(CACHE, "head-" + key), refs_state())
     token_in_session(tool, "turn-start")
     write_file(os.path.join(CACHE, "human-" + key), switch_state()[1])
+    write_file(os.path.join(CACHE, "conf-" + key), json.dumps(gate_conf(), sort_keys=True))
     return allow(tool, "turn-start")
+
+
+GATE_KEYS = re.compile(r"^(WORKFLOWS|STACKS|FDD_[A-Z0-9_]*)$")
+
+
+def gate_conf():
+    """WORKFLOWS, STACKS and FDD_* as .agents/harness.conf sets them (the last line of each wins):
+    the settings that turn checks on and off."""
+    path = os.path.join(ROOT, ".agents", "harness.conf")
+    if not os.path.isfile(path):
+        return {}
+    return {k: v for k, v in load_conf().items() if GATE_KEYS.match(k)}
+
+
+def gate_conf_changed(key):
+    """(note, changed keys, current settings as JSON) when gate_conf() changed since the turn
+    started, else ('', '', ''). A note for the human, never a finding: harness-tailor and a person's
+    own request change these during a turn too, and the hook can't tell who did."""
+    try:
+        old = json.loads(read_file(os.path.join(CACHE, "conf-" + key)) or "null")
+    except ValueError:
+        old = None
+    if not isinstance(old, dict):
+        return "", "", ""
+    new = gate_conf()
+    changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+    if not changed:
+        return "", "", ""
+
+    def show(v):
+        v = None if v is None else re.sub(r"[^\x20-\x7e]", "?", v)
+        return "unset" if v is None else '"%s"' % (v if len(v) <= 60 else v[:57] + "...")
+    note = ("Note: .agents/harness.conf changed during this turn: %s. These settings turn checks on and off; "
+            "if you didn't ask for this, look at the change before going on."
+            % "; ".join("%s %s -> %s" % (k, show(old.get(k)), show(new.get(k))) for k in changed))
+    return note, " ".join(changed), json.dumps(new, sort_keys=True)
 
 
 TOOL_NAMES = {"claude": "Claude Code", "copilot": "Copilot", "cursor": "Cursor", "codex": "Codex",
@@ -695,12 +734,22 @@ def stop_gate(tool, data, conf):
     # Only gate turns that changed the tree, the branches, or the simulated-human switch. Without a
     # snapshot, gate any dirty tree.
     flagged = switch_flagged(tool, key)
+    # WORKFLOWS, STACKS or FDD_* changed in the turn: the human hears of it once, when the stop is
+    # allowed (a block's message goes to the agent), and verify runs, since what it checks changed.
+    conf_note, conf_keys, conf_now = gate_conf_changed(key)
+
+    def allow_noted(note=""):
+        if conf_note:
+            write_file(os.path.join(CACHE, "conf-" + key), conf_now)
+            log_event(tool, "stop-gate", "conf-changed", conf_keys)
+        return finish_allow(tool, "\n".join(x for x in (note, conf_note) if x))
+
     now = tree_state()
     dirty = bool(git("status", "--porcelain").strip())
-    if not since and not flagged and ((before and before == now) or (not before and not dirty)):
+    if not since and not flagged and not conf_note and ((before and before == now) or (not before and not dirty)):
         write_file(counter, "0")
         remove_file(pending_file)
-        return finish_allow(tool)
+        return allow_noted()
 
     def keep_range():
         if since:
@@ -712,7 +761,7 @@ def stop_gate(tool, data, conf):
         write_file(counter, "0")
         keep_range()
         log_event(tool, "stop-gate", "paused", waiting)
-        return finish_allow(tool, "Paused for your input: open questions in %s" % waiting)
+        return allow_noted("Paused for your input: open questions in %s" % waiting)
 
     blocks = int(read_file(counter, "0") or 0)
     if tool == "cursor" and isinstance(data.get("loop_count"), int):
@@ -721,9 +770,9 @@ def stop_gate(tool, data, conf):
         write_file(counter, "0")
         remove_file(pending_file)   # committed lines can't be fixed by more turns; the human decides
         log_event(tool, "stop-gate", "give-up")
-        return finish_allow(tool, "Stop gate: verify still failing after %d attempts. Handing back; "
-                                  "run .agents/bin/verify%s to see what is left."
-                                  % (blocks, " --since=" + since[0][:12] if since else ""))
+        return allow_noted("Stop gate: verify still failing after %d attempts. Handing back; "
+                           "run .agents/bin/verify%s to see what is left."
+                           % (blocks, " --since=" + since[0][:12] if since else ""))
 
     budget = int(conf.get("TURN_BUDGET", "300") or 300) + 30
     rc, out = run_tool(harness_cmd("verify", "--tier=turn", *["--since=" + s for s in since]), budget)
@@ -733,16 +782,18 @@ def stop_gate(tool, data, conf):
         remove_file(pending_file)
         write_file(os.path.join(CACHE, "turn-" + key), tree_state())
         write_file(os.path.join(CACHE, "head-" + key), refs_state())
-        return finish_allow(tool)
+        return allow_noted()
     if rc not in (1, 2):
         write_file(counter, "0")
         keep_range()
-        return finish_allow(tool, "Stop gate could not verify (exit %d): %s" % (rc, out.splitlines()[-1] if out else ""))
+        return allow_noted("Stop gate could not verify (exit %d): %s" % (rc, out.splitlines()[-1] if out else ""))
 
     write_file(counter, str(blocks + 1))
     reason = ("The stop gate ran .agents/bin/verify and it failed. Fix these, then finish:\n\n%s\n\n"
               "(Attempt %d of %d. If a finding is wrong or out of scope, say so plainly instead of "
               "suppressing it.)" % (out, blocks + 1, max_blocks))
+    if conf_note:
+        reason += "\n" + conf_note
     import glob
     # Not on a policy block (2), which is never a deliberate red state, nor without a plan to ask in.
     if rc == 1 and glob.glob(os.path.join(ROOT, ".agents", "plans", "*", "tasks.json")):

@@ -20,7 +20,8 @@ Draft `model.md` from the repo and the developer's description: subject areas, t
 ## 3. Plan by feature
 - One plan per feature or small group, slug in lowercase: `tasks new f-12-sale-total "Sale total"`. Every task description starts with the feature ID: `tasks add f-12-sale-total "F-12: add sale total"`.
 - Set the task to `doing` before touching code in `FDD_SCOPE`; that's how `verify` knows which feature a change belongs to.
-- Start a branch when `.agents/bin/gitflow status` suggests `gitflow start` (the repo protects its base branch), or when you're on another feature's branch. Then use the ticket key if the feature has one: `gitflow start PROJ-123 <summary>`. Otherwise keep working where you are.
+- Start a branch when `.agents/bin/gitflow status` suggests `gitflow start` (the repo protects its base branch), or when you're on another feature's branch. Then use the ticket key if the feature has one: `gitflow start PROJ-123 <summary>`, and link the plan to it right away: `tasks link <slug>`. Otherwise keep working where you are. `verify` flags a feature's task in progress on a branch its plan isn't linked to, on a branch another feature's plan is linked to, or (when branch names carry tickets) on another ticket's branch.
+- An inspected feature is finished. New work on it is a new feature in the list (a list check-in), unless the human reopens it by approving its design again.
 - Pick the next feature by feature-set order and dependencies. `fdd status` shows where each one stands.
 
 ## 4. Design by feature, then check-in 2
@@ -30,7 +31,7 @@ Write `designs/F-12.md`: approach, entities and files touched, and a test plan (
 - Tests from the design's test plan first, then the code. `verify` passes.
 - To show the human the tests before the code, ask with `--gate=tests` (`tasks ask <slug> <T-id> --gate=tests 'Tests for F-12 are in; review them before I write the code?'`); the stop gate pauses while it waits, so the deliberately failing tests don't block you.
 - Never write a private feature ID in code, tests, docs, commit messages, branch summaries (`gitflow start PROJ-123 <summary>`), plan titles, or PR text; use the ticket key or nothing. `verify` and the commit hook catch code and messages; the rest is on you.
-- Commit, record it (`tasks set <slug> <T-id> done <sha>`; the stop gate judges what you committed this turn, traced through that task), validate the change, then ask for `fdd approve inspect F-12` (the task stays done while you wait). The feature is done after that.
+- Commit, record it (`tasks set <slug> <T-id> done <sha>`; the stop gate judges what you committed this turn, traced through that task, and `fdd approve inspect` refuses until a done task records a real commit), validate the change, then ask for `fdd approve inspect F-12` (the task stays done while you wait). The feature is done after that.
 
 ## Report
 Which features moved and to what milestone (`fdd status`), and anything in a design you couldn't build.

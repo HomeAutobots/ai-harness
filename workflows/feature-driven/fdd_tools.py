@@ -398,10 +398,18 @@ def read_approvals(root, d, switch=None):
     """({(kind, id): value}, [(line no, kind, id)], [(line no, kind, id)]): the latest recorded
     line for each wins. Lines fdd approve didn't record (written by hand or by an agent) don't
     count and come back second; simulated ones don't count while the switch is off and come back
-    third."""
+    third. Latest means the line fdd approve recorded last in the git dir (each line's last place
+    there: approving the same thing again, even on the same day, moves it), so reordering or
+    copying lines in approvals changes nothing; outside git, the last one in approvals. A design
+    approved after the feature's inspection reopens it: that inspection stops counting, and
+    ("reopened", ID) is set."""
     rec = recorded(root)
     on = (switch or Switch(root)).state == "on"
-    out, unrecorded, simulated = {}, [], []
+    pos = {}
+    if rec is not None:
+        for i, l in enumerate(read_lines(record_file(root))):
+            pos[l[len(SIM_REC):] if l.startswith(SIM_REC) else l] = i
+    out, unrecorded, simulated, at = {}, [], [], {}
     for n, line in enumerate(read_lines(os.path.join(d, "approvals")), 1):
         parts = line.split("\t")
         if len(parts) != 5:
@@ -412,7 +420,13 @@ def read_approvals(root, d, switch=None):
         if not on and is_simulated(line, rec):
             simulated.append((n, parts[0], parts[1]))
             continue
-        out[(parts[0], parts[1])] = parts[4]
+        key, p = (parts[0], parts[1]), (pos.get(line, -1) if rec is not None else n)
+        if key not in at or p >= at[key]:
+            out[key], at[key] = parts[4], p
+    for kind, fid in list(at):
+        if kind == "inspect" and ("design", fid) in at and at[("design", fid)] > at[("inspect", fid)]:
+            del out[("inspect", fid)]
+            out[("reopened", fid)] = "1"
     return out, unrecorded, simulated
 
 
@@ -477,7 +491,8 @@ def list_state(d, approvals):
 
 
 def ledger(root, conf):
-    """[(tasks.json path, line, status, commit, feature ID)] for plan tasks whose description starts with an ID."""
+    """[(tasks.json path, line, status, commit, feature ID, task ID)] for plan tasks whose description
+    starts with an ID."""
     start = re.compile(r"\s*(%s)(?![A-Za-z0-9])" % conf["FDD_ID_PATTERN"])
     rows = []
     for tj in sorted(glob.glob(os.path.join(root, ".agents", "plans", "*", "tasks.json"))):
@@ -495,7 +510,7 @@ def ledger(root, conf):
                 continue
             m = start.match(desc)
             if m:
-                rows.append((rel, n, task.get("status", ""), task.get("commit", ""), m.group(1)))
+                rows.append((rel, n, task.get("status", ""), task.get("commit", ""), m.group(1), task.get("id", "")))
     return rows
 
 
@@ -533,6 +548,8 @@ def milestone(root, d, fid, conf, approvals, rows):
                 label = "built (commit not found)"
             break
         pct, label = weight, name
+    if ("reopened", fid) in approvals:   # its design was approved again after the inspection
+        label += " (reopened)"
     return pct, label
 
 
@@ -574,6 +591,14 @@ def cmd_check(tier, root, files):
         if tier != "edit" and ("list", "-") in approvals:
             out.append(finding(shown(root, fpath), 1, "fdd-list-missing", "the feature list was approved but is gone",
                                "restore it; to stop using the workflow, remove feature-driven from WORKFLOWS instead"))
+        if tier != "edit":   # a moved or deleted FDD_DIR turns every gate off, while the ledger says otherwise
+            gone = "" if os.path.isdir(d) else " (FDD_DIR %s doesn't exist)" % shown(root, d)
+            for rel, n, _, _, fid, _ in [r for r in ledger(root, conf) if r[2] == "doing"]:
+                out.append(finding(rel, n, "fdd-list-missing", "%s's task is doing, but there's no feature list at "
+                                   "%s%s, so no feature gate runs" % (fid, shown(root, fpath), gone),
+                                   "put the list back where FDD_DIR says; never move it, or change FDD_* or "
+                                   "WORKFLOWS, to get past a gate. No list written yet: write it first. The human "
+                                   "stopped using the workflow: set this task done"))
         return emit(blocked + out, blocked)
     feats, fmt = parse_features(root, conf, fpath)
     if tier != "edit":
@@ -598,10 +623,17 @@ def cmd_check(tier, root, files):
         return emit(blocked + out, blocked)
     rows = ledger(root, conf)
     doing = [r for r in rows if r[2] == "doing"]
-    for rel, n, _, _, fid in doing:
+    for rel, n, _, _, fid, _ in doing:
         if fid not in feats:
             out.append(finding(rel, n, "fdd-unknown", "%s is not in %s" % (fid, shown(root, fpath)),
                                "name a feature from the approved list; a new feature needs a new list approval"))
+        elif ("inspect", fid) in approvals:
+            out.append(finding(rel, n, "fdd-inspected", "%s is inspected; new work needs a new feature in the list"
+                               % fid, "inspections are final: add a feature for this work and ask for a list "
+                               "check-in. If it really is more of %s, ask the human to reopen it by approving its "
+                               "design again (%s design %s). If this task's work is finished, set it done"
+                               % (fid, approve_cmd(root), fid)))
+    out += branch_findings(root, conf, feats, rows, doing)
     scoped = [p for p in sorted(added)
               if not os.path.join(root, p).startswith(inside) and matches_any(p, conf["FDD_SCOPE"])]
     # A scope that matches nothing turns every gate below off. Said once there's a change outside
@@ -666,6 +698,86 @@ def cmd_check(tier, root, files):
     if tier == "full":
         write_report(root, d, conf, feats, approvals, rows)
     return emit(blocked + out, blocked)
+
+
+def plan_branch(root, rel):
+    """(branch, line no) from the 'Branch:' line tasks link wrote in the plan of tasks.json rel, or
+    ('', 0) when it isn't linked."""
+    for n, l in enumerate(read_lines(os.path.join(root, os.path.dirname(rel), "plan.md")), 1):
+        if l.startswith("Branch:"):   # the first: the header line tasks link writes after Commits:
+            return l[len("Branch:"):].strip(), n
+    return "", 0
+
+
+def base_branch(root, gconf):
+    """gitflow's base branch: GIT_BASE, else the remote's default branch, else main, else master."""
+    if gconf.get("GIT_BASE"):
+        return gconf["GIT_BASE"]
+    remote = gconf.get("GIT_REMOTE") or "origin"
+    b = git(root, "symbolic-ref", "-q", "--short", "refs/remotes/%s/HEAD" % remote).strip()
+    if b.startswith(remote + "/"):
+        return b[len(remote) + 1:]
+    if subprocess.run(["git", "-C", root, "show-ref", "-q", "--verify", "refs/heads/main"]).returncode != 0 and \
+            subprocess.run(["git", "-C", root, "show-ref", "-q", "--verify", "refs/heads/master"]).returncode == 0:
+        return "master"
+    return "main"
+
+
+def branch_findings(root, conf, feats, rows, doing):
+    """fdd-wrong-branch for a doing task: its plan is linked (tasks link) to another branch than the
+    current one; or this branch is linked to another plan whose tasks name only other features
+    (the base branch aside); or, when GIT_BRANCH in .agents/git.conf puts the ticket in branch
+    names, this branch's ticket isn't the feature's. Nothing on a detached HEAD, with no links,
+    or without that template."""
+    cur = git(root, "symbolic-ref", "-q", "--short", "HEAD").strip()
+    if not cur or not doing:
+        return []
+    plans = {}   # plan dir -> ((branch, line), {feature IDs its tasks name})
+    for r in rows:
+        dr = os.path.dirname(r[0])
+        if dr not in plans:
+            plans[dr] = (plan_branch(root, r[0]), set())
+        plans[dr][1].add(r[4])
+    gconf = read_conf(os.path.join(root, ".agents", "git.conf"), "GIT_")
+    tickets = "{ticket}" in gconf.get("GIT_BRANCH", "")
+    bt = re.search(conf["ticket"], cur) if tickets else None
+    bt = bt.group(0) if bt else ""
+    base, out, seen = None, [], set()
+    for rel, n, _, _, fid, tid in doing:
+        dr = os.path.dirname(rel)
+        slug = os.path.basename(dr)
+        paused = ". If this work is paused, set its task back to todo (tasks set %s %s todo)" % (slug, tid)
+        (linked, ln), _ = plans[dr]
+        if linked and linked != cur:
+            if dr not in seen:
+                seen.add(dr)
+                out.append(finding(os.path.join(dr, "plan.md"), ln, "fdd-wrong-branch",
+                                   "%s's plan %s is linked to branch %s, but this is %s" % (fid, slug, linked, cur),
+                                   "switch to %s for this work (git switch %s). If the human moved the work here, "
+                                   "tasks link %s%s" % (linked, linked, slug, paused)))
+            continue
+        if fid not in feats:
+            continue
+        others = sorted(p for p, ((b, _), fs) in plans.items() if p != dr and b == cur and fid not in fs)
+        if linked != cur and others:
+            base = base or base_branch(root, gconf)
+            if cur != base:
+                names = sorted(set().union(*(plans[p][1] for p in others)))
+                out.append(finding(rel, n, "fdd-wrong-branch", "%s's task is doing on %s, the branch of plan %s (%s)"
+                                   % (fid, cur, ", ".join(os.path.basename(p) for p in others), ", ".join(names)),
+                                   "one feature per branch: start %s's own (gitflow start, then tasks link %s), "
+                                   "or switch to it. If the human wants them to share it, tasks link %s here%s"
+                                   % (fid, slug, slug, paused)))
+                continue
+        ft = feats[fid].ticket
+        owner = [f.id for f in feats.values() if bt and f.ticket == bt]
+        if bt and bt != ft and (ft or owner):
+            out.append(finding(rel, n, "fdd-wrong-branch", "%s's task is doing on %s, whose ticket %s %s"
+                               % (fid, cur, bt, "is %s's" % owner[0] if owner else "isn't %s's (%s)" % (fid, ft)),
+                               ("switch to %s's branch, or start it: gitflow start %s <summary>" % (fid, ft) if ft
+                                else "start a branch for %s; ask the human which ticket it goes under" % fid)
+                               + paused))
+    return out
 
 
 def not_local(root, d, fpath):
@@ -795,6 +907,10 @@ def cmd_approve(root, args):
             return 1
         value = sha(dp)
     else:
+        why = not_built(root, conf, fid)
+        if why:
+            print("fdd: %s isn't built yet, so there's nothing to inspect: %s" % (fid, why), file=sys.stderr)
+            return 1
         value = git(root, "rev-parse", "-q", "--verify", "HEAD").strip()
         if not value:
             print("fdd: nothing is committed yet; inspect after the feature's commit", file=sys.stderr)
@@ -813,6 +929,24 @@ def cmd_approve(root, args):
     if earlier:
         print("also " + earlier)
     return 0
+
+
+def not_built(root, conf, fid):
+    """Why fdd approve inspect refuses, for the person at the terminal; '' once a plan task for the
+    feature is done with a commit git finds (the built milestone)."""
+    done = [r for r in ledger(root, conf) if r[4] == fid and r[2] == "done" and r[3]]
+    if any(commit_found(root, r[3]) for r in done):
+        return ""
+    if done:
+        def safe(t, n=64):   # ledger text, shown in a person's terminal
+            return re.sub(r"[^\w.-]", "?", str(t))[:n]
+        rel, _, _, c, _, tid = done[0]
+        slug, tid = safe(os.path.basename(os.path.dirname(rel))), safe(tid)
+        return ("its done task (%s %s) records commit %s, which isn't a commit in this repo, so fdd status "
+                "shows it as 'built (commit not found)'. Have the agent record the real commit (tasks set %s %s "
+                "done <sha>), then run this again." % (slug, tid, safe(c, 16), slug, tid))
+    return ("no plan task for it is done with its commit recorded (.agents/bin/tasks list shows the plans). "
+            "Run this again once the code is committed and the agent has set the task done with that commit.")
 
 
 def record(root, lines):

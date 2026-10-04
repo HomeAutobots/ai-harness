@@ -12,6 +12,10 @@ case "$gd" in
   /*) cat "$gd/ai-harness/fdd-approvals" "$gd/ai-harness/simulated-human" 2>/dev/null ;;
   *) cat "$AGENTS_ROOT/$gd/ai-harness/fdd-approvals" "$AGENTS_ROOT/$gd/ai-harness/simulated-human" 2>/dev/null ;;
 esac
+# The wrong-branch check reads the current branch, each plan's Branch: line (tasks link), and git.conf.
+git -C "$AGENTS_ROOT" symbolic-ref -q HEAD 2>/dev/null
+grep -H '^Branch:' "$AGENTS_ROOT"/.agents/plans/*/plan.md 2>/dev/null
+cat "$AGENTS_ROOT/.agents/git.conf" 2>/dev/null
 [ -d "$d" ] || exit 0
 find "$d" -type f | LC_ALL=C sort | while IFS= read -r f; do
   printf '%s\n' "$f"
