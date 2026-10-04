@@ -812,6 +812,11 @@ t    "human editor path works"         bash -c "cd '$T' && GIT_EDITOR='$WORK/edi
 tnot "empty optional tidied away"      bash -c "git -C '$T' log -1 --format=%B | grep -q '^Notes:'"
 t    "trailer prefilled for humans"    bash -c "git -C '$T' log -1 --format=%B | grep -qx 'Refs: TCU-7'"
 t    "check passes on template commits" bash -c "cd '$T' && .agents/bin/gitflow check"
+cp "$T/.agents/git/commit.md" "$WORK/committpl.md"
+printf '{ticket}: {summary}\n\n# Why is this change needed?\nWhy: {why}\n\nRefs: {ticket}\n' > "$T/.agents/git/commit.md"
+echo 4 > "$T/four.txt"; git -C "$T" add four.txt
+t    "a template with no optional section: the message survives the hook" bash -c "cd '$T' && .agents/bin/gitflow commit 'No optional parts' --section Why=because >/dev/null 2>&1 && git log -1 --format=%B | grep -qx 'Why: because' && git log -1 --format=%s | grep -qx 'TCU-7: No optional parts'"
+cp "$WORK/committpl.md" "$T/.agents/git/commit.md"
 edit "$T/.agents/git.conf" 's|^GIT_COMMIT_TEMPLATE=.*||'
 cp "$T/.agents/git/commit.md" "$T/.gitmessage"; git -C "$T" config --local commit.template .gitmessage
 t    "repo commit.template picked up"  bash -c "cd '$T' && .agents/bin/gitflow config | grep -q 'commit template in effect: .gitmessage'"

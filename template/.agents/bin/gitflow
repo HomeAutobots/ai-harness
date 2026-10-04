@@ -862,12 +862,14 @@ tidy_optional() {  # drop optional template sections a human left empty, then co
   local f="$1" t
   t="$(commit_template)"; [ -n "$t" ] || return 0
   template_model "$t" | awk -F '\t' '$1 == "field" && $2 == 1 { print $3 }' > "$f.opt"
-  awk 'NR == FNR { opt[$0] = 1; next }
+  # The list goes in with -v, not as a first file: with no optional fields it's empty, and as a
+  # first file it would swallow the whole message.
+  AGENTS_OPTF="$f.opt" awk 'BEGIN { while ((getline l < ENVIRON["AGENTS_OPTF"]) > 0) opt[l] = 1 }
     {
       if (match($0, /^[A-Za-z][A-Za-z0-9 _-]*:[ \t]*$/)) { l = substr($0, 1, index($0, ":") - 1); if (l in opt) next }
       if ($0 ~ /^[ \t]*$/) { if (blank) next; blank = 1 } else blank = 0
       print
-    }' "$f.opt" "$f" > "$f.tidy" && mv "$f.tidy" "$f"
+    }' "$f" > "$f.tidy" && mv "$f.tidy" "$f"
   rm -f "$f.opt"
 }
 
