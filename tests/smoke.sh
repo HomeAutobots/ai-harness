@@ -3466,6 +3466,54 @@ if [ "$HAVE_PY" -eq 1 ]; then
   git -C "$K" checkout -q -f "$KM"; git -C "$K" branch -q -D fresh-root
   rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
   t    "cleaned up: passes"             test "$("$KV" --since="$KB" 2>&1)" = "ok verify turn"
+  echo "debug: playbook format"
+  KP="$K/.agents/debug/playbook.md"
+  t    "absence: the seeded playbook passes" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  printf -- '- run: ./sim --scenario <file>\n- context: docs/sim.md\n- skill: validate\n' >> "$KP"
+  t    "real bindings pass, with no session open" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  printf '## lunch\n- tool: fork\n- just a note\n- context: docs/missing.md\n- skill: no-such-skill\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "a section that isn't a step"    hasl "$out" "playbook.md:$(line_of "$KP" '## lunch'): error: [debug-playbook-format] 'lunch' isn't a step a debug workflow binds"
+  t    "a binding it doesn't know"      hasl "$out" "playbook.md:$(line_of "$KP" 'tool: fork'): error: [debug-playbook-format] 'tool:' isn't a binding"
+  t    "a line that isn't a binding"    hasl "$out" "'just a note' isn't a binding"
+  t    "a context that doesn't exist"   hasl "$out" "[debug-playbook-format] context docs/missing.md doesn't exist"
+  t    "a skill that doesn't resolve"   hasl "$out" "[debug-playbook-format] skill no-such-skill doesn't resolve"
+  trc  "the edit tier checks an edited playbook" 1 "$K/.agents/bin/check" .agents/debug/playbook.md
+  t    "the turn tier doesn't"          test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- run:\n' >> "$KP"
+  t    "an empty binding"               hasl "$("$KV" --tier=full 2>&1)" "playbook.md:$(wc -l < "$KP" | tr -d ' '): error: [debug-playbook-format] run: has nothing after it"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- context: ../outside.md\n- context: %s\n- context: `docs/sim.md`\n- run: touch %s\n' "$K/docs/sim.md" "$WORK/playbook-ran" >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "a context that leaves the repo" hasl "$out" "playbook.md:$(line_of "$KP" 'context: ../outside.md'): error: [debug-playbook-format] context ../outside.md is outside the repo"
+  t    "...or is absolute, even when it exists" hasl "$out" "[debug-playbook-format] context $K/docs/sim.md is outside the repo"
+  t    "...and a quoted one in the repo passes" test "$(printf '%s\n' "$out" | grep -c '\[debug-playbook-format\]')" = 2
+  tnot "a run: line is never run"       test -e "$WORK/playbook-ran"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- skill: no-such-skill\n' >> "$KP"; printf 'LIBRARIES="vendor/skills"\n' >> "$K/.agents/harness.conf"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "a skill that doesn't resolve while a listed library isn't here: a tooling problem" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qF \"the playbook's skill no-such-skill isn't available: LIBRARIES lists vendor/skills, which isn't here\"" _ "$out"
+  git -C "$K" checkout -q .agents/debug/playbook.md .agents/harness.conf
+  printf -- '```\n## lunch\n- tool: fork\n```\n- run: ./sim\n' >> "$KP"
+  t    "fenced lines are examples, not bindings" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- run: ./sim --scenario <file>\n' >> "$KP"
+  fresh 10
+  t    "status stops listing a step once it has a binding" hasl "$("$KX" status)" "steps with no playbook bindings: intake, reproduce, gather-evidence ("
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  echo "debug: linked worktrees"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  git -C "$K" worktree add -q -b wt "$WORK/debugchk-wt"
+  "$KX" start bug "#20" >/dev/null
+  (cd "$WORK/debugchk-wt" && .agents/commands/debug start bug "#20" >/dev/null)
+  t    "the same slug in two worktrees: each has its own session" test -f "$WORK/debugchk-wt/.agents/debug/sessions/bug-20/state"
+  t    "...the main worktree still finds its own" hasl "$("$KX" status 2>&1)" "session: bug-20 "
+  t    "...and so does the linked one"  hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
+  "$KX" close bug-20 abandoned -- worktree test >/dev/null
+  t    "...closing one leaves the other open" hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
+  git -C "$K" worktree remove --force "$WORK/debugchk-wt"; git -C "$K" branch -q -D wt
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
 fi
 }
 group grp_debug_checks

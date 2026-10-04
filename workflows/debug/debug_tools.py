@@ -812,8 +812,8 @@ def committed(ctx):
     harness_made) while a session is open. With a current session, every such commit not in the
     history of where it started; without one (the agent switched branches), each commit that
     descends from where an open session started, when the turn started on that session's branch,
-    naming the session. One finding per commit,
-    oldest first, at its first file's first changed line; past 5, the fifth names the rest."""
+    naming the session. One finding per commit, oldest first, at its first file's first changed
+    line; past 5, the fifth names the rest."""
     if ctx.tier not in ("turn", "full") or not ctx.conf["DEBUG_SCOPE"].split() or \
             not os.environ.get("AGENTS_SINCE", "").split():
         return []
@@ -894,6 +894,90 @@ def committed_fix(root, c):
                   "later commit), or ask the human" % (", ".join(on[:3]) or "no local branch", c[:7]))
 
 
+def resolvable_skills(root):
+    """The skill names the resolver finds for this project (every library and active pack), the
+    same list checks/state.sh puts in verify's cache key. A resolver that fails is a tooling problem."""
+    lib = os.path.join(root, ".agents", "lib", "libraries.sh")
+    try:
+        p = subprocess.run(["bash", lib, "resolve", "skills"], capture_output=True, text=True, errors="replace",
+                           env=dict(os.environ, AGENTS_ROOT=root))
+    except OSError as e:
+        raise ConfError("can't run the skill resolver (.agents/lib/libraries.sh): %s" % e)
+    if p.returncode != 0:
+        raise ConfError("the skill resolver (.agents/lib/libraries.sh resolve skills) failed: %s"
+                        % one_line(p.stderr)[:200])
+    return {l.split("\t")[0] for l in p.stdout.splitlines() if l}
+
+
+def missing_libraries(root):
+    """The resolver's note while a library LIBRARIES lists isn't here ('LIBRARIES lists <path>, which
+    isn't here'), else ''."""
+    lib = os.path.join(root, ".agents", "lib", "libraries.sh")
+    try:
+        return subprocess.run(["bash", "-c", '. "$1" && agents_missing_note', "_", lib], capture_output=True,
+                              text=True, errors="replace", env=dict(os.environ, AGENTS_ROOT=root)).stdout.strip()
+    except OSError:
+        return ""
+
+
+def outside(path):
+    """True when a context: path isn't a repo-relative path inside the repo: absolute (or ~), or one
+    whose ../ parts climb out of it."""
+    if os.path.isabs(path) or path.startswith("~"):
+        return True
+    rel = os.path.normpath(path)
+    return rel == ".." or rel.startswith(".." + os.sep)
+
+
+@check
+def playbook_format(ctx):
+    """debug-playbook-format (edit when the playbook is edited, full): a section that isn't a step
+    any shipped kind binds, a list item that isn't a skill:, run:, or context: binding, an empty
+    binding, a context: path outside the repo or missing from it, or a skill: the resolver doesn't
+    find (a tooling problem instead while a library LIBRARIES lists isn't here: it may have the
+    skill, as verify does for packs). Judged with or without a session: harness-tailor writes the
+    playbook before any. run: lines are never run. Lines in ``` and ~~~ fences are examples
+    (read_playbook skips them). Findings in line order."""
+    pb = playbook_path(ctx.root, ctx.conf)
+    if ctx.tier not in ("edit", "full") or not ctx.judged(pb):
+        return []
+    sections, heads, odd = read_playbook(pb)
+    known = sorted({s for k in shipped_kinds() for s in read_kind(k)["bindable"]})
+    hits, skills = [], None   # (line no, message, fix)
+    for n, h in heads:
+        if h not in known:
+            hits.append((n, "'%s' isn't a step a debug workflow binds" % h[:60],
+                         "name each section after a step: %s" % ", ".join(known)))
+    for n, text in odd:
+        hits.append((n, "'%s' isn't a binding" % text[:60],
+                     "write each list item as skill: <name>, run: <command>, or context: <path>; a note goes "
+                     "on a plain line, not a list item"))
+    for step in sections:
+        for n, key, value in sections[step]:
+            if key not in BINDINGS:
+                hits.append((n, "'%s:' isn't a binding" % key[:30], "use skill:, run:, or context:"))
+            elif not value:
+                hits.append((n, "%s: has nothing after it" % key, "fill it in, or delete the line"))
+            elif key == "context" and outside(value):
+                hits.append((n, "context %s is outside the repo" % value[:200],
+                             "point it at a doc in the repo, repo-relative (docs/sim.md), or delete the line"))
+            elif key == "context" and not os.path.exists(os.path.join(ctx.root, value)):
+                hits.append((n, "context %s doesn't exist" % value[:200],
+                             "point it at a doc in the repo (repo-relative), or delete the line"))
+            elif key == "skill":
+                skills = resolvable_skills(ctx.root) if skills is None else skills
+                if value in skills:
+                    continue
+                note = missing_libraries(ctx.root)
+                if note:
+                    raise ConfError("the playbook's skill %s isn't available: %s" % (value[:60], note))
+                hits.append((n, "skill %s doesn't resolve (not in this project, a library, or the built-ins)"
+                             % value[:60], "check the name (.agents/bin/sync lists the skills), or add the skill "
+                             "to .agents/library/skills/"))
+    rel = shown(ctx.root, pb)
+    return [finding(rel, n, "debug-playbook-format", msg, fix) for n, msg, fix in sorted(hits, key=lambda h: h[0])]
+
+
 # ------------------------------------------------------------------ the debug command
 
 CLI = {}   # name -> (function, usage line, options it takes), in the order usage lists them
@@ -972,9 +1056,10 @@ def cli(root, a):
 def read_playbook(path):
     """({step: [(line no, key, value)]}, [(line no, heading)], [(line no, text)]): the bindings in
     each '## <step>' section, every section heading, and every list item in a section that isn't a
-    '<key>: <value>' binding. Lines before the first section, and other lines, are notes."""
+    '<key>: <value>' binding. Lines before the first section, lines in ``` and ~~~ fences
+    (examples), and other lines are notes."""
     sections, heads, odd, cur = {}, [], [], None
-    for n, line in enumerate(read_lines(path), 1):
+    for n, line in unfenced(read_lines(path))[0]:
         if line.startswith("## "):
             cur = line[3:].strip()
             heads.append((n, cur))

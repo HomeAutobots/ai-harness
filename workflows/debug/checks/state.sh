@@ -42,9 +42,12 @@ git -C "$AGENTS_ROOT" ls-files -o --exclude-standard -z 2>/dev/null
   printf '%s\n' "$f"
   cat "$f"
 done
-# The playbook's skill: and context: lines resolve against the libraries and the repo.
+# The playbook's skill: and context: lines resolve against the libraries and the repo. A context
+# value is trimmed as debug_tools.py's read_playbook trims it (whitespace, then backquotes around it).
 if [ -f "$d/playbook.md" ]; then
-  sed -n 's/^[[:space:]]*[-*][[:space:]]*context:[[:space:]]*//p' "$d/playbook.md" | sed 's/[[:space:]]*$//' | while IFS= read -r c; do
+  # shellcheck disable=SC2016  # the backquotes are literal
+  sed -n 's/^[[:space:]]*[-*][[:space:]]*context:[[:space:]]*//p' "$d/playbook.md" |
+    sed 's/[[:space:]]*$//; s/^`*//; s/`*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | while IFS= read -r c; do
     case "$c" in /*) p="$c" ;; *) p="$AGENTS_ROOT/$c" ;; esac
     if [ -e "$p" ]; then echo "context $c: here"; else echo "context $c: missing"; fi
   done
