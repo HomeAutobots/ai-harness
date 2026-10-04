@@ -326,7 +326,7 @@ agents_lint() {
     rm -f "$raw" "$raw.f"
     return 0
   fi
-  if [ -f "$base" ]; then
+  if [ -s "$base" ]; then   # an empty one would make NR == FNR true for every finding too
     awk -F '\t' 'NR == FNR { b[$0] = 1; next } !($1 in b) { print $2 }' "$base" "$raw.f" > "$raw.new"
   else
     cut -f2- "$raw.f" > "$raw.new"

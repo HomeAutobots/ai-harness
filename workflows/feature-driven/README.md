@@ -89,6 +89,8 @@ counts, though, even one that doesn't touch `FDD_SCOPE` or belongs to another fe
   `fdd-approval-unrecorded` (exit 2) until you delete it. `fdd status` lists such lines as "not
   counted". The lines already there when a clone first runs `install.sh` or `fdd approve` from your
   terminal (an upgrade from before the record, a copied-in FDD dir) are recorded once and listed.
+  The record, the refusal, and the simulated human come from the harness's `.agents/lib/approvals.py`,
+  shared with other packs that have human gates; this pack's record key is in its `human-gates` file.
 - **When an agent plays you.** In a scratch repo, a pilot, or a demo, the "person" at the check-ins
   can itself be an agent, say a Claude Code session driving `claude -p` sessions in the repo. Install
   with `install.sh --workflow feature-driven --simulated-human <repo>`. It turns on a switch for

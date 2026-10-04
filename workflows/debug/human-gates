@@ -1,0 +1,3 @@
+# Record key for approvals only a person makes (.agents/lib/approvals.py):
+# debug approve and reject record each line in .git/ai-harness/debug-approvals.
+debug

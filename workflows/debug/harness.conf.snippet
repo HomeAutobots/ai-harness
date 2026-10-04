@@ -1,0 +1,13 @@
+# debug workflow (install.sh --workflow debug). The defaults fit most repos; harness-tailor only
+# narrows DEBUG_SCOPE when the tree has generated files git doesn't ignore.
+# Where the playbook (playbook.md) and the sessions (sessions/<slug>/) live, repo-relative or
+# absolute. Sessions stay local (the seeded .gitignore); the playbook is shared in team mode.
+# Another directory doesn't get that .gitignore: keep its sessions/ out of git yourself.
+DEBUG_DIR=".agents/debug"
+# Debugging workflows that are on: bug (test, crash, and field come later).
+DEBUG_KINDS="bug"
+# Where experiments must be gone before the root-cause check-in (space-separated globs).
+# Empty turns off the experiments check and debug-committed.
+DEBUG_SCOPE="**"
+# Check-ins that need your approval (debug approve): rootcause. Empty means an agent review only.
+DEBUG_ASK="rootcause"

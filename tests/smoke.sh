@@ -10,6 +10,7 @@ trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
+unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK   # hygiene: the debug pack reads them from harness.conf only (tested)
 # shellcheck disable=SC2046  # one name per word
 unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT $(compgen -v PY_ || true)   # the python stack reads these; an activated venv mustn't decide its tests
 
@@ -58,6 +59,9 @@ handmade() {  # handmade <project>: a pack and its skill someone made by hand in
   edit "$p/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="handmade"/'
 }
 mkagent(){ mkdir -p "$1/agents"; printf -- '---\ndescription: %s\n%s---\nYou review diffs.\n' "${3:-An agent.}" "${4:-}" > "$1/agents/$2.md"; }
+rcdoc() {  # rcdoc <file> <confidence>: a debug root-cause.md in the fixed format, citing E-1 and H-1
+  printf '# Root cause\n\n## Summary\nadd() subtracts.\n\n## Cause\nsrc/calc.c:1 returns a - b.\n\n## Evidence\nE-1 shows it (H-1).\n\n## Reproduction\nE-1.\nConfidence: %s\n\n## Ruled out\nNothing else fit.\n\n## Fix direction\nReturn the sum.\n' "$2" > "$1"
+}
 
 # --- groups: sections run in parallel -----------------------------------------------------------
 # A group is a function holding one or more whole sections. `group <fn>` right after it starts it
@@ -171,6 +175,7 @@ t    "core block rendered"             grep -q '^## Harness rules' "$P/AGENTS.md
 t    "core block has no version string" bash -c "! grep -q 'ai-harness [0-9]' '$P/AGENTS.md'"
 t    "skills index lists all built-ins" bash -c "grep -q '\`plan-task\`' '$P/AGENTS.md' && grep -q '\`review-diff\`' '$P/AGENTS.md' && grep -q '\`harness-tailor\`' '$P/AGENTS.md' && grep -q '\`validate\`' '$P/AGENTS.md'"
 t    "CLAUDE.md imports AGENTS.md"     grep -q '^@AGENTS.md$' "$P/CLAUDE.md"
+t    "the managed blocks carry no TODO(harness-tailor) marker (sync counts every one)" bash -c "! sed -n '/harness:[a-z]*:start/,/harness:[a-z]*:end/p' '$P/AGENTS.md' | grep -qF 'TODO(harness-tailor)'"
 t    "claude skill is a symlink"       test -L "$P/.claude/skills/review-diff"
 t    "version recorded"                grep -qx "$(cat "$HARNESS/VERSION")" "$P/.agents/HARNESS_VERSION"
 t    "sync --check clean"              "$P/.agents/bin/sync" --check
@@ -491,6 +496,14 @@ printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/lib/feedback.sh"\nagents_st
 commit "$SR" "tier"; echo x >> "$SR/README.md"
 out="$(cd "$SR" && .agents/bin/verify --no-cache 2>&1)" && rc=0 || rc=$?
 t    "verify: a tier step that exits 2 is FAIL (1), not BLOCK" bash -c "test '$rc' = 1 && printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify turn'" _ "$out"
+echo "agents_lint: an empty baseline hides nothing"
+printf '#!/bin/sh\necho "src/a.py:3:1: error: bad thing [X1]"\nexit 1\n' > "$AS/lintone"; chmod +x "$AS/lintone"
+alint(){ local rc=0; (cd "$SR" && AGENTS_ROOT="$SR" bash -c '. .agents/lib/feedback.sh; agents_lint demo "$1"' _ "$AS/lintone") >"$AS/out" 2>&1 || rc=$?; printf '%s' "$rc"; }
+mkdir -p "$SR/.agents/baselines"; : > "$SR/.agents/baselines/demo.txt"
+t    "agents_lint: an empty baseline still reports a new finding (1)" bash -c "test '$(alint)' = 1 && grep -qx 'src/a.py:3:1: error: bad thing \[X1\]' '$AS/out'"
+(cd "$SR" && AGENTS_ROOT="$SR" AGENTS_UPDATE_BASELINE=1 bash -c '. .agents/lib/feedback.sh; agents_lint demo "$1"' _ "$AS/lintone") >/dev/null 2>&1
+t    "...and once baselined, it passes" test "$(alint)" = 0
+rm -rf "$SR/.agents/baselines"
 }
 group grp_hook_gaps
 
@@ -799,6 +812,11 @@ t    "human editor path works"         bash -c "cd '$T' && GIT_EDITOR='$WORK/edi
 tnot "empty optional tidied away"      bash -c "git -C '$T' log -1 --format=%B | grep -q '^Notes:'"
 t    "trailer prefilled for humans"    bash -c "git -C '$T' log -1 --format=%B | grep -qx 'Refs: TCU-7'"
 t    "check passes on template commits" bash -c "cd '$T' && .agents/bin/gitflow check"
+cp "$T/.agents/git/commit.md" "$WORK/committpl.md"
+printf '{ticket}: {summary}\n\n# Why is this change needed?\nWhy: {why}\n\nRefs: {ticket}\n' > "$T/.agents/git/commit.md"
+echo 4 > "$T/four.txt"; git -C "$T" add four.txt
+t    "a template with no optional section: the message survives the hook" bash -c "cd '$T' && .agents/bin/gitflow commit 'No optional parts' --section Why=because >/dev/null 2>&1 && git log -1 --format=%B | grep -qx 'Why: because' && git log -1 --format=%s | grep -qx 'TCU-7: No optional parts'"
+cp "$WORK/committpl.md" "$T/.agents/git/commit.md"
 edit "$T/.agents/git.conf" 's|^GIT_COMMIT_TEMPLATE=.*||'
 cp "$T/.agents/git/commit.md" "$T/.gitmessage"; git -C "$T" config --local commit.template .gitmessage
 t    "repo commit.template picked up"  bash -c "cd '$T' && .agents/bin/gitflow config | grep -q 'commit template in effect: .gitmessage'"
@@ -1435,6 +1453,26 @@ printf -- '--- app.py\t2026-01-01 10:00:00.000000+00:00\n+++ app.py\t2026-01-01 
 out="$(pyedit "$PV" STUB_FMT_DIFF="$WORK/py-black.diff" 2>&1 || true)"
 t    "[tool.black]: black checks the format" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
 tnot "...and its diff's timestamps stay out" hasl "$out" '2026-01-01'
+# black reads .gitignore but not .git/info/exclude, where local mode hides the harness's own files.
+printf -- '--- .agents/lib/approvals.py\t2026-01-01 10:00:00.000000+00:00\n+++ .agents/lib/approvals.py\t2026-01-01 10:00:01.000000+00:00\n@@ -1,1 +1,1 @@\n-x=1\n+x = 1\n' > "$WORK/py-black-harness.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-harness.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+tnot "local mode: black's whole-project run leaves out what git ignores (the harness's own files)" hasl "$out" '.agents/lib/approvals.py:1: error: not formatted'
+tnot "...and isn't a failure for it" hasl "$out" 'black-format (exit'
+cat "$WORK/py-black.diff" "$WORK/py-black-harness.diff" > "$WORK/py-black-both.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-both.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...a project file in the same run still counts" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
+sed "s|^\([-+][-+][-+]\) |\1 $(cd "$PV" && pwd -P)/|" "$WORK/py-black-both.diff" > "$WORK/py-black-abs.diff"   # real black names files by absolute path
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-abs.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...named by absolute path too: the project file counts, as a repo path throughout" hasl "$out" 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'
+tnot "...and the harness file doesn't" hasl "$out" 'approvals.py:1: error'
+printf 'x=1\n' > "$PV/café.py"
+sed "s|app\.py|café.py|g" "$WORK/py-black-abs.diff" > "$WORK/py-black-utf8.diff"
+out="$(pyv "$PV" STUB_FMT_DIFF="$WORK/py-black-utf8.diff" .agents/bin/verify --tier=full --no-cache 2>&1 || true)"
+t    "...a file with a non-ASCII name still counts" hasl "$out" 'café.py:1: error: not formatted the way black formats it (run: black café.py) [black-format]'
+rm -f "$PV/café.py"
+mkdir -p "$WORK/pynogit"; cp -R "$PV/.agents" "$WORK/pynogit/"; printf 'def add(a,b):\n    return a + b\n' > "$WORK/pynogit/app.py"
+out="$(cd "$WORK/pynogit" && env PATH="$WORK/pystub:$PYNP" STUB_FMT_DIFF="$WORK/py-black.diff" AGENTS_ROOT="$WORK/pynogit" PY_FORMAT=black bash -c '. .agents/stacks/python/lib.sh; py_format_check_all' 2>&1)" && rc=0 || rc=$?
+t    "absence: outside git, black's whole-project findings all count" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'app.py:1: error: not formatted the way black formats it (run: black app.py) [black-format]'" _ "$out"
 git -C "$PV" checkout -q pyproject.toml
 printf 'def add(a, b):\n    return a + b + 0\n' > "$PV/app.py"
 out="$(pyv "$PV" STUB_MYPY_OUT='other.py:2: error: Returning Any  [no-any-return]' .agents/bin/verify --no-cache 2>&1 || true)"
@@ -2126,7 +2164,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   # Misuse is refused before anything changes.
   P=$(repo simh-plain)
   out="$("$HARNESS/install.sh" --simulated-human "$P" 2>&1)" && rc=0 || rc=$?
-  t    "--simulated-human without feature-driven is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes feature-driven approvals; add --workflow feature-driven'" _ "$out"
+  t    "--simulated-human without a pack with human gates is refused" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes approvals in workflow packs with human gates (.*feature-driven.*); add one with --workflow'" _ "$out"
   tnot "...before anything is installed" test -e "$P/.agents"
   mkdir -p "$WORK/simh-nogit"
   out="$("$HARNESS/install.sh" --workflow feature-driven --simulated-human "$WORK/simh-nogit" 2>&1)" && rc=0 || rc=$?
@@ -2536,6 +2574,1123 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_fdd_trace
+grp_approvals() {   # .agents/lib/approvals.py: the record and the simulated human, shared by packs with human gates
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "shared approvals: any pack with human gates"
+  AH="$WORK/ah"; mkdir -p "$AH"   # a copy of the harness plus a gated test pack
+  cp -R "$HARNESS/install.sh" "$HARNESS/VERSION" "$HARNESS/template" "$HARNESS/stacks" "$HARNESS/workflows" "$AH/"
+  GP="$AH/workflows/gated"; mkdir -p "$GP/skill"
+  printf -- '---\nname: gated\ndescription: Test pack with a human gate.\n---\n\n# Gated\n' > "$GP/skill/SKILL.md"
+  printf '# record key for approvals only a person makes\ngated\n' > "$GP/human-gates"
+  Q=$(repo ah-on)
+  out="$(CLAUDECODE=1 "$AH/install.sh" --team --workflow gated --simulated-human "$Q" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human works with any pack that has a human-gates file" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q 'install: simulated human: on (install.sh --simulated-human, run from a Claude Code shell)'" _ "$out"
+  QS="$Q/.git/ai-harness/simulated-human"
+  t    "...its hash goes in that pack's record" bash -c "grep -qx \"#simulated-human	\$(sed -n 's/^on	\([0-9a-f]*\)	.*/\1/p' '$QS')\" '$Q/.git/ai-harness/gated-approvals'"
+  t    "...and no other pack's (gated is the only active one)" test "$(cd "$Q/.git/ai-harness" && ls -- *-approvals)" = gated-approvals
+  TOKQ="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
+  t    "the lib reports the switch to install.sh" bash -c "cd '$Q' && python3 .agents/lib/approvals.py simulated-human . | grep -q '^simulated human: on (install.sh --simulated-human'"
+  lib(){ (cd "$Q" && python3 -c "import sys; sys.path.insert(0, '.agents/lib'); import approvals as a; $1"); }
+  out="$(CLAUDECODE=1 lib 'sys.exit(0 if a.refused("gated", "approving", a.Switch(".")) else 1)' 2>&1)" && rc=0 || rc=$?
+  t    "refused(): an agent shell without the token" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qx \"gated: approving is the human's step, and this shell was started by Claude Code (CLAUDECODE is set). Run it in your own terminal.\"" _ "$out"
+  trc  "refused(): the token lets it through" 1 env CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKQ" bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; sys.exit(0 if a.refused(\"gated\", \"approving\", a.Switch(\".\")) else 1)'"
+  trc  "refused(): a person's terminal is never refused" 1 bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; sys.exit(0 if a.refused(\"gated\", \"approving\", a.Switch(\".\")) else 1)'"
+  lib 'l, s = a.new_line(".", "gate", "x-1", "v", a.Switch(".")); a.record(".", "gated", [l]); open("approvals", "a").write(l + "\n" + "gate\tx-2\tme\t2026-10-03\tv\n")'
+  t    "new_line() marks a simulated approval in the line" grep -q '^gate	x-1	[^	]* (simulated human)	' "$Q/approvals"
+  t    "new_line(): a tab or line break in a field can't split the line" test "$(lib 'l, s = a.new_line(".", "ga\tte", "x\n1", "v\tw\r", a.Switch(".")); print(len(l.split("\t")), "\n" in l or "\r" in l)')" = "5 False"
+  out="$(lib 'a.record(".", "gated", ["#simulated-human\tx"])' 2>&1 || true)"
+  t    "record() refuses a marker line, and writes nothing" bash -c "printf '%s' \"\$1\" | grep -q 'ValueError: not an approvals line' && ! grep -q '^#simulated-human	x\$' '$Q/.git/ai-harness/gated-approvals'" _ "$out"
+  trc  "record() refuses a line without five fields" 1 bash -c "cd '$Q' && python3 -c 'import sys; sys.path.insert(0, \".agents/lib\"); import approvals as a; a.record(\".\", \"gated\", [\"gate\\tx-3\\tme\"])'"
+  cp "$Q/.git/ai-harness/gated-approvals" "$WORK/ah.rec"
+  out="$(lib 'import re; h = re.search(r"^on\t([0-9a-f]+)\t", open(".git/ai-harness/simulated-human").read(), re.M).group(1); a.record(".", "gated", ["x\u2028#simulated-human\t" + h + "\u2028y\tc\td\te"])' 2>&1 || true)"
+  t    "record() refuses a line a U+2028 breaks (a forged switch line), and writes nothing" bash -c "printf '%s' \"\$1\" | grep -q 'ValueError: not an approvals line' && cmp -s '$Q/.git/ai-harness/gated-approvals' '$WORK/ah.rec'" _ "$out"
+  t    "new_line(): a U+2028 or U+0085 in a field can't split the line" test "$(lib 'l, s = a.new_line(".", "ga\u2028te", "x\x851", "v", a.Switch(".")); print(len(l.splitlines()), len(l.split("\t")))')" = "1 5"
+  t    "classify(): a recorded line counts, a forged one doesn't" test "$(lib 'c, u, s = a.classify(".", "gated", "approvals"); print(len(c), [p[1] for _, p in u], len(s))')" = "1 ['x-2'] 0"
+  mv "$QS" "$WORK/ah.switch"
+  t    "classify(): with the switch off, a simulated line doesn't count" test "$(lib 'c, u, s = a.classify(".", "gated", "approvals"); print(len(c), len(u), [p[1] for _, p in s])')" = "0 1 ['x-1']"
+  cp "$WORK/ah.switch" "$QS"; rm -f "$Q/approvals"
+  out="$(python3 "$Q/.agents/lib/approvals.py" 2>&1)" && rc=0 || rc=$?
+  t    "approvals.py: no command prints the usage (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'approvals.py simulated-human <root> \[on\] \[key...\]'" _ "$out"
+  for k in Bad_Key on; do
+    out="$(cd "$Q" && AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 python3 .agents/lib/approvals.py simulated-human . on "$k" 2>&1)" && rc=0 || rc=$?
+    t    "approvals.py: record key '$k' is refused (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'needs the record key of a workflow pack with human gates'" _ "$out"
+  done
+  out="$(cd "$Q" && AGENTS_SIMULATED_HUMAN=0123456789abcdef0123 python3 .agents/lib/approvals.py simulated-human . on 2>&1)" && rc=0 || rc=$?
+  t    "approvals.py: turning it on without a key is refused (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'needs the record key'" _ "$out"
+  t    "...and the switch is the one install.sh wrote" cmp -s "$QS" "$WORK/ah.switch"
+  # A clone switched on before the shared lib has the hash in fdd-approvals only: it still counts.
+  F2=$(repo ah-old)
+  "$AH/install.sh" --team --workflow feature-driven --workflow gated --simulated-human "$F2" >/dev/null 2>&1
+  t    "with two gated packs, both records hold the hash" bash -c "grep -q '^#simulated-human	' '$F2/.git/ai-harness/fdd-approvals' && grep -q '^#simulated-human	' '$F2/.git/ai-harness/gated-approvals'"
+  trc  "the policy blocks approvals.py simulated-human" 2 policy "$F2" test "python3 .agents/lib/approvals.py simulated-human . on fdd"
+  tnot "fdd_tools leaves no bytecode in .agents/lib" test -e "$F2/.agents/lib/__pycache__"
+  mv "$F2/.agents/lib/approvals.py" "$WORK/ah.approvals.py"
+  out="$(cd "$F2" && python3 .agents/builtin/workflows/feature-driven/fdd_tools.py status . 2>&1)" && rc=0 || rc=$?
+  t    "fdd_tools without .agents/lib/approvals.py: infra (3), re-run install.sh" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: this project's harness has no .agents/lib/approvals.py; re-run install.sh\"" _ "$out"
+  trc  "...while an unknown command still gets the usage (2)" 2 bash -c "cd '$F2' && python3 .agents/builtin/workflows/feature-driven/fdd_tools.py bogus ."
+  mv "$WORK/ah.approvals.py" "$F2/.agents/lib/approvals.py"
+  edit "$F2/.git/ai-harness/gated-approvals" '/^#simulated-human/d'
+  t    "a hash in any pack's record keeps the switch on (an older clone)" bash -c "cd '$F2' && python3 .agents/lib/approvals.py simulated-human . | grep -q '^simulated human: on'"
+  edit "$F2/.git/ai-harness/fdd-approvals" '/^#simulated-human/d'
+  t    "...and in none, it's off"         bash -c "cd '$F2' && python3 .agents/lib/approvals.py simulated-human . | grep -q \"^simulated human: off, .git/ai-harness/simulated-human wasn't written by install.sh --simulated-human\""
+  # Refusals happen before anything changes.
+  Z=$(repo ah-none)
+  out="$("$HARNESS/install.sh" --team --simulated-human "$Z" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human without a gated pack names the ones that have gates" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'only changes approvals in workflow packs with human gates (.*feature-driven.*); add one with --workflow'" _ "$out"
+  tnot "...before anything is installed" test -e "$Z/.agents"
+  UG="$AH/workflows/ungated"; mkdir -p "$UG/skill"
+  printf -- '---\nname: ungated\ndescription: No human gate.\n---\n' > "$UG/skill/SKILL.md"
+  trc  "a pack without a human-gates file doesn't count" 2 "$AH/install.sh" --team --workflow ungated --simulated-human "$Z"
+  BG="$AH/workflows/badgate"; mkdir -p "$BG/skill"
+  printf -- '---\nname: badgate\ndescription: A human-gates file with no key.\n---\n' > "$BG/skill/SKILL.md"
+  printf '# no key here\nBad Key\non\n' > "$BG/human-gates"
+  out="$("$AH/install.sh" --team --workflow badgate --simulated-human "$Z" 2>&1)" && rc=0 || rc=$?
+  t    "a human-gates file that names no key ('on' isn't one) fails (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q 'badgate/human-gates names no record key'" _ "$out"
+  tnot "...before anything is installed" test -e "$Z/.agents"
+  # Absence: no gated pack, no switch and no record.
+  "$HARNESS/install.sh" --team "$Z" >/dev/null 2>&1
+  t    "absence: no gated pack, no record and no switch" bash -c "! ls '$Z'/.git/ai-harness/*-approvals >/dev/null 2>&1 && test ! -e '$Z/.git/ai-harness/simulated-human'"
+  tnot "absence: the install summary says nothing about it" bash -c "'$HARNESS/install.sh' --team '$Z' 2>&1 | grep -q 'simulated human'"
+  tnot "absence: no debug skill without --workflow debug" test -e "$Z/.agents/skills/debug"
+  tnot "...and none in AGENTS.md"       grep -q '^- `debug`: ' "$Z/AGENTS.md"
+fi
+}
+group grp_approvals
+grp_debug() {   # the debug pack (docs/specs/2026-10-03-debug-workflows-design.md): install, the CLI, sessions
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflow: install and absence"
+  G=$(repo debug)
+  mkdir -p "$G/src"; printf 'int add(int a, int b) { return a - b; }\n' > "$G/src/calc.c"; commit "$G" base
+  "$HARNESS/install.sh" --team --workflow debug "$G" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$G/.agents/checks/$tier.sh"; done
+  commit "$G" harness
+  GX="$G/.agents/commands/debug"; GD="$G/.agents/debug"
+  t    "debug settings appended, with their defaults" bash -c "grep -qx 'DEBUG_DIR=\".agents/debug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_KINDS=\"bug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_SCOPE=\"\*\*\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_ASK=\"rootcause\"' '$G/.agents/harness.conf'"
+  t    "approve and reject denied in policy" bash -c "grep -q '^deny-cmd .agents/commands/debug approve' '$G/.agents/policy.conf' && grep -q '^deny-cmd .agents/commands/debug reject' '$G/.agents/policy.conf'"
+  t    "playbook seeded"                 test -f "$GD/playbook.md"
+  t    "...and shared in team mode"      git -C "$G" ls-files --error-unmatch .agents/debug/playbook.md
+  t    "sessions stay local"             bash -c "mkdir -p '$GD/sessions/x' && touch '$GD/sessions/x/state' && git -C '$G' check-ignore -q .agents/debug/sessions/x/state"
+  rm -rf "$GD/sessions"
+  t    "debug command wrapper written"   test -x "$GX"
+  t    "debug --help: usage, exit 0"     bash -c "'$GX' --help | grep -q '^usage: debug'"
+  trc  "--help among other words: exit 3" 3 "$GX" --help start
+  trc  "an unknown command: usage, exit 2" 2 "$GX" frobnicate
+  trc  "a leading unknown option: exit 3" 3 "$GX" --verbose status
+  t    "debug --help works outside a project" bash -c "cd '$WORK' && env -u AGENTS_ROOT '$HARNESS/workflows/debug/bin/debug' --help | grep -q '^usage: debug'"
+  trc  "...while a command there still needs one (2)" 2 bash -c "cd '$WORK' && env -u AGENTS_ROOT '$HARNESS/workflows/debug/bin/debug' status"
+  t    "absence: no session, verify quiet" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  t    "absence: no session, full tier quiet" test "$("$G/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  tnot "debug_tools leaves no bytecode in .agents/lib" test -e "$G/.agents/lib/__pycache__"
+  mv "$G/.agents/lib/approvals.py" "$WORK/debug.approvals.py"
+  out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
+  t    "debug_tools without .agents/lib/approvals.py: infra (3), re-run install.sh" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: this project's harness has no .agents/lib/approvals.py; re-run install.sh\"" _ "$out"
+  t    "...while debug --help still works" bash -c "'$GX' --help | grep -q '^usage: debug'"
+  trc  "...and an unknown command still gets the usage (2)" 2 "$GX" frobnicate
+  mv "$WORK/debug.approvals.py" "$G/.agents/lib/approvals.py"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$G/src/calc.c"
+  t    "absence: no session, a change in scope passes" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  git -C "$G" checkout -q src/calc.c
+  trc  "the policy blocks an agent's debug approve" 2 policy "$G" test ".agents/commands/debug approve bug-1"
+  trc  "...debug reject"                 2 policy "$G" test ".agents/commands/debug reject bug-1 nope"
+  trc  "...spelled through debug_tools.py" 2 policy "$G" test "python3 .agents/builtin/workflows/debug/debug_tools.py cli . approve bug-1"
+  trc  "...with a quoted root that has a space" 2 policy "$G" test "python3 .agents/builtin/workflows/debug/debug_tools.py cli \"/my repo\" approve x"
+  trc  "...and the shared simulated-human command" 2 policy "$G" test "python3 .agents/lib/approvals.py simulated-human . on debug"
+  trc  "naming it in a one-line tasks ask is fine" 0 policy "$G" test ".agents/bin/tasks ask bug-1 T1 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  trc  "debug status and run aren't blocked" 0 policy "$G" test ".agents/commands/debug status"
+  trc  "...debug run"                     0 policy "$G" test ".agents/commands/debug run reproduce -- make test"
+  hook "$G" turn-start claude '{"session_id":"g1"}' >/dev/null 2>&1
+  edit "$G/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
+  t    "the stop gate notes a DEBUG_* change in the turn" hasl "$(hook "$G" stop-gate claude '{"session_id":"g1"}' 2>&1)" "harness.conf changed during this turn: DEBUG_SCOPE"
+  edit "$G/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="**"/'
+  # An install from before a DEBUG_* key has no line for it: each key means its default.
+  cp "$G/.agents/harness.conf" "$WORK/debug.conf"
+  edit "$G/.agents/harness.conf" '/^DEBUG_/d'
+  t    "upgrade: no DEBUG_* lines, verify quiet" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  t    "...full tier quiet"              test "$("$G/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  t    "...debug --help works"           bash -c "'$GX' --help | grep -q '^usage: debug'"
+  GP="$G/.agents/builtin/workflows/debug"
+  GC="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print('[%s]' % d.load_conf(sys.argv[2])[sys.argv[3]])"
+  t    "...a missing DEBUG_ASK means rootcause" test "$(python3 -B -c "$GC" "$GP" "$G" DEBUG_ASK 2>&1)" = "[rootcause]"
+  printf 'DEBUG_ASK=""\nDEBUG_DIR=""\n' >> "$G/.agents/harness.conf"
+  t    "DEBUG_ASK=\"\" means agent review only" test "$(python3 -B -c "$GC" "$GP" "$G" DEBUG_ASK 2>&1)" = "[]"
+  t    "DEBUG_DIR=\"\" means the default" test "$(python3 -B -c "$GC" "$GP" "$G" DEBUG_DIR 2>&1)" = "[.agents/debug]"
+  printf 'DEBUG_ASK="rootcause bogus"\n' >> "$G/.agents/harness.conf"
+  out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
+  t    "an unknown DEBUG_ASK check-in: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_ASK: unknown check-in 'bogus' (rootcause)\"" _ "$out"
+  cp "$WORK/debug.conf" "$G/.agents/harness.conf"
+  printf 'DEBUG_KINDS="bug crash"\n' >> "$G/.agents/harness.conf"
+  out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
+  t    "an unknown DEBUG_KINDS workflow: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_KINDS: unknown workflow 'crash' (bug)\"" _ "$out"
+  cp "$WORK/debug.conf" "$G/.agents/harness.conf"
+  H=$(repo debug-simh)
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$H" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human works with debug alone" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q 'install: simulated human: on'" _ "$out"
+  t    "...recorded in debug's record"   grep -q '^#simulated-human	' "$H/.git/ai-harness/debug-approvals"
+  N=$(repo debug-none); "$HARNESS/install.sh" --team "$N" >/dev/null 2>&1
+  t    "absence: no pack, no DEBUG_* settings, command, dir, or rules" bash -c "! grep -q '^DEBUG_' '$N/.agents/harness.conf' && test ! -e '$N/.agents/commands/debug' && test ! -e '$N/.agents/debug' && ! grep -q 'debug approve' '$N/.agents/policy.conf'"
+fi
+}
+group grp_debug
+
+grp_debug_cli() {   # the debug command: start, run and outcome, status, approve and reject, close
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflow: the debug command"
+  C=$(repo debugcli)
+  mkdir -p "$C/src"; printf 'int add(int a, int b) { return a - b; }\n' > "$C/src/calc.c"; commit "$C" base
+  "$HARNESS/install.sh" --team --workflow debug "$C" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$C/.agents/checks/$tier.sh"; done
+  commit "$C" harness
+  CX="$C/.agents/commands/debug"; CS="$C/.agents/debug/sessions"; CB="$(git -C "$C" symbolic-ref --short HEAD)"
+  t    "start --help: its usage, exit 0" bash -c "'$CX' start --help | grep -qxF 'usage: debug start <kind> <ref | -> [--file=<path>]'"
+  trc  "start with an unknown option: exit 3" 3 "$CX" start bug '#12' --force
+  tnot "...and nothing made"             test -e "$CS"
+  out="$("$CX" start crash '#12' 2>&1)" && rc=0 || rc=$?
+  t    "start needs a workflow the pack ships (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF 'debug: no such workflow: crash (shipped: bug)'" _ "$out"
+  out="$("$CX" start bug 'not a ref' 2>&1)" && rc=0 || rc=$?
+  t    "start needs a ticket key, #<n>, or - (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"^debug: not a ref isn't a ref: give a ticket key\"" _ "$out"
+  trc  "start - needs a report"          2 bash -c "printf '' | '$CX' start bug -"
+  trc  "start with an empty --file=: usage (2)" 2 "$CX" start bug PROJ-10 --file=
+  out="$(cd "$C/src" && "$CX" start bug PROJ-10 --file=nope.txt 2>&1)" && rc=0 || rc=$?
+  t    "start with a missing --file: 2, the path as typed" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"^debug: can't read nope.txt\"" _ "$out"
+  tnot "...and nothing made"             test -e "$CS"
+  out="$("$CX" start bug '#12')"
+  t    "start #12 opens bug-12"          hasl "$out" "started bug-12 (bug, #12): .agents/debug/sessions/bug-12"
+  t    "...names the skeleton"           hasl "$out" "steps: .agents/builtin/workflows/debug/kinds/bug.md"
+  t    "...opens a plan to ask in"       bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
+  t    "...and says what's next"         hasl "$out" "next: intake: no playbook binding and no report text; ask the human to paste the report"
+  tnot "...with no note when it's the only session" hasl "$out" "note:"
+  t    "state: kind, ref, start commit, branch, seq, step, status" bash -c "grep -qx 'kind: bug' '$CS/bug-12/state' && grep -qx 'ref: #12' '$CS/bug-12/state' && grep -qx \"start: \$(git -C '$C' rev-parse HEAD)\" '$CS/bug-12/state' && grep -qx 'branch: $CB' '$CS/bug-12/state' && grep -qx 'seq: 1' '$CS/bug-12/state' && grep -qx 'step: intake' '$CS/bug-12/state' && grep -qx 'status: open' '$CS/bug-12/state'"
+  t    "report.md has the fixed sections" bash -c "grep -qx '## As received' '$CS/bug-12/report.md' && grep -qx '## Expected' '$CS/bug-12/report.md' && grep -qx '## Actual' '$CS/bug-12/report.md'"
+  out="$(printf 'add(2, 2) returns 0\nexpected 4\n' | "$CX" start bug -)"
+  t    "a pasted report: a slug from its first words" hasl "$out" "started bug-add-2-2-returns-0 (bug, pasted report)"
+  t    "...it's the starting record"    grep -qx 'add(2, 2) returns 0' "$CS/bug-add-2-2-returns-0/report.md"
+  t    "...and next says so"            hasl "$out" "no playbook binding, so the report as received is the starting record"
+  t    "a pasted report with a non-UTF-8 byte starts" bash -c "printf 'bad \377 byte\n' | '$CX' start bug - >/dev/null && grep -q '^bad .* byte$' '$CS/bug-bad-byte/report.md'"
+  printf 'Crash on empty input\n' > "$WORK/report.txt"
+  t    "a ref with --file keeps the report text" bash -c "'$CX' start bug PROJ-7 --file='$WORK/report.txt' >/dev/null && grep -qx 'Crash on empty input' '$CS/bug-proj-7/report.md'"
+  t    "a relative --file is read from the working directory" bash -c "cd '$C/src' && printf 'X\n' > r.txt && '$CX' start bug PROJ-9 --file=r.txt >/dev/null && grep -qx X '$CS/bug-proj-9/report.md'"
+  rm -f "$C/src/r.txt"
+  out="$("$CX" start bug '#12')"
+  t    "the same ref again gets its own slug" hasl "$out" "started bug-12-2"
+  t    "...and a note names the session it replaces as current" hasl "$out" "note: bug-proj-9 is still open on this branch; bug-12-2 is now current"
+  printf '## intake\n- run: gh issue view <n>\n' >> "$C/.agents/debug/playbook.md"
+  t    "with an intake binding, next says to use it" hasl "$("$CX" start bug PROJ-8)" "next: intake: use the playbook's intake bindings (.agents/debug/playbook.md)"
+  git -C "$C" checkout -q .agents/debug/playbook.md
+  printf '## intake\n- note: ask in chat\n- run:\n' >> "$C/.agents/debug/playbook.md"
+  t    "...but not an unknown key or an empty value" hasl "$("$CX" start bug PROJ-11)" "next: intake: no playbook binding and no report text"
+  git -C "$C" checkout -q .agents/debug/playbook.md
+  GP="$C/.agents/builtin/workflows/debug"
+  CC="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r = sys.argv[2]; d.use_lib(r); c = d.current_session(r, d.load_conf(r), d.ap.Switch(r)); print(c[0] if c else '')"
+  git -C "$C" checkout -q --detach
+  t    "on a detached HEAD, start works" bash -c "'$CX' start bug PROJ-12 >/dev/null"
+  tnot "...state has no branch line"     grep -q '^branch:' "$CS/bug-proj-12/state"
+  t    "...and it's the current session there" test "$(python3 -B -c "$CC" "$GP" "$C" 2>&1)" = "bug-proj-12"
+  t    "...a second one there notes the first as open here" hasl "$("$CX" start bug PROJ-13)" "note: bug-proj-12 is still open here (detached HEAD); bug-proj-13 is now current"
+  git -C "$C" checkout -q "$CB"
+  t    "...not on the branch"            test "$(python3 -B -c "$CC" "$GP" "$C" 2>&1)" = "bug-proj-11"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS=""/'
+  out="$("$CX" start bug '#20' 2>&1)" && rc=0 || rc=$?
+  t    "DEBUG_KINDS empty turns every workflow off (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF \"debug: the bug workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: empty)\"" _ "$out"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_KINDS=.*/DEBUG_KINDS="bug"/'
+  cp "$C/.agents/git.conf" "$WORK/debugcli.git.conf"
+  printf 'GIT_TICKET="(PROJ-[0-9]+"\n' >> "$C/.agents/git.conf"
+  out="$("$CX" start bug PROJ-1 2>&1)" && rc=0 || rc=$?
+  t    "an invalid GIT_TICKET: infra (3), naming it" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q '^infra: GIT_TICKET in .agents/git.conf isn.t a valid Python regex'" _ "$out"
+  tnot "...and no session made"          test -e "$CS/bug-proj-1"
+  t    "...while an issue ref still starts" hasl "$("$CX" start bug '#12')" "started bug-12-3"
+  cp "$WORK/debugcli.git.conf" "$C/.agents/git.conf"
+  rm -rf "$CS" "$C"/.agents/plans/bug-*
+  out="$("$CX" status 2>&1)" && rc=0 || rc=$?
+  t    "status with no session: exit 0, says how to start one" bash -c "test $rc = 0 && test \"\$1\" = 'no open session on $CB (start one: .agents/commands/debug start <kind> <ref>)'" _ "$out"
+  trc  "run with no session: exit 2"    2 "$CX" run reproduce -- true
+  t    "...and says there's none on this branch" hasl "$("$CX" run reproduce -- true 2>&1 >/dev/null || true)" "debug: no open session on $CB; start one with"
+  trc  "outcome with no session: exit 2" 2 "$CX" outcome E-1 reproduced
+  "$CX" start bug '#12' >/dev/null
+  trc  "run needs -- and a command"     2 "$CX" run reproduce
+  trc  "run needs a step of the workflow" 2 "$CX" run lunch -- true
+  trc  "run with a bad --attempt"       2 "$CX" run reproduce --attempt=maybe -- true
+  out="$("$CX" run reproduce --attempt=reproduce -- sh -c 'echo adding; echo "add(2,2) = 0"; exit 3' 2>&1)" && rc=0 || rc=$?
+  t    "run passes the command's exit code through" test "$rc" = 3
+  t    "...prints the entry, then the output's tail" bash -c "printf '%s\n' \"\$1\" | sed -n 1p | grep -qxF 'E-1 (reproduce, reproduce attempt, exit 3): .agents/debug/sessions/bug-12/evidence/E-1.md' && printf '%s\n' \"\$1\" | grep -qxF 'add(2,2) = 0'" _ "$out"
+  t    "...and asks for the outcome"    hasl "$out" "record the outcome: .agents/commands/debug outcome E-1 reproduced|partial|not-reproduced"
+  t    "E-1.md: step, attempt, command, exit" bash -c "grep -qx 'step: reproduce' '$CS/bug-12/evidence/E-1.md' && grep -qx 'attempt: reproduce' '$CS/bug-12/evidence/E-1.md' && grep -q '^command: sh -c ' '$CS/bug-12/evidence/E-1.md' && grep -qx 'exit: 3' '$CS/bug-12/evidence/E-1.md'"
+  t    "E-1.log: the full output"       grep -qx adding "$CS/bug-12/evidence/E-1.log"
+  t    "E-1.md: the commit it ran on"   grep -qE '^head: [0-9a-f]{12}(, with uncommitted changes)?$' "$CS/bug-12/evidence/E-1.md"
+  seq 1 100 > "$WORK/hundred.txt"
+  out="$("$CX" run gather-evidence -- cat "$WORK/hundred.txt" 2>&1)"
+  tnot "a run that isn't an attempt doesn't ask for an outcome" hasl "$out" "record the outcome"
+  t    "an entry keeps the last 60 lines, the log all of them" bash -c "! grep -qx 40 '$CS/bug-12/evidence/E-2.md' && grep -qx 41 '$CS/bug-12/evidence/E-2.md' && test \$(wc -l < '$CS/bug-12/evidence/E-2.log') -eq 100"
+  t    "run moves the session's step"   grep -qx 'step: gather-evidence' "$CS/bug-12/state"
+  trc  "a missing command: exit 127, still evidence" 127 "$CX" run isolate -- no-such-command-xyz
+  t    "...E-3 says why"                grep -q "couldn't run no-such-command-xyz" "$CS/bug-12/evidence/E-3.log"
+  out="$("$CX" run isolate -- git clean -ndx 2>&1 >/dev/null)" && rc=0 || rc=$?
+  t    "the policy still applies inside debug run (2)" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | sed -n 1p | grep -q '^debug: not run: ' && printf '%s\n' \"\$1\" | grep -q '^\.agents/policy\.conf:[0-9]*: deny'" _ "$out"
+  tnot "...and a blocked command records nothing" test -e "$CS/bug-12/evidence/E-4.md"
+  trc  "...even with AGENTS_HOOKS=off set on the debug command" 2 env AGENTS_HOOKS=off "$CX" run isolate -- git clean -ndx
+  cp "$C/.agents/hooks/hook.py" "$WORK/debugcli.hook.py"; printf 'raise RuntimeError("broken")\n' > "$C/.agents/hooks/hook.py"
+  trc  "a policy test that fails: infra (3), not run" 3 "$CX" run isolate -- true
+  cp "$WORK/debugcli.hook.py" "$C/.agents/hooks/hook.py"
+  mv "$C/.agents/bin/policy" "$WORK/debugcli.policy"
+  trc  "no bin/policy: infra (3), not run" 3 "$CX" run isolate -- true
+  mv "$WORK/debugcli.policy" "$C/.agents/bin/policy"
+  tnot "...and nothing recorded"        test -e "$CS/bug-12/evidence/E-4.md"
+  cp "$C/.agents/harness.conf" "$WORK/debugcli.harness.conf"
+  edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
+  trc  "with the policy hook off in HOOKS, a command it would block runs" 0 "$CX" run isolate -- git clean -ndx
+  t    "...and is recorded"             grep -qx 'command: git clean -ndx' "$CS/bug-12/evidence/E-4.md"
+  cp "$WORK/debugcli.harness.conf" "$C/.agents/harness.conf"
+  echo leak | "$CX" run gather-evidence -- cat >/dev/null
+  t    "the command's stdin is /dev/null" bash -c "test -e '$CS/bug-12/evidence/E-5.md' && ! grep -q leak '$CS/bug-12/evidence/E-5.log'"
+  seq 1 200000 > "$WORK/big.txt"
+  "$CX" run gather-evidence -- cat "$WORK/big.txt" >/dev/null
+  sed -n '/^## Output/,$p' "$CS/bug-12/evidence/E-6.md" | sed '1,2d' | sed '/^$/,$d' > "$WORK/big.tail"
+  t    "a log past 1 MiB: the entry has its last 60 lines, none cut" bash -c "test \$(wc -l < '$WORK/big.tail') -eq 60 && test \"\$(sed -n 1p '$WORK/big.tail')\" = 199941 && test \"\$(sed -n '\$p' '$WORK/big.tail')\" = 200000"
+  printf 'echo hi\n' > "$WORK/noexec.sh"; chmod -x "$WORK/noexec.sh"
+  trc  "a command that isn't executable: exit 126, still evidence" 126 "$CX" run isolate -- "$WORK/noexec.sh"
+  t    "...E-7 says why"                grep -q "couldn't run .*noexec.sh" "$CS/bug-12/evidence/E-7.log"
+  trc  "a command line that isn't UTF-8 still runs" 0 "$CX" run isolate -- echo $'x\377y'
+  t    "...and is recorded"             grep -q '^command: echo ' "$CS/bug-12/evidence/E-8.md"
+  nmd=$(find "$CS/bug-12/evidence" -name 'E-*.md' | wc -l)
+  "$CX" run gather-evidence -- sh -c 'sleep 1; echo AAA' >/dev/null 2>&1 & bgrun=$!
+  i=0; while [ ! -e "$CS/bug-12/evidence/E-$((nmd + 1)).log" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  "$CX" run gather-evidence -- echo BBB >/dev/null
+  wait "$bgrun" || true
+  t    "two runs at once get two entries" bash -c "test \$(find '$CS/bug-12/evidence' -name 'E-*.md' | wc -l) -eq $((nmd + 2)) && a=\$(grep -lx AAA '$CS'/bug-12/evidence/E-*.md) && b=\$(grep -lx BBB '$CS'/bug-12/evidence/E-*.md) && test -n \"\$a\" && test -n \"\$b\" && test \"\$a\" != \"\$b\""
+  "$CX" start bug PROJ-40 >/dev/null
+  "$CX" run hypothesize -- "$CX" close bug-proj-40 abandoned >/dev/null
+  t    "a session closed during a run stays closed" bash -c "grep -qx 'status: closed' '$CS/bug-proj-40/state' && ! grep -qx 'step: hypothesize' '$CS/bug-proj-40/state' && '$CX' status bug-proj-40 | grep -qxF 'session: bug-proj-40 (bug, PROJ-40), closed (abandoned)'"
+  printf 'status: closed\n' >> "$CS/bug-12/state"
+  "$CX" run hypothesize -- true >/dev/null
+  t    "...while a state file that says closed doesn't freeze the step" grep -qx 'step: hypothesize' "$CS/bug-12/state"
+  edit "$CS/bug-12/state" '/^status: closed$/d'
+  head -c 1100000 /dev/zero | tr '\0' a > "$WORK/big1.txt"
+  out="$("$CX" run gather-evidence -- cat "$WORK/big1.txt")"
+  sed -n '/^## Output/,$p' "$C/$(printf '%s\n' "$out" | sed -n '1s/^E-[0-9]* ([^)]*): //p')" | sed '1,2d' | sed '/^$/,$d' > "$WORK/big1.tail"
+  t    "a last line longer than 1 MiB is still the tail" bash -c "test \$(wc -l < '$WORK/big1.tail') -eq 1 && grep -q '^aaa' '$WORK/big1.tail'"
+  trc  "outcome needs an attempt"       1 "$CX" outcome E-2 reproduced
+  trc  "outcome needs a known value"    2 "$CX" outcome E-1 maybe
+  out="$("$CX" outcome E-99 reproduced 2>&1)" && rc=0 || rc=$?
+  t    "outcome of an entry that isn't there (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qxF 'debug: session bug-12 has no E-99'" _ "$out"
+  t    "outcome records it"             bash -c "'$CX' outcome E-1 not-reproduced | grep -qxF 'E-1: not-reproduced (reproduce attempt)' && grep -qx 'outcome: not-reproduced' '$CS/bug-12/evidence/E-1.md'"
+  "$CX" outcome E-1 reproduced >/dev/null
+  t    "...and replaces an earlier one" bash -c "test \$(grep -c '^outcome: ' '$CS/bug-12/evidence/E-1.md') = 1 && grep -qx 'outcome: reproduced' '$CS/bug-12/evidence/E-1.md'"
+  nev=$(find "$CS/bug-12/evidence" -name 'E-*.md' | wc -l | tr -d ' ')
+  evl="$(seq 1 "$nev" | sed 's/^/E-/' | paste -sd, - | sed 's/,/, /g')"
+  out="$("$CX" status)"
+  t    "status: the session and its step" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open' && printf '%s\n' \"\$1\" | grep -qx 'step: gather-evidence'" _ "$out"
+  t    "...evidence and attempts"       bash -c "printf '%s\n' \"\$1\" | grep -qxF 'evidence: $nev ($evl)' && printf '%s\n' \"\$1\" | grep -qxF 'attempts: E-1 reproduce: reproduced'" _ "$out"
+  t    "...the computed confidence"     hasl "$out" "confidence: reproduced"
+  t    "...the steps with no bindings"  hasl "$out" "steps with no playbook bindings: intake, reproduce, gather-evidence, isolate (.agents/debug/playbook.md)"
+  t    "...no experiments yet"          hasl "$out" "experiments in the tree: none"
+  tnot "...and no dates"                bash -c "printf '%s' \"\$1\" | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'" _ "$out"
+  printf '## H-1: add subtracts\n- would confirm: add(2,2) is 0\n- would rule out: add(2,2) is 4\n- status: confirmed (E-1)\n\n## H-2: the test expects the wrong sum\n- status: open\n' >> "$CS/bug-12/hypotheses.md"
+  printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$C/src/calc.c"
+  out="$("$CX" status)"
+  t    "...hypotheses by status"        hasl "$out" "hypotheses: 1 open (H-2), 1 confirmed, 0 ruled out"
+  t    "...experiments in the tree"     hasl "$out" "experiments in the tree: src/calc.c:1"
+  git -C "$C" checkout -q src/calc.c
+  printf '## H-3: a status in bold\n- **Status**: `Ruled` out (E-2)\n\n## H-4: no such status\n- status: maybe\n\n## H-2: listed twice\n- status: open\n\n# Notes\n- status: confirmed\n' >> "$CS/bug-12/hypotheses.md"
+  t    "...bold or odd statuses, a duplicate id once, a heading ends a section" hasl "$("$CX" status)" "hypotheses: 1 open (H-2), 1 confirmed, 1 ruled out, 1 unclear (H-4)"
+  mkdir "$CS/bug-12/evidence/E-93.md"
+  printf 'step: isolate\nattempt: confirm\noutcome: reproduced\n' > "$CS/bug-12/evidence/E-90.md"
+  printf 'step: isolate\ncommand: true\nexit: 0\n' > "$CS/bug-12/evidence/E-01.md"
+  t    "...a note, a dir, or E-01 isn't evidence" bash -c "'$CX' status | grep -qxF 'evidence: $nev ($evl)' && '$CX' status | grep -qxF 'confidence: reproduced'"
+  rm -rf "$CS/bug-12/evidence/E-93.md" "$CS/bug-12/evidence/E-90.md" "$CS/bug-12/evidence/E-01.md"
+  printf 'one\ntwo\nthree\nfour\n' > "$C/src/lines.c"; commit "$C" lines
+  edit "$C/src/lines.c" 's/^three$/three probe/'
+  printf 'new\n' > "$C/src/new.c"
+  printf 'staged\n' > "$C/src/staged.c"; git -C "$C" add src/staged.c; rm "$C/src/staged.c"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$C/src/calc.c"; git -C "$C" add src/calc.c; git -C "$C" show HEAD:src/calc.c > "$C/src/calc.c"
+  mkdir -p "$C/dbg"; printf 'notes\n' > "$C/dbg/notes.md"
+  out="$("$CX" status)"
+  t    "...experiments: the first changed line, untracked and staged-only files" hasl "$out" "experiments in the tree: dbg/notes.md:1, src/calc.c:1, src/lines.c:3, src/new.c:1, src/staged.c:1"
+  t    "...a change on line 3 is file:3" hasl "$out" "src/lines.c:3"
+  t    "...an untracked file"           hasl "$out" "src/new.c:1"
+  t    "...a change only in the index"  hasl "$out" "src/calc.c:1"
+  t    "...a staged new file deleted from the tree" hasl "$out" "src/staged.c:1"
+  DX="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r = sys.argv[2]; d.use_lib(r); c = dict(d.load_conf(r), DEBUG_DIR='dbg'); print(' '.join(x[0] for x in d.changed_in_scope(r, c)))"
+  t    "...but nothing under a DEBUG_DIR outside .agents/" test "$(python3 -B -c "$DX" "$GP" "$C" 2>&1)" = "src/calc.c src/lines.c src/new.c src/staged.c"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
+  t    "...DEBUG_SCOPE empty: not checked" hasl "$("$CX" status)" "experiments: not checked (DEBUG_SCOPE is empty)"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="**"/'
+  git -C "$C" reset -q -- src; git -C "$C" checkout -q src; rm -rf "$C/src/new.c" "$C/dbg"
+  t    "...and none once they're gone"  hasl "$("$CX" status)" "experiments in the tree: none"
+  printf 'one\ntwo\n' > "$C/src/a\"b.c"; commit "$C" quoted
+  edit "$C/src/a\"b.c" 's/^two$/two probe/'
+  t    "...a file name git quotes is listed too" hasl "$("$CX" status)" "experiments in the tree: src/a\"b.c:2"
+  git -C "$C" checkout -q src
+  UQ="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print(d.c_unquote('\"src/a\\\\\"b\\\\tc\\\\303\\\\251.c\" rest') == 'src/a\"b\\tc\\u00e9.c', d.c_unquote('\"open'))"
+  t    "c_unquote: escapes, octal UTF-8 bytes, and an unclosed token" test "$(python3 -B -c "$UQ" "$GP" 2>&1)" = "True None"
+  BR="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d
+try:
+    d.changed_lines(sys.argv[2]); print('clean')
+except d.ConfError as e:
+    print('conf')"
+  t    "changed_lines in a repo git can't read: a tooling problem, not a clean tree" test "$(GIT_DIR="$WORK/no-such.git" python3 -B -c "$BR" "$GP" "$C" 2>&1)" = conf
+  printf '## H-1: a\n#12 says so\n#include <x>\n- status: confirmed\n## H-2: b\n### Notes\n- status: confirmed\n' > "$WORK/hyp.md"
+  HY="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print(d.hypotheses(sys.argv[2]))"
+  t    "hypotheses: only a markdown heading ends a section" test "$(python3 -B -c "$HY" "$GP" "$WORK/hyp.md" 2>&1)" = "[(1, 1, 'confirmed'), (2, 5, 'open')]"
+  NC="$WORK/debugnocommit"; mkdir -p "$NC"; git -C "$NC" init -q
+  "$HARNESS/install.sh" --team --workflow debug "$NC" >/dev/null 2>&1
+  mkdir -p "$NC/src"; printf 'x\n' > "$NC/src/a.c"; git -C "$NC" add src/a.c
+  "$NC/.agents/commands/debug" start bug '#1' >/dev/null
+  edit "$NC/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'   # else the uncommitted harness files fill status's first 8
+  t    "a repo with no commits yet: status lists a staged file" bash -c "'$NC/.agents/commands/debug' status | grep -q '^experiments in the tree: src/a\.c:1$'"
+  edit "$CS/bug-12/state" 's/^kind: bug$/kind: crash/'
+  t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no crash workflow"
+  edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'
+  printf 'rootcause\tbug-12\tsomeone\t2026-10-03\tabc\n' > "$CS/bug-12/approvals"
+  out="$("$CX" status)"
+  t    "status names an approval debug didn't record" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-12/approvals:1 rootcause' && printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open'" _ "$out"
+  rm -f "$CS/bug-12/approvals"
+  CF="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; ev = {1: {'attempt': 'reproduce', 'outcome': 'reproduced'}, 2: {'attempt': 'confirm', 'outcome': 'reproduced'}}; print(d.confidence(ev, {}), d.confidence(ev, {'confirm_after': '1'}), d.confidence(ev, {'confirm_after': '2'}), d.confidence(ev, {'confirm_after': 'x'}), d.confidence({2: ev[2]}, {'confirm_after': '2'}), d.confidence({1: {'attempt': 'reproduce', 'outcome': 'not-reproduced'}, 2: {'attempt': 'confirm', 'outcome': 'partial'}}, {}))"
+  t    "confidence: a confirm attempt counts only after confirm_after" test "$(python3 -B -c "$CF" "$GP" 2>&1)" = "confirmed confirmed reproduced confirmed reproduced evidence-only"
+  printf 'confirm_after: 7\n' >> "$CS/bug-12/state"
+  RS="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; s = sys.argv[2]; d.write_state(s, d.read_state(s)); print(d.read_state(s).get('confirm_after'))"
+  t    "...and the state file keeps confirm_after" test "$(python3 -B -c "$RS" "$GP" "$CS/bug-12" 2>&1)" = 7
+  edit "$CS/bug-12/state" '/^confirm_after: /d'
+  git -C "$C" checkout -q -b other
+  t    "another branch: no session here, and where one is" bash -c "'$CX' status | grep -qxF 'no open session on other; open elsewhere: bug-12 ($CB)'"
+  t    "status <slug> works from any branch" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open'"
+  trc  "run there has no session"       2 "$CX" run reproduce -- true
+  git -C "$C" checkout -q --detach
+  t    "on a detached HEAD, status says here" bash -c "'$CX' status | grep -qxF 'no open session here (detached HEAD); open elsewhere: bug-12 ($CB)'"
+  git -C "$C" checkout -q "$CB"
+  trc  "status of no such session: exit 1" 1 "$CX" status bug-99
+  cn="$("$CX" run isolate --attempt=confirm -- true | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
+  "$CX" outcome "E-$cn" reproduced >/dev/null
+  t    "a reproduced confirm attempt: confirmed" bash -c "'$CX' status | grep -qxF 'confidence: confirmed'"
+  trc  "approve with no root cause: exit 1" 1 "$CX" approve bug-12
+  rcdoc "$CS/bug-12/root-cause.md" reproduced
+  for v in CLAUDECODE GEMINI_CLI CURSOR_AGENT; do
+    trc "approve refuses with $v set" 2 env "$v=1" "$CX" approve bug-12
+  done
+  recn=$({ cat "$C/.git/ai-harness/debug-approvals" 2>/dev/null || true; } | wc -c)
+  out="$(CLAUDECODE=1 "$CX" reject bug-12 nope 2>&1)" && rc=0 || rc=$?
+  t    "...so does reject"              bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \"debug: rejecting a root cause is the human's step, and this shell was started by Claude Code (CLAUDECODE is set)\"" _ "$out"
+  tnot "...recording nothing"           test -e "$CS/bug-12/approvals"
+  t    "...not even in the git dir"     test "$({ cat "$C/.git/ai-harness/debug-approvals" 2>/dev/null || true; } | wc -c)" = "$recn"
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 'Which compiler builds the release?' >/dev/null)
+  trc  "reject needs a reason"          2 "$CX" reject bug-12
+  out="$("$CX" reject bug-12 'the caller passes the wrong operands' 2>&1)"
+  t    "reject sends the root cause back" hasl "$out" "rejected bug-12: root-cause.md is now root-cause.rejected-1.md"
+  t    "...the reason goes in hypotheses.md" grep -qxF -- '- why: the caller passes the wrong operands' "$CS/bug-12/hypotheses.md"
+  t    "...the session is open again"   bash -c "'$CX' status | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
+  t    "...and it's recorded in the git dir" grep -q '^reject	bug-12 \. \.agents/debug/sessions/bug-12	' "$C/.git/ai-harness/debug-approvals"
+  t    "...the confirm attempt for the rejected cause no longer confirms" bash -c "'$CX' status | grep -qxF 'confidence: reproduced' && grep -qx 'confirm_after: $cn' '$CS/bug-12/state'"
+  t    "...its check-in task is back in progress" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
+  t    "...the check-in question answered, credited to the person" bash -c "! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12' && grep -q 'human: answered Q1: rejected: the caller' '$C/.agents/plans/bug-12/progress.log'"
+  t    "...another question on T1 stays open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
+  out="$(cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-12' 2>&1)" && rc=0 || rc=$?
+  t    "a re-ask without --force after a reject is refused as already answered (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -q '^already answered '" _ "$out"
+  trc  "the agent re-asks for the check-in (--force): recorded" 0 bash -c "cd '$C' && .agents/bin/tasks ask bug-12 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-12'"
+  rcdoc "$CS/bug-12/root-cause.md" reproduced
+  t    "a second reject sets it aside as rejected-2" bash -c "'$CX' reject bug-12 still the wrong operands | grep -qF 'root-cause.md is now root-cause.rejected-2.md' && test -f '$CS/bug-12/root-cause.rejected-1.md' && test -f '$CS/bug-12/root-cause.rejected-2.md'"
+  rcdoc "$CS/bug-12/root-cause.md" reproduced
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=plan --force 'Or run .agents/commands/debug approve bug-12 when you have a minute' >/dev/null)
+  qp="$("$C/.agents/bin/tasks" questions --open --plan=bug-12 | sed -n 's/^bug-12 \(Q[0-9]*\) \[open\] (T1, plan gate) .*/\1/p')"
+  if [ "$(id -u)" -ne 0 ]; then   # root reads a mode-000 file anyway
+    chmod 000 "$CS/bug-12/root-cause.md"
+    out="$("$CX" approve bug-12 2>&1)" && rc=0 || rc=$?
+    chmod 644 "$CS/bug-12/root-cause.md"
+    t    "approve refuses a root-cause.md it can't read (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF \"debug: can't read .agents/debug/sessions/bug-12/root-cause.md, so there's nothing to approve\"" _ "$out"
+    tnot "...and records nothing"        grep -q '^rootcause' "$CS/bug-12/approvals"
+  fi
+  t    "approve from a person's terminal" test "$("$CX" approve bug-12)" = "approved bug-12"
+  t    "...the line goes in approvals and the record" bash -c "grep -q '^rootcause	bug-12 \. \.agents/debug/sessions/bug-12	' '$CS/bug-12/approvals' && grep -qxF \"\$(tail -1 '$CS/bug-12/approvals')\" '$C/.git/ai-harness/debug-approvals'"
+  t    "...the session is approved"     bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), approved'"
+  t    "...its check-in question answered, its task done" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*done' && ! '$C/.agents/bin/tasks' questions --open | grep -q 'debug approve bug-12'"
+  t    "...the unrelated question still open" bash -c "'$C/.agents/bin/tasks' questions --open | grep -q 'Which compiler'"
+  t    "...and a check-in asked at another gate is answered too" bash -c "test -n '$qp' && '$C/.agents/bin/tasks' questions --plan=bug-12 | grep -q '^bug-12 $qp \[answered '"
+  t    "...and the step is the workflow's last" grep -qx 'step: check-in' "$CS/bug-12/state"
+  t    "...and no session is current"   hasl "$("$CX" status)" "no open session on $CB"
+  tnot "...with no dates in what it printed" bash -c "'$CX' status bug-12 | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'"
+  trc  "approving it again: exit 1"     1 "$CX" approve bug-12
+  printf 'Also check sub().\n' >> "$CS/bug-12/root-cause.md"
+  t    "root-cause.md edited after its approval: open again" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause changed since its approval'"
+  t    "...and it can be approved again" test "$("$CX" approve bug-12)" = "approved bug-12"
+  EH="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r, s = sys.argv[2], sys.argv[3]; d.use_lib(r); sw = d.ap.Switch(r); line, _ = d.ap.new_line(r, 'rootcause', d.start_id(r, 'bug-12', s), '', sw); d.ap.record(r, d.KEY, [line]); d.append_line(d.approvals_path(s), line); print(d.verdict(r, 'bug-12', s, sw))"
+  cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals0"; mv "$CS/bug-12/root-cause.md" "$WORK/debugcli.rc"
+  t    "a recorded approval with no hash approves nothing, even with no root-cause.md" test "$(python3 -B -c "$EH" "$GP" "$C" "$CS/bug-12" 2>&1)" = changed
+  cp "$WORK/debugcli.approvals0" "$CS/bug-12/approvals"; mv "$WORK/debugcli.rc" "$CS/bug-12/root-cause.md"
+  cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals"
+  grep '^reject	' "$WORK/debugcli.approvals" > "$CS/bug-12/approvals"
+  printf 'rootcause\tbug-12\tsomeone\t2026-10-03\t%s\n' "$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$CS/bug-12/root-cause.md")" >> "$CS/bug-12/approvals"
+  t    "a forged approvals line doesn't approve" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
+  cp "$WORK/debugcli.approvals" "$CS/bug-12/approvals"
+  "$CX" start bug PROJ-30 >/dev/null; rcdoc "$CS/bug-proj-30/root-cause.md" evidence-only
+  grep '^rootcause	' "$CS/bug-12/approvals" > "$WORK/debugcli.rootcause"
+  rm -rf "$CS/bug-12" "$C/.agents/plans/bug-12"
+  "$CX" start bug '#12' >/dev/null; rcdoc "$CS/bug-12/root-cause.md" evidence-only
+  cp "$WORK/debugcli.rootcause" "$CS/bug-12/approvals"
+  out="$("$CX" status bug-12)"
+  t    "a new bug-12 with the old one's recorded approvals copied in: not approved, they're the old one's" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open' && printf '%s\n' \"\$1\" | grep -qF \"not counted, another session's: .agents/debug/sessions/bug-12/approvals:1 rootcause\"" _ "$out"
+  rm -rf "$CS/bug-12" "$C/.agents/plans/bug-12"
+  mv "$CS/bug-proj-30/root-cause.md" "$CS/bug-proj-30/rc.real"; ln -s rc.real "$CS/bug-proj-30/root-cause.md"
+  trc  "approve refuses a symlinked root-cause.md (2)" 2 "$CX" approve bug-proj-30
+  trc  "...so does reject"              2 "$CX" reject bug-proj-30 no
+  rm -rf "$CS/bug-proj-30" "$C/.agents/plans/bug-proj-30"
+  NG="$WORK/debugnogit"; mkdir -p "$NG"
+  GIT_CEILING_DIRECTORIES="$WORK" "$HARNESS/install.sh" --team --workflow debug "$NG" >/dev/null 2>&1
+  out="$(printf 'x\n' | GIT_CEILING_DIRECTORIES="$WORK" "$NG/.agents/commands/debug" start bug - 2>&1)" && rc=0 || rc=$?
+  t    "start outside a git repo: 2, says it needs one" bash -c "test $rc = 2 && test \"\$1\" = 'debug: the debug workflow needs a git repository'" _ "$out"
+  t    "status outside a git repo: no session here" bash -c "GIT_CEILING_DIRECTORIES='$WORK' '$NG/.agents/commands/debug' status | grep -qxF 'no open session here (start one: .agents/commands/debug start <kind> <ref>)'"
+  # The simulated human (install.sh --simulated-human) approves debug check-ins too.
+  SM=$(repo debugsim); mkdir -p "$SM/src"; printf 'int a;\n' > "$SM/src/a.c"; commit "$SM" base
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$SM" 2>&1)"
+  TOKS="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$SM/.agents/checks/$tier.sh"; done
+  commit "$SM" harness
+  SMX="$SM/.agents/commands/debug"; SMS="$SM/.agents/debug/sessions/bug-1"
+  "$SMX" start bug '#1' >/dev/null
+  t    "verify notes the simulated human while a session is open" bash -c "out=\$('$SM/.agents/bin/verify'); test \"\$(printf '%s\n' \"\$out\" | sed -n 1p)\" = 'ok verify turn' && printf '%s\n' \"\$out\" | sed -n 2p | grep -q '^note: simulated human is on in this clone (install.sh --simulated-human, run from a Claude Code shell): a shell with its token can approve debug check-ins'"
+  "$SMX" run reproduce --attempt=reproduce -- true >/dev/null; "$SMX" outcome E-1 not-reproduced >/dev/null
+  printf '## H-1: a is never set\n- status: confirmed (E-1)\n' >> "$SMS/hypotheses.md"
+  rcdoc "$SMS/root-cause.md" evidence-only
+  trc  "simulated human: an agent shell without the token is refused" 2 env CLAUDECODE=1 "$SMX" approve bug-1
+  t    "...the token approves, marked simulated" test "$(CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKS" "$SMX" approve bug-1 2>&1)" = "approved bug-1 (simulated human)"
+  t    "...in the line itself"         grep -q '^rootcause	bug-1 [^	]*	[^	]* (simulated human)	' "$SMS/approvals"
+  t    "...and verify, with the switch on, counts it: no block" bash -c "'$SM/.agents/bin/verify' 2>&1 | sed -n 1p | grep -qx 'ok verify turn'"
+  mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
+  t    "...and it counts only while the switch is on" bash -c "'$SMX' status bug-1 | grep -qxF 'session: bug-1 (bug, #1), open'"
+  "$SMX" run isolate -- true >/dev/null
+  t    "...and run still moves the step of an approval that doesn't count" grep -qx 'step: isolate' "$SMS/state"
+  cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
+  "$SMX" start bug '#2' >/dev/null
+  t    "simulated human on: an agent's close that didn't need the human isn't marked simulated" bash -c "CLAUDECODE=1 '$SMX' close bug-2 abandoned | grep -qxF 'closed bug-2 (abandoned)'"
+  mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
+  t    "...so it stays closed once the switch is off" bash -c "'$SMX' status bug-2 | grep -qxF 'session: bug-2 (bug, #2), closed (abandoned)'"
+  cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
+  "$SMX" start bug '#3' >/dev/null
+  CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKS" "$SMX" close bug-3 abandoned >/dev/null
+  t    "...an agent with the token closing what doesn't wait on the human: still an agent's close" bash -c "tail -1 '$SM/.agents/debug/sessions/bug-3/approvals' | grep -q '^close-agent	bug-3 [^	]*	[^	]*[^)]	[^	]*	abandoned$'"
+  "$CX" start bug '#13' >/dev/null
+  trc  "close needs a reason it knows"  2 "$CX" close bug-13 fixed
+  out="$("$CX" close nosuch reviewed 2>&1)" && rc=0 || rc=$?
+  t    "close of no such session says so, even for reviewed (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -q '^debug: no session nosuch '" _ "$out"
+  printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$C/src/calc.c"
+  out="$("$CX" close bug-13 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "close refuses while experiments are in the tree" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'revert the experiments before closing bug-13: src/calc.c:1'" _ "$out"
+  git -C "$C" checkout -q src/calc.c
+  t    "absence: no root-cause.md, the agent closes abandoned, with a note" bash -c "CLAUDECODE=1 '$CX' close bug-13 abandoned 'reporter went quiet' | grep -qxF 'closed bug-13 (abandoned: reporter went quiet)'"
+  t    "...the session is closed"       bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "...the close is recorded, as an agent's" bash -c "grep -q '^close-agent	bug-13 .*	abandoned: reporter went quiet$' '$C/.git/ai-harness/debug-approvals' && grep -q '^close-agent	bug-13 ' '$CS/bug-13/approvals'"
+  t    "...and its task is done"        bash -c "'$C/.agents/bin/tasks' list bug-13 | grep -q 'T1.*done'"
+  trc  "closing it again: exit 1"       1 "$CX" close bug-13 duplicate
+  t    "the policy lets an agent close a session" policy "$C" test ".agents/commands/debug close bug-13 duplicate 'see bug-12'"
+  "$CX" start bug '#14' >/dev/null
+  "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null
+  printf '## H-1: add subtracts\n- status: confirmed (E-1)\n' >> "$CS/bug-14/hypotheses.md"
+  rcdoc "$CS/bug-14/root-cause.md" evidence-only
+  (cd "$C" && .agents/bin/tasks ask bug-14 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-14' >/dev/null)
+  out="$(CLAUDECODE=1 "$CX" close bug-14 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "the agent can't close a root cause that waits on the human (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF 'debug: closing a session whose root cause waits on the human is the human'" _ "$out"
+  t    "...the session stays open, its check-in question too" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open' && '$C/.agents/bin/tasks' questions --open --plan=bug-14 | grep -q 'debug approve bug-14'"
+  out="$(CLAUDECODE=1 "$CX" close bug-14 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "close reviewed: not while DEBUG_ASK has rootcause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
+  out="$(env DEBUG_ASK= CLAUDECODE=1 "$CX" close bug-14 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "...an empty DEBUG_ASK in the environment changes nothing (harness.conf only)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
+  edit "$CS/bug-14/state" 's/^status: open$/status: closed/'; printf 'note: reviewed\n' >> "$CS/bug-14/state"
+  t    "a state file that says closed closes nothing" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open'"
+  edit "$CS/bug-14/state" 's/^status: closed$/status: open/'; edit "$CS/bug-14/state" '/^note: /d'
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  t    "absence: DEBUG_ASK empty, the agent closes a reviewed root cause" bash -c "CLAUDECODE=1 '$CX' close bug-14 reviewed | grep -qxF 'closed bug-14 (reviewed)'"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  t    "rootcause back in DEBUG_ASK: a reviewed close no longer counts" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open, closed as reviewed but DEBUG_ASK has rootcause'"
+  t    "absence: an agent's close with no root-cause.md still counts after DEBUG_ASK changes" bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "a person's terminal closes a root cause that waits on them" bash -c "'$CX' close bug-14 duplicate 'same as bug-13' | grep -qxF 'closed bug-14 (duplicate: same as bug-13)'"
+  t    "...and that close counts, with the root cause there" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), closed (duplicate: same as bug-13)' && tail -1 '$CS/bug-14/approvals' | grep -q '^close	bug-14 '"
+  "$CX" start bug '#20' >/dev/null; rcdoc "$CS/bug-20/root-cause.md" evidence-only
+  mv "$CS/bug-20/root-cause.md" "$WORK/debugcli.rc20"
+  CLAUDECODE=1 "$CX" close bug-20 abandoned >/dev/null
+  mv "$WORK/debugcli.rc20" "$CS/bug-20/root-cause.md"
+  t    "an agent's close made with root-cause.md set aside doesn't count once it's back" bash -c "'$CX' status bug-20 | grep -qxF 'session: bug-20 (bug, #20), open, closed by an agent but its root cause waits on the human'"
+  "$CX" close bug-20 abandoned >/dev/null
+  "$CX" start bug '#21' >/dev/null; rcdoc "$CS/bug-21/root-cause.md" evidence-only
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  CLAUDECODE=1 "$CX" close bug-21 abandoned >/dev/null
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  t    "...nor one made while DEBUG_ASK was empty, once rootcause is back" bash -c "'$CX' status bug-21 | grep -qxF 'session: bug-21 (bug, #21), open, closed by an agent but its root cause waits on the human'"
+  "$CX" close bug-21 abandoned >/dev/null
+  "$CX" start bug '#17' >/dev/null; rcdoc "$CS/bug-17/root-cause.md" evidence-only; "$CX" reject bug-17 wrong operands >/dev/null
+  trc  "the agent can't close a rejected root cause either (2)" 2 env CLAUDECODE=1 "$CX" close bug-17 abandoned
+  "$CX" close bug-17 abandoned >/dev/null
+  t    "status of a closed session keeps its verdict" bash -c "'$CX' status bug-17 | grep -qxF 'session: bug-17 (bug, #17), closed (abandoned), root cause rejected'"
+  # One rule for a root cause that waits on the human: rootcause in DEBUG_ASK, and root-cause.md there or
+  # a rejected or changed verdict. With DEBUG_ASK empty, a rejected root cause doesn't wait.
+  "$CX" start bug '#22' >/dev/null; rcdoc "$CS/bug-22/root-cause.md" evidence-only; "$CX" reject bug-22 wrong operands >/dev/null
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  out="$(CLAUDECODE=1 "$CX" close bug-22 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "absence: DEBUG_ASK empty, the agent closes a rejected root cause" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qxF 'closed bug-22 (abandoned)'" _ "$out"
+  t    "...and that close counts"       bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), closed (abandoned), root cause rejected' && tail -1 '$CS/bug-22/approvals' | grep -q '^close-agent	bug-22 '"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  t    "...until rootcause is back in DEBUG_ASK: then it waits on the human again" bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), open, closed by an agent but its root cause waits on the human, root cause rejected'"
+  trc  "...and the agent's close is refused again (2)" 2 env CLAUDECODE=1 "$CX" close bug-22 abandoned
+  "$CX" close bug-22 abandoned >/dev/null
+  "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only
+  "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null   # the check-in wants one
+  printf '## H-1: add subtracts\n- status: confirmed (E-1)\n' >> "$CS/bug-18/hypotheses.md"   # and the H-1 it cites
+  cp "$C/.agents/harness.conf" "$WORK/debugcli.conf18"; edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
+  "$CX" run hypothesize -- "$CX" approve bug-18 >/dev/null
+  cp "$WORK/debugcli.conf18" "$C/.agents/harness.conf"
+  t    "an approval made during a run freezes the step" bash -c "'$CX' status bug-18 | grep -qxF 'session: bug-18 (bug, #18), approved' && grep -qx 'step: check-in' '$CS/bug-18/state'"
+  trc  "close of an approved session: exit 1" 1 "$CX" close bug-18 abandoned
+  "$CX" start bug '#19' >/dev/null; mv "$CS/bug-19/state" "$CS/bug-19/state.real"; ln -s state.real "$CS/bug-19/state"
+  trc  "close refuses a symlinked state (2)" 2 "$CX" close bug-19 abandoned
+  rm -rf "$CS/bug-19" "$C/.agents/plans/bug-19"
+  # Upgrades: an open session survives a re-install; an install from before a key gets its default.
+  "$CX" start bug '#15' >/dev/null
+  "$CX" run gather-evidence -- true >/dev/null
+  cp "$CS/bug-15/state" "$WORK/debugcli.state"; cp "$CS/bug-15/report.md" "$WORK/debugcli.report"
+  "$HARNESS/install.sh" --team "$C" >/dev/null 2>&1
+  t    "upgrade: a re-install leaves the session's files as they were" bash -c "cmp -s '$CS/bug-15/state' '$WORK/debugcli.state' && cmp -s '$CS/bug-15/report.md' '$WORK/debugcli.report' && test -f '$CS/bug-15/evidence/E-1.md'"
+  t    "...and harness.conf has one DEBUG_ASK line" test "$(grep -c '^DEBUG_ASK=' "$C/.agents/harness.conf")" = 1
+  t    "upgrade: an open session survives a re-install" bash -c "'$CX' status | grep -qxF 'session: bug-15 (bug, #15), open'"
+  t    "...a recorded close too"        bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "...and run still captures evidence" bash -c "'$CX' run gather-evidence -- true | grep -qF 'E-2 (gather-evidence, exit 0)' && test -f '$CS/bug-15/evidence/E-2.md'"
+  cp "$C/.agents/harness.conf" "$WORK/debugcli.conf"
+  edit "$C/.agents/harness.conf" '/^DEBUG_/d'
+  t    "upgrade: no DEBUG_* keys, the defaults apply" bash -c "'$CX' status | grep -qxF 'session: bug-15 (bug, #15), open' && '$CX' start bug '#16' | grep -q '^started bug-16 '"
+  out="$(CLAUDECODE=1 "$CX" close bug-16 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "...DEBUG_ASK's default has rootcause, so close reviewed is refused (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
+  t    "...and verify stays quiet"     test "$("$C/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  cp "$WORK/debugcli.conf" "$C/.agents/harness.conf"
+  "$CX" close bug-15 abandoned >/dev/null; "$CX" close bug-16 abandoned >/dev/null
+  echo "debug: skill, steps, and playbook"
+  DS="$C/.agents/skills/debug/SKILL.md"; DK="$C/.agents/builtin/workflows/debug/kinds/bug.md"
+  t    "the debug skill is installed"   test -f "$DS"
+  t    "...and listed in AGENTS.md"     grep -q '^- `debug`: ' "$C/AGENTS.md"
+  t    "the skill asks for the check-in with --force, so a re-ask after a reject is recorded" grep -qF "tasks ask <slug> T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve <slug>'" "$DS"
+  trc  "...and that ask passes the policy" 0 policy "$C" test ".agents/bin/tasks ask bug-1 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  trc  "...chained after another command it's blocked (2)" 2 policy "$C" test ".agents/bin/verify; .agents/bin/tasks ask bug-1 T1 --gate=impl --force 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  t    "...so the skill says to run it on its own" grep -qF "Ask with its own command" "$DS"
+  t    "the bug steps have a section per step" bash -c "for s in \$(sed -n 's/^steps: //p' '$DK'); do grep -q \"^## [0-9]\\. \$s\$\" '$DK' || exit 1; done"
+  t    "the seeded playbook has a section per bindable step" bash -c "b=\$(sed -n 's/^bindable: //p' '$DK'); test -n \"\$b\" && for s in \$b; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
+  t    "harness-tailor drafts the playbook" grep -qF '.agents/debug/playbook.md' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
+  t    "...and adds the AGENTS.md line" grep -qF 'Investigating a bug report: use the `debug` skill.' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
+  # The skill's bisect runs whole inside one debug run: HEAD is back on the branch when it records.
+  BI=$(repo debugbisect); mkdir -p "$BI/src"
+  "$HARNESS/install.sh" --team --workflow debug "$BI" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$BI/.agents/checks/$tier.sh"; done
+  commit "$BI" harness
+  printf 'int add(int a, int b) { return a + b; }\n' > "$BI/src/calc.c"; commit "$BI" good
+  printf '/* add */\n' >> "$BI/src/calc.c"; commit "$BI" comment
+  edit "$BI/src/calc.c" 's/a + b/a - b/'; commit "$BI" bad
+  BB="$(git -C "$BI" symbolic-ref --short HEAD)"
+  (cd "$BI" && .agents/commands/debug start bug '#3' >/dev/null)
+  out="$(cd "$BI" && .agents/commands/debug run isolate -- bash -c 'git bisect start HEAD HEAD~2 && git bisect run grep -q "a + b" src/calc.c; rc=$?; git bisect reset; exit $rc' 2>&1)" && rc=0 || rc=$?
+  t    "a bisect inside debug run: recorded as one entry, exit 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q '^E-1 (isolate, exit 0)' && grep -q 'is the first bad commit' '$BI/.agents/debug/sessions/bug-3/evidence/E-1.log'" _ "$out"
+  t    "...HEAD is back on the branch"  test "$(git -C "$BI" symbolic-ref --short HEAD 2>/dev/null)" = "$BB"
+  t    "...and the session is still current" bash -c "cd '$BI' && .agents/commands/debug status | grep -qxF 'session: bug-3 (bug, #3), open'"
+fi
+}
+group grp_debug_cli
+grp_debug_checks() {   # the debug pack's checks, each with its absence case
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflow: checks"
+  K=$(repo debugchk)
+  mkdir -p "$K/src" "$K/docs"; printf 'int add(int a, int b) { return a - b; }\n' > "$K/src/calc.c"; printf '# Simulator\n' > "$K/docs/sim.md"
+  commit "$K" base
+  "$HARNESS/install.sh" --team --workflow debug "$K" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$K/.agents/checks/$tier.sh"; done
+  commit "$K" harness
+  KX="$K/.agents/commands/debug"; KV="$K/.agents/bin/verify"
+  fresh(){ rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*; "$KX" start bug "#$1" >/dev/null; KS="$K/.agents/debug/sessions/bug-$1"; KR="$KS/root-cause.md"; }
+  hyp(){ printf '## H-1: add subtracts\n- would confirm: add(2,2) is 0\n- status: confirmed (E-1)\n' >> "$KS/hypotheses.md"; }
+  echo "debug: no reproduction attempt"
+  t    "absence: no open session, full tier quiet" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  fresh 5
+  t    "absence: a session with no root cause, full tier quiet" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  hyp; "$KX" run gather-evidence -- cat "$K/src/calc.c" >/dev/null
+  rcdoc "$KR" evidence-only
+  t    "the turn tier doesn't ask for an attempt" test "$("$KV" 2>&1)" = "ok verify turn"
+  t    "...nor the edit tier"           test "$("$KV" --tier=edit "$KR" 2>&1)" = "ok verify edit"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "full: a root cause and no reproduction attempt" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '.agents/debug/sessions/bug-5/root-cause.md:1: error: [debug-no-repro-attempt] root-cause.md is written, but session bug-5 has no reproduction attempt'" _ "$out"
+  t    "...with a fix line"             hasl "$out" "  fix: try to reproduce it once: .agents/commands/debug run reproduce --attempt=reproduce -- <command>"
+  out="$("$KX" approve bug-5 2>&1)" && rc=0 || rc=$?
+  t    "approve runs it too, and refuses" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-no-repro-attempt]' && printf '%s' \"\$1\" | grep -qF 'debug: fix these before approving bug-5'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  out="$(CLAUDECODE=1 "$KX" close bug-5 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "DEBUG_ASK empty: close reviewed runs it too, and refuses" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-no-repro-attempt]' && printf '%s' \"\$1\" | grep -qF 'debug: fix these before closing bug-5'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  "$KX" run reproduce --attempt=reproduce -- false >/dev/null || true
+  t    "an attempt with no outcome still needs one" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a reproduction attempt, but its outcome isn't recorded"
+  awk '{ print } /^attempt:/ { print "outcome: maybe" }' "$KS/evidence/E-2.md" > "$KS/evidence/E-2.tmp" && mv "$KS/evidence/E-2.tmp" "$KS/evidence/E-2.md"
+  t    "...and a hand-written outcome that isn't one of the three is named" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a reproduction attempt, but its outcome 'maybe' isn't one of reproduced|partial|not-reproduced"
+  "$KX" outcome E-2 not-reproduced >/dev/null
+  t    "not reproduced is enough: the attempt is what's required" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  fresh 6
+  hyp; "$KX" run gather-evidence -- cat "$K/src/calc.c" >/dev/null
+  rcdoc "$KR" confirmed
+  "$KX" run isolate --attempt=confirm -- true >/dev/null
+  t    "a confirmation attempt with no outcome still needs one" hasl "$("$KV" --tier=full 2>&1)" "[debug-no-repro-attempt] E-2 is a confirmation attempt, but its outcome isn't recorded"
+  "$KX" outcome E-2 reproduced >/dev/null
+  t    "a confirmation attempt with its outcome is a reproduction attempt too" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  echo "debug: root-cause format and confidence"
+  fresh 6; hyp
+  "$KX" run reproduce --attempt=reproduce -- false >/dev/null || true; "$KX" outcome E-1 reproduced >/dev/null
+  rcdoc "$KR" reproduced
+  t    "a root cause in the fixed format passes" test "$("$KV" 2>&1)" = "ok verify turn"
+  edit "$KR" '/^## Ruled out/d'
+  t    "a missing heading"              hasl "$("$KV" 2>&1)" ".agents/debug/sessions/bug-6/root-cause.md:1: error: [debug-format] root-cause.md has no '## Ruled out' section"
+  out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md 2>&1)" && rc=0 || rc=$?
+  t    "the edit tier checks an edited root cause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-format]'" _ "$out"
+  trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  rcdoc "$KR" confirmed
+  t    "Confidence must be what the attempts support" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" 'Confidence:'): error: [debug-format] Confidence: confirmed, but the recorded attempts support reproduced"
+  "$KX" run isolate --attempt=confirm -- false >/dev/null || true; "$KX" outcome E-2 reproduced >/dev/null
+  t    "confirmed: a confirmation attempt reproduced it" test "$("$KV" 2>&1)" = "ok verify turn"
+  echo "confirm_after: 2" >> "$KS/state"
+  out="$("$KV" 2>&1 || true)"
+  t    "a confirmation for a rejected root cause doesn't confirm (confirm_after)" hasl "$out" "Confidence: confirmed, but the recorded attempts support reproduced"
+  t    "...and the fix says why"        hasl "$out" "(confirmation attempts up to E-2 were for a rejected root cause and don't count)"
+  edit "$KS/state" '/^confirm_after:/d'
+  "$KX" outcome E-2 not-reproduced >/dev/null; "$KX" outcome E-1 partial >/dev/null
+  rcdoc "$KR" reproduced
+  t    "a partial reproduction is evidence-only" hasl "$("$KV" 2>&1)" "Confidence: reproduced, but the recorded attempts support evidence-only"
+  edit "$KR" 's/^Confidence:.*/Confidence:/'
+  t    "an empty Confidence line"       hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" 'Confidence:'): error: [debug-format] Confidence: (empty), but the recorded attempts support evidence-only"
+  edit "$KR" '/^Confidence:/d'
+  t    "no Confidence line, at the Reproduction heading" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" '## Reproduction'): error: [debug-format] no 'Confidence:' line under ## Reproduction"
+  trc  "approve refuses on it"          1 "$KX" approve bug-6
+  rcdoc "$KR" evidence-only
+  t    "evidence-only: no attempt reproduced it" test "$("$KV" 2>&1)" = "ok verify turn"
+  awk '{ print } /^## Summary$/ { print "**Confidence:** confirmed" }' "$KR" > "$KR.tmp" && mv "$KR.tmp" "$KR"
+  t    "every Confidence line is judged: an overclaim under Summary" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" '**Confidence:** confirmed'): error: [debug-format] a second Confidence line (Confidence: confirmed); keep one, under ## Reproduction"
+  rcdoc "$KR" evidence-only; { printf '\357\273\277'; tail -n +3 "$KR"; } > "$KR.tmp" && mv "$KR.tmp" "$KR"
+  t    "a byte-order mark doesn't hide a line-1 heading" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '# Root cause\n\n##  Summary ##\nx\n```a` b, not a fence\n\n## Cause\n   ## Evidence:\n## Reproduction\n### Steps\n- **Confidence:** `Evidence-only`\n\n## Ruled Out\n## Fix Direction\n' > "$KR"
+  t    "agent formatting: heading case, spacing, colons, closing hashes, a bold list-item Confidence line" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '# Root cause\n\n## Reproduction\n```\n## Summary\nConfidence: confirmed\n```\nConfidence: evidence-only\n## Cause\n' > "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "several missing headings are one finding (a fenced block doesn't count)" hasl "$out" "root-cause.md:1: error: [debug-format] root-cause.md has no '## Summary', '## Evidence', '## Ruled out', '## Fix direction' sections"
+  t    "...the Confidence line after the fence is found" bash -c "! printf '%s' \"\$1\" | grep -qF \"no 'Confidence:' line\"" _ "$out"
+  t    "...and the fenced one isn't judged" bash -c "! printf '%s' \"\$1\" | grep -qF 'Confidence: confirmed'" _ "$out"
+  printf '# Root cause\n\n## Summary\nx\n```sh\n``` not a close\n~~~\n## Cause\n## Evidence\n## Reproduction\nConfidence: evidence-only\n## Ruled out\n## Fix direction\n' > "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "a fence that never closes is named on the heading finding" hasl "$out" "root-cause.md has no '## Cause', '## Evidence', '## Reproduction', '## Ruled out', '## Fix direction' sections (the fence at line 5 never closes, so the rest of the file is code)"
+  t    "...and on the Confidence finding" hasl "$out" "no 'Confidence:' line under ## Reproduction (the fence at line 5 never closes, so the rest of the file is code)"
+  printf '# Root cause\n\n## Summary :\nConfidence: evidence-only\n## Cause\n## Evidence\n## Reproduction\nE-1.\n## Ruled out\n## Fix direction\n' > "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "a heading with a space before its colon still counts" bash -c "! printf '%s' \"\$1\" | grep -qF 'has no'" _ "$out"
+  t    "a Confidence line outside ## Reproduction is named as misplaced" hasl "$out" "root-cause.md:4: error: [debug-format] a Confidence line outside ## Reproduction (Confidence: evidence-only); move it there"
+  t    "...not as a missing one too"    bash -c "! printf '%s' \"\$1\" | grep -qF \"no 'Confidence:' line\"" _ "$out"
+  edit "$KR" 's/^Confidence: evidence-only/Confidence: confirmed/'
+  t    "...and when it says too much, the fix says what to make it" hasl "$("$KV" 2>&1)" "  fix: move it under ## Reproduction, and make it 'Confidence: evidence-only', what the recorded attempts support"
+  echo "debug: cited evidence"
+  rcdoc "$KR" evidence-only
+  t    "absence: citing E-1 and H-1, which exist, says nothing" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\nSee also E-9 and H-4.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "an E-id debug run didn't capture" hasl "$out" "root-cause.md:$(line_of "$KR" 'See also'): error: [debug-evidence-missing] E-9 isn't in this session's evidence: there's no evidence/E-9.md"
+  t    "...and an H-id hypotheses.md doesn't have" hasl "$out" "root-cause.md:$(line_of "$KR" 'See also'): error: [debug-evidence-missing] H-4 isn't in hypotheses.md"
+  out="$("$KX" approve bug-6 2>&1)" && rc=0 || rc=$?
+  t    "approve refuses on a missing E-id" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-evidence-missing] E-9'" _ "$out"
+  out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md 2>&1)" && rc=0 || rc=$?
+  t    "evidence-missing: the edit tier checks an edited root cause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-evidence-missing]'" _ "$out"
+  trc  "evidence-missing: ...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  rcdoc "$KR" evidence-only
+  printf '\nNot E-10 (E-2, E-3). XE-5, H-7x, e-7, E-2, `E-8`.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "ids end at a non-digit: E-10 isn't E-1, and (E-2, E-3) is two" bash -c "printf '%s' \"\$1\" | grep -qF '] E-10 isn'\''t' && printf '%s' \"\$1\" | grep -qF '] E-3 isn'\''t'" _ "$out"
+  t    "...a backticked E-8 is a citation" hasl "$out" "] E-8 isn't in this session's evidence"
+  t    "...XE-5, H-7x, and lowercase e-7 aren't" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 3
+  rcdoc "$KR" evidence-only
+  printf '\nIn italics: _E-9_ and _H-4_.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "...nor do underscore italics hide one (_E-9_, _H-4_)" bash -c "printf '%s' \"\$1\" | grep -qF 'root-cause.md:$(line_of "$KR" 'In italics'): error: [debug-evidence-missing] E-9 isn'\''t' && printf '%s' \"\$1\" | grep -qF '] H-4 isn'\''t'" _ "$out"
+  rcdoc "$KR" evidence-only
+  printf '# E-3\nstep: gather-evidence\n\n## Output\nIt subtracts, I looked.\n' > "$KS/evidence/E-3.md"
+  printf '\nE-3 says so.\nE-3 again, and E-3.\nE-3 once more.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "a hand-written entry isn't evidence, and says so" hasl "$out" "root-cause.md:$(line_of "$KR" 'E-3 says'): error: [debug-evidence-missing] E-3 isn't in this session's evidence: evidence/E-3.md isn't an entry debug run captured (also cited on lines $(line_of "$KR" 'E-3 again'), $(line_of "$KR" 'E-3 once'))"
+  t    "...one finding for an id cited many times" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 1
+  rm -f "$KS/evidence/E-3.md"
+  rcdoc "$KR" evidence-only
+  printf '\nE-11\nE-12\nE-13\nH-14\nE-15\nH-16\n' >> "$KR"
+  out="$("$KX" approve bug-6 2>&1 || true)"
+  t    "at most 5 per file: the fifth names the rest" hasl "$out" "root-cause.md:$(line_of "$KR" 'E-15'): error: [debug-evidence-missing] 2 more cited ids are missing: E-15 (line $(line_of "$KR" 'E-15')), H-16 (line $(line_of "$KR" 'H-16'))"
+  t    "...five in all"                 test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 5
+  rcdoc "$KR" evidence-only
+  printf '\n```\nE-9 in pasted output, H-4 too\n```\n' >> "$KR"
+  printf '\n```\n## H-4: a heading in a fence\n```\n' >> "$KS/hypotheses.md"
+  t    "a citation in a fence is code, not a citation" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\nH-4 is the one.\n' >> "$KR"
+  t    "...and an H-4 heading in a fence isn't a hypothesis" hasl "$("$KV" 2>&1)" "[debug-evidence-missing] H-4 isn't in hypotheses.md"
+  rcdoc "$KR" evidence-only
+  edit "$KS/hypotheses.md" '/^```$/,/^```$/d'
+  printf -- '- status: ruled out (E-7)\n' >> "$KS/hypotheses.md"
+  t    "hypotheses.md is checked too"   hasl "$("$KV" 2>&1)" "hypotheses.md:$(line_of "$KS/hypotheses.md" '(E-7)'): error: [debug-evidence-missing] E-7 isn't in this session's evidence"
+  printf '\nH-4 is the one, E-9 shows it.\n' >> "$KR"
+  out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/hypotheses.md 2>&1)" && rc=0 || rc=$?
+  t    "the edit tier checks an edited hypotheses.md" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'hypotheses.md:$(line_of "$KS/hypotheses.md" '(E-7)'): error: [debug-evidence-missing] E-7'" _ "$out"
+  t    "...and root-cause.md's H-ids against it" hasl "$out" "root-cause.md:$(line_of "$KR" 'H-4 is'): error: [debug-evidence-missing] H-4 isn't in hypotheses.md"
+  t    "...but not its E-ids (hypotheses.md doesn't change them)" bash -c "! printf '%s' \"\$1\" | grep -qF '] E-9'" _ "$out"
+  edit "$KS/hypotheses.md" '$d'
+  printf '```\n' >> "$KS/hypotheses.md"
+  t    "an unclosed fence in hypotheses.md is named on H findings" hasl "$("$KV" 2>&1)" "H-4 isn't in hypotheses.md (the fence at line $(line_of "$KS/hypotheses.md" '```') in hypotheses.md never closes)"
+  edit "$KS/hypotheses.md" '$d'
+  rcdoc "$KR" evidence-only
+  t    "absence: only real ids, nothing to say" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\n## Notes\nE-50 looked odd.\n' >> "$KS/hypotheses.md"
+  t    "hypotheses.md: only H sections cite evidence, not other notes" test "$("$KV" 2>&1)" = "ok verify turn"
+  edit "$KS/hypotheses.md" '/^## Notes$/,$d'
+  mv "$KS/hypotheses.md" "$WORK/debugchk.hyp"
+  t    "no hypotheses.md: a cited H-1 is missing" hasl "$("$KV" 2>&1)" "root-cause.md:$(line_of "$KR" '(H-1)'): error: [debug-evidence-missing] H-1 isn't in hypotheses.md: there's no hypotheses.md"
+  mv "$WORK/debugchk.hyp" "$KS/hypotheses.md"
+  "$KX" reject bug-6 'see E-42' >/dev/null
+  t    "a rejection's reason in hypotheses.md isn't a citation" test "$("$KV" 2>&1)" = "ok verify turn"
+  echo "debug: experiments left"
+  fresh 7; hyp
+  "$KX" run reproduce --attempt=reproduce -- true >/dev/null; "$KX" outcome E-1 not-reproduced >/dev/null
+  printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$K/src/calc.c"
+  t    "absence: before the root cause, experiments are fine" test "$("$KV" 2>&1)" = "ok verify turn"
+  rcdoc "$KR" evidence-only
+  out="$("$KV" 2>&1 || true)"
+  t    "once root-cause.md exists, an experiment left in the tree" hasl "$out" "src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists"
+  t    "...and the fix restores it from HEAD" hasl "$out" "  fix: experiments end when the root cause is written: restore it with git checkout HEAD -- src/calc.c"
+  printf 'int probe;\n' > "$K/src/probe.c"
+  out="$("$KV" 2>&1 || true)"
+  t    "...new files count too"         hasl "$out" "src/probe.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists: a new file"
+  t    "...and their fix says to delete them" hasl "$out" "  fix: experiments end when the root cause is written: delete the file"
+  out="$("$KX" approve bug-7 2>&1)" && rc=0 || rc=$?
+  t    "approve refuses on it"          bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/probe.c:1: error: [debug-experiments-left]'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  t    "the full tier checks it too"    hasl "$("$KV" --tier=full 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
+  t    "an empty DEBUG_SCOPE in the environment changes nothing (harness.conf only)" hasl "$(env DEBUG_SCOPE= "$KV" --no-cache 2>&1)" "src/probe.c:1: error: [debug-experiments-left]"
+  trc  "...the edit tier doesn't"       0 "$K/.agents/bin/check" src/probe.c
+  edit "$K/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  out="$(CLAUDECODE=1 "$KX" close bug-7 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "DEBUG_ASK empty: close reviewed refuses on it" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/probe.c:1: error: [debug-experiments-left]' && printf '%s' \"\$1\" | grep -qF 'debug: fix these before closing bug-7'" _ "$out"
+  tnot "...recording nothing"           test -e "$KS/approvals"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
+  t    "absence: an empty DEBUG_SCOPE turns it off" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q src/calc.c .agents/harness.conf; rm -f "$K/src/probe.c"
+  t    "cleaned up: passes"             test "$("$KV" 2>&1)" = "ok verify turn"
+  # The working tree now matches the clean run just above, so this also guards checks/state.sh's
+  # cache key: without the index in it, verify would answer from the cache.
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; git -C "$K" add src/calc.c
+  git -C "$K" show HEAD:src/calc.c > "$K/src/calc.c"
+  out="$("$KV" 2>&1 || true)"
+  t    "a change only in the index counts too" hasl "$out" "src/calc.c:1: error: [debug-experiments-left]"
+  t    "...and its fix restores from HEAD, not the index" hasl "$out" "restore it with git checkout HEAD -- src/calc.c"
+  git -C "$K" reset -q -- src/calc.c
+  printf 'int fresh;\n' > "$K/src/new.c"; git -C "$K" add src/new.c
+  out="$("$KV" 2>&1 || true)"
+  t    "a staged new file"              hasl "$out" "src/new.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists: a new file, staged"
+  t    "...is unstaged, then deleted"   hasl "$out" "unstage it with git rm -q --cached -- src/new.c, then delete the file"
+  git -C "$K" rm -q --cached -- src/new.c; rm -f "$K/src/new.c"
+  rm -f "$K/src/calc.c"
+  out="$("$KV" 2>&1 || true)"
+  t    "a deleted tracked file"         hasl "$out" "src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7's root-cause.md exists: the file is deleted"
+  t    "...is restored from HEAD"       hasl "$out" "restore it with git checkout HEAD -- src/calc.c"
+  git -C "$K" checkout -q HEAD -- src/calc.c
+  git -C "$K" mv src/calc.c src/sum.c
+  out="$("$KV" 2>&1 || true)"
+  t    "a staged rename shows both paths" bash -c "printf '%s' \"\$1\" | grep -qF 'src/calc.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7'\''s root-cause.md exists: the file is deleted' && printf '%s' \"\$1\" | grep -qF 'src/sum.c:1: error: [debug-experiments-left] an uncommitted change in DEBUG_SCOPE (**) while bug-7'\''s root-cause.md exists: a new file, staged'" _ "$out"
+  git -C "$K" mv src/sum.c src/calc.c
+  t    "...moved back: passes"          test "$("$KV" 2>&1)" = "ok verify turn"
+  for i in 01 02 03 04 05 06 07; do printf 'int p;\n' > "$K/src/p$i.c"; done
+  out="$("$KV" 2>&1 || true)"
+  t    "seven experiments: five findings" test "$(printf '%s\n' "$out" | grep -c 'debug-experiments-left')" = 5
+  t    "...the fifth names the rest"    hasl "$out" "src/p05.c:1: error: [debug-experiments-left] 3 more files have uncommitted changes in DEBUG_SCOPE (**): src/p05.c:1, src/p06.c:1, src/p07.c:1"
+  for i in 08 09 10; do printf 'int p;\n' > "$K/src/p$i.c"; done
+  t    "status names the first eight, then how many more" hasl "$("$KX" status 2>&1 || true)" "experiments in the tree: src/p01.c:1, src/p02.c:1, src/p03.c:1, src/p04.c:1, src/p05.c:1, src/p06.c:1, src/p07.c:1, src/p08.c:1 and 2 more"
+  out="$("$KX" close bug-7 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "close abandoned refuses, listing them the same way" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'src/p08.c:1 and 2 more (if they'\''re the human'\''s own work'" _ "$out"
+  rm -f "$K"/src/p*.c
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
+  printf 'notes\n' >> "$K/README.md"
+  t    "a change outside DEBUG_SCOPE isn't an experiment" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'int moved;\n' > "$K/docs/moved.c"
+  # Given files, verify's own key leaves out other untracked paths; checks/state.sh adds them.
+  t    "an untracked file outside DEBUG_SCOPE isn't one" test "$("$KV" README.md 2>&1)" = "ok verify turn"
+  mv "$K/docs/moved.c" "$K/src/moved.c"
+  t    "...moved into it, it is, even with verify given files" hasl "$("$KV" README.md 2>&1)" "src/moved.c:1: error: [debug-experiments-left]"
+  rm -f "$K/src/moved.c"
+  git -C "$K" checkout -q README.md .agents/harness.conf
+  printf '\n' >> "$K/.agents/debug/playbook.md"
+  t    "harness files aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  # What sync writes outside .agents/ (an upgrade or a sync during the session) isn't one either.
+  edit "$K/.agents/harness.conf" 's/^LINK_MODE=.*/LINK_MODE="copy"/'
+  (cd "$K" && .agents/bin/sync >/dev/null 2>&1); commit "$K" "copy renders"
+  t    "team mode, copy renders: the lock lists them" hasl "$(cat "$K/.agents/generated.lock")" '".claude/skills/validate": '
+  printf '\nA newer line.\n' >> "$K/.claude/skills/validate/SKILL.md"; rm -rf "$K/.claude/skills/plan-task"
+  printf '{}\n' > "$K/.github/hooks/harness.json"
+  awk '{ print } /<!-- harness:core:start -->/ { print "- A rule from a newer harness." }' "$K/AGENTS.md" > "$K/AGENTS.tmp" && mv "$K/AGENTS.tmp" "$K/AGENTS.md"
+  ln -s ../../.agents/skills/newer "$K/.claude/skills/newer"
+  t    "renders the lock lists, harness-only files, managed blocks, and link mirrors aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
+  ln -s ../../src "$K/.claude/skills/mine"; printf 'A project fact.\n' >> "$K/AGENTS.md"; printf '\n' >> "$K/.claude/settings.json"
+  out="$("$KV" 2>&1 || true)"
+  t    "...but a project line in AGENTS.md is" bash -c "printf '%s' \"\$1\" | grep -qE '^AGENTS\.md:[0-9]+: error: \[debug-experiments-left\]'" _ "$out"
+  t    "...and so are a link sync didn't make, and a config it merges into the project's own" bash -c "printf '%s' \"\$1\" | grep -qF '.claude/skills/mine:1: error: [debug-experiments-left]' && printf '%s' \"\$1\" | grep -qF '.claude/settings.json:'" _ "$out"
+  git -C "$K" reset -q --hard HEAD~1; rm -f "$K/.claude/skills/newer" "$K/.claude/skills/mine"
+  t    "...back to link renders: passes" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\n@.agents/AGENTS.local.md\n' >> "$K/CLAUDE.md"
+  t    "sync's own lines in CLAUDE.md aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'A project note.\n' >> "$K/CLAUDE.md"
+  t    "...a project line in it is"     bash -c "printf '%s' \"\$1\" | grep -qE '^CLAUDE\.md:[0-9]+: error: \[debug-experiments-left\]'" _ "$("$KV" 2>&1 || true)"
+  git -C "$K" checkout -q CLAUDE.md
+  printf '<!-- harness:mine:start -->\nA block sync never writes.\n<!-- harness:mine:end -->\n' >> "$K/AGENTS.md"
+  t    "a block sync doesn't render in AGENTS.md is the project's" bash -c "printf '%s' \"\$1\" | grep -qE '^AGENTS\.md:[0-9]+: error: \[debug-experiments-left\]'" _ "$("$KV" 2>&1 || true)"
+  git -C "$K" checkout -q AGENTS.md
+  python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); d["agents"] = {"src/calc.c": "0"}; json.dump(d, open(sys.argv[1], "w"))' "$K/.agents/generated.lock"
+  printf '/* probe */\n' >> "$K/src/calc.c"
+  t    "a lock entry outside the tools' render dirs hides nothing" hasl "$("$KV" 2>&1 || true)" "src/calc.c:2: error: [debug-experiments-left]"
+  git -C "$K" checkout -q .agents/generated.lock src/calc.c
+  printf 'int probe;\n' > "$K/src/probe.c"
+  "$KX" reject bug-7 'not it' >/dev/null
+  t    "after a reject sets root-cause.md aside, experiments are fine again" test "$("$KV" 2>&1)" = "ok verify turn"
+  rm -f "$K/src/probe.c"
+  echo "debug: commits during a session"
+  KB=$(git -C "$K" rev-parse HEAD); KM=$(git -C "$K" symbolic-ref --short HEAD)
+  fresh 8
+  hook "$K" turn-start claude '{"session_id":"k1"}' >/dev/null 2>&1
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; (cd "$K" && git -c core.hooksPath=/dev/null commit -qam "Fix add")
+  out="$(hook "$K" stop-gate claude '{"session_id":"k1"}' 2>&1)" && rc=0 || rc=$?
+  t    "a commit during a session: the stop gate blocks" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \"src/calc.c:1: error: [debug-committed] commit \$2 changes src/calc.c while debug session bug-8 is open\"" _ "$out" "$(git -C "$K" rev-parse --short=7 HEAD)"
+  t    "verify --since judges it too"   hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed]"
+  t    "...plain verify sees a clean tree" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" reset -q --hard HEAD~1
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  hook "$K" turn-start claude '{"session_id":"k2"}' >/dev/null 2>&1
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; (cd "$K" && git -c core.hooksPath=/dev/null commit -qam "Fix add")
+  trc  "absence: no session, a commit in the turn passes" 0 hook "$K" stop-gate claude '{"session_id":"k2"}'
+  fresh 9
+  t    "a commit made before the session started passes" test "$("$KV" --since=HEAD~1 2>&1)" = "ok verify turn"
+  printf '\n' >> "$K/.agents/debug/playbook.md"
+  awk '{ print } /<!-- harness:core:start -->/ { print "- A rule from a newer harness." }' "$K/AGENTS.md" > "$K/AGENTS.tmp" && mv "$K/AGENTS.tmp" "$K/AGENTS.md"
+  commit "$K" "Upgrade the harness"
+  t    "...so does one that changes only harness files" test "$("$KV" --since=HEAD~2 2>&1)" = "ok verify turn"
+  printf 'notes\n' >> "$K/README.md"; commit "$K" "Notes"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
+  t    "...and one outside DEBUG_SCOPE" test "$("$KV" --since=HEAD~3 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/harness.conf
+  for i in 1 2 3 4 5 6; do printf 'int c%s;\n' "$i" > "$K/src/c$i.c"; commit "$K" "c$i"; done
+  out="$("$KV" --since=HEAD~6 2>&1 || true)"
+  t    "six commits: five findings"     test "$(printf '%s\n' "$out" | grep -c '\[debug-committed\]')" = 5
+  t    "...the fifth names the rest"    hasl "$out" "src/c5.c:1: error: [debug-committed] 2 more commits change files in DEBUG_SCOPE (**) while debug session bug-9 is open: $(git -C "$K" rev-parse --short=7 HEAD~1), $(git -C "$K" rev-parse --short=7 HEAD)"
+  t    "...and the oldest's fix keeps the work as uncommitted changes" hasl "$out" "git reset --soft $(git -C "$K" rev-parse --short=7 HEAD~5)~1"
+  git -C "$K" reset -q --hard "$KB"
+  printf 'one\ntwo\nthree\n' > "$K/src/three.c"; commit "$K" "Three"
+  fresh 10
+  printf 'one\ntwo\nTHREE\n' > "$K/src/three.c"; commit "$K" "Change line 3"
+  mv "$K" "$K.moved"
+  t    "the start record still matches after the clone moves" hasl "$("$K.moved/.agents/bin/verify" --since=HEAD~1 2>&1)" "while debug session bug-10 is open"
+  mv "$K.moved" "$K"
+  t    "the finding is at the commit's first changed line" hasl "$("$KV" --since=HEAD~1 2>&1)" "src/three.c:3: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
+  t    "the full tier judges commits too" hasl "$("$KV" --tier=full --since=HEAD~1 2>&1)" "src/three.c:3: error: [debug-committed]"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
+  t    "absence: an empty DEBUG_SCOPE turns it off" test "$("$KV" --since=HEAD~1 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/harness.conf
+  edit "$KS/state" "s/^start: .*/start: $(git -C "$K" rev-parse HEAD)/"
+  t    "state's start moved past the commit: still reported (the start is recorded)" hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
+  edit "$KS/state" 's/^branch: .*/branch: elsewhere/'
+  t    "...state's branch moved: still the current session" hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
+  t    "...and status still finds it"   hasl "$("$KX" status 2>&1)" "session: bug-10 "
+  mkdir -p "$K/.agents/debug/sessions/bug-99"
+  printf 'kind: bug\nref: #99\nbranch: %s\nseq: 99\nstep: intake\nstatus: open\n' "$KM" > "$K/.agents/debug/sessions/bug-99/state"
+  t    "a session dir made by hand doesn't take the current one's place" hasl "$("$KV" --since=HEAD~1 2>&1)" "while debug session bug-10 is open"
+  git -C "$K" checkout -q -b other
+  t    "...and status lists it as having no start record" hasl "$("$KX" status 2>&1)" "bug-99 (no start record)"
+  git -C "$K" checkout -q "$KM"; git -C "$K" branch -q -D other
+  git -C "$K" reset -q --hard "$KB"
+  echo "debug: rebases, pulls, and other branches"
+  printf 'int a;\n' > "$K/src/a.c"; commit "$K" "A"
+  git -C "$K" checkout -q -b up HEAD~1; printf 'int u;\n' > "$K/src/u.c"; commit "$K" "U"; git -C "$K" checkout -q "$KM"
+  fresh 11
+  KA=$(git -C "$K" rev-parse HEAD); KU=$(git -C "$K" rev-parse up)
+  git -C "$K" -c core.hooksPath=/dev/null rebase -q up
+  t    "a rebased copy of a commit from before isn't new work" test "$("$KV" --since="$KA" --since="$KU" 2>&1)" = "ok verify turn"
+  printf 'int r;\n' > "$K/src/r.c"; commit "$K" "R"; git -C "$K" update-ref refs/remotes/origin/main HEAD
+  t    "...nor is a commit a remote has (a pull)" test "$("$KV" --since=HEAD~1 2>&1)" = "ok verify turn"
+  git -C "$K" update-ref -d refs/remotes/origin/main
+  git -C "$K" reset -q --hard "$KB"; git -C "$K" branch -q -D up
+  fresh 12
+  git -C "$K" checkout -q -b feat
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; commit "$K" "Fix add on a branch"
+  out="$("$KV" --since="$KB" 2>&1 || true)"
+  t    "a branch off where the session started: no current session, still reported, naming it" hasl "$out" "src/calc.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/calc.c while debug session bug-12 is open"
+  t    "...and the fix undoes it here"  hasl "$out" "git reset --soft $(git -C "$K" rev-parse --short=7 HEAD)~1"
+  KX1=$(git -C "$K" rev-parse HEAD)
+  printf 'int add(int a, int b) { return b + a; }\n' > "$K/src/calc.c"; commit "$K" "Y2"
+  t    "a later turn that started on the branch: a session open on main doesn't flag its commits" test "$("$KV" --since="$KX1" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q "$KM"
+  out="$("$KV" --since="$KB" 2>&1 || true)"
+  t    "back on the session's branch, the commit made on the other one is caught" hasl "$out" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 feat) changes src/calc.c while debug session bug-12 is open"
+  t    "...and the fix names the branch that has it" hasl "$out" "It's on feat, not here: undo it there"
+  git -C "$K" branch -q -D feat
+  blob=$(printf 'int side;\n' | git -C "$K" hash-object -w --stdin)
+  GIT_INDEX_FILE="$WORK/side.idx" git -C "$K" read-tree HEAD
+  GIT_INDEX_FILE="$WORK/side.idx" git -C "$K" update-index --add --cacheinfo "100644,$blob,src/side.c"
+  side=$(git -C "$K" commit-tree "$(GIT_INDEX_FILE="$WORK/side.idx" git -C "$K" write-tree)" -p HEAD -m "Side")
+  git -C "$K" update-ref refs/heads/side "$side"
+  t    "a commit made on another branch while staying on this one is caught" hasl "$("$KV" --since="$KB" 2>&1)" "src/side.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 side) changes src/side.c while debug session bug-12 is open"
+  git -C "$K" branch -q -D side
+  printf 'int p;\n' > "$K/src/p.c"; commit "$K" "P"
+  fresh 13
+  git -C "$K" checkout -q -b old HEAD~1
+  printf 'int old;\n' > "$K/src/old.c"; commit "$K" "Old"
+  t    "a commit on a branch that doesn't descend from where the session started stays quiet" test "$("$KV" --since="$KB" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q "$KM"; git -C "$K" branch -q -D old; git -C "$K" reset -q --hard "$KB"
+  git -C "$K" checkout -q --orphan fresh-root; git -C "$K" rm -rq --cached .
+  fresh 14
+  git -C "$K" add src/calc.c; git -C "$K" -c core.hooksPath=/dev/null commit -qm "First"
+  t    "a first commit (no parent) during a session is reported" hasl "$("$KV" --since="$KB" 2>&1)" "src/calc.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/calc.c while debug session bug-14 is open"
+  git -C "$K" checkout -q -f "$KM"; git -C "$K" branch -q -D fresh-root
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  t    "cleaned up: passes"             test "$("$KV" --since="$KB" 2>&1)" = "ok verify turn"
+  echo "debug: playbook format"
+  KP="$K/.agents/debug/playbook.md"
+  t    "absence: the seeded playbook passes" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  printf -- '- run: ./sim --scenario <file>\n- context: docs/sim.md\n- skill: validate\n' >> "$KP"
+  t    "real bindings pass, with no session open" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  printf '## lunch\n- tool: fork\n- just a note\n- context: docs/missing.md\n- skill: no-such-skill\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "a section that isn't a step"    hasl "$out" "playbook.md:$(line_of "$KP" '## lunch'): error: [debug-playbook-format] 'lunch' isn't a step a debug workflow binds"
+  t    "a binding it doesn't know"      hasl "$out" "playbook.md:$(line_of "$KP" 'tool: fork'): error: [debug-playbook-format] 'tool:' isn't a binding"
+  t    "a line that isn't a binding"    hasl "$out" "'just a note' isn't a binding"
+  t    "a context that doesn't exist"   hasl "$out" "[debug-playbook-format] context docs/missing.md doesn't exist"
+  t    "a skill that doesn't resolve"   hasl "$out" "[debug-playbook-format] skill no-such-skill doesn't resolve"
+  t    "...and an unknown key's fix says where notes go" hasl "$out" "  fix: use skill:, run:, or context:; a note goes on a plain line, not a list item"
+  trc  "the edit tier checks an edited playbook" 1 "$K/.agents/bin/check" .agents/debug/playbook.md
+  t    "the turn tier doesn't"          test "$("$KV" 2>&1)" = "ok verify turn"
+  trc  "...nor the edit tier when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- run:\n' >> "$KP"
+  t    "an empty binding"               hasl "$("$KV" --tier=full 2>&1)" "playbook.md:$(wc -l < "$KP" | tr -d ' '): error: [debug-playbook-format] run: has nothing after it"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- context: ../outside.md\n- context: %s\n- context: `docs/sim.md`\n- run: touch %s\n' "$K/docs/sim.md" "$WORK/playbook-ran" >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "a context that leaves the repo" hasl "$out" "playbook.md:$(line_of "$KP" 'context: ../outside.md'): error: [debug-playbook-format] context ../outside.md is outside the repo"
+  t    "...or is absolute, even when it exists" hasl "$out" "[debug-playbook-format] context $K/docs/sim.md is outside the repo"
+  t    "...and a quoted one in the repo passes" test "$(printf '%s\n' "$out" | grep -c '\[debug-playbook-format\]')" = 2
+  tnot "a run: line is never run"       test -e "$WORK/playbook-ran"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- skill: no-such-skill\n' >> "$KP"; printf 'LIBRARIES="vendor/skills"\n' >> "$K/.agents/harness.conf"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "a skill that doesn't resolve while a listed library isn't here: a tooling problem" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qF \"the playbook's skill no-such-skill isn't available: LIBRARIES lists vendor/skills, which isn't here\"" _ "$out"
+  printf '## lunch\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "...a tooling problem doesn't hide the findings: exit 1, both printed" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF \"[debug-playbook-format] 'lunch' isn't a step\" && printf '%s' \"\$1\" | grep -qF \"infra: the playbook's skill no-such-skill isn't available\"" _ "$out"
+  printf -- '- skill: also-missing\n- skill: no-such-skill\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "...one LIBRARIES note for every skill it may hide" test "$(printf '%s\n' "$out" | grep -c '^infra:')" = 1
+  t    "...naming each skill once"      hasl "$out" "infra: the playbook's skills no-such-skill, also-missing aren't available: LIBRARIES lists vendor/skills, which isn't here"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- skill: validate\n' >> "$KP"
+  t    "...while a skill that resolves passes" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  git -C "$K" checkout -q .agents/debug/playbook.md .agents/harness.conf
+  printf -- '```\n## lunch\n- tool: fork\n```\n- run: ./sim\n' >> "$KP"
+  t    "fenced lines are examples, not bindings" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '+ context: docs/missing.md\n~~~\n- run: ./sim\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "a + list item is a binding too" hasl "$out" "playbook.md:$(line_of "$KP" '+ context:'): error: [debug-playbook-format] context docs/missing.md doesn't exist"
+  t    "a fence that never closes"      hasl "$out" "playbook.md:$(line_of "$KP" '~~~'): error: [debug-playbook-format] the fence at line $(line_of "$KP" '~~~') never closes, so the rest of the file is code"
+  t    "...with a fix line"             hasl "$out" "  fix: close it with \`\`\` or delete it"
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  echo 'docs/gen.md' >> "$K/.git/info/exclude"
+  printf -- '- context: `docs/gen.md` \n' >> "$KP"
+  t    "a backquoted context to an ignored file that isn't there" hasl "$("$KV" --tier=full 2>&1)" "[debug-playbook-format] context docs/gen.md doesn't exist"
+  printf '# Generated\n' > "$K/docs/gen.md"
+  t    "...passes once it's there (verify's cache key sees it)" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  rm -f "$K/docs/gen.md"; git -C "$K" checkout -q .agents/debug/playbook.md; edit "$K/.git/info/exclude" '/^docs\/gen\.md$/d'
+  awk '{ print } $0 == "## intake" { print "```"; print "- run: ./sim"; print "```" }' "$KP" > "$KP.tmp" && mv "$KP.tmp" "$KP"
+  fresh 10
+  t    "a fenced binding doesn't count in status" hasl "$("$KX" status)" "steps with no playbook bindings: intake, reproduce, gather-evidence, isolate ("
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  printf -- '- run: ./sim --scenario <file>\n' >> "$KP"
+  fresh 10
+  t    "status stops listing a step once it has a binding" hasl "$("$KX" status)" "steps with no playbook bindings: intake, reproduce, gather-evidence ("
+  git -C "$K" checkout -q .agents/debug/playbook.md
+  echo "debug: linked worktrees"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  git -C "$K" worktree add -q -b wt "$WORK/debugchk-wt"
+  "$KX" start bug "#20" >/dev/null
+  (cd "$WORK/debugchk-wt" && .agents/commands/debug start bug "#20" >/dev/null)
+  t    "the same slug in two worktrees: each has its own session" test -f "$WORK/debugchk-wt/.agents/debug/sessions/bug-20/state"
+  t    "...the main worktree still finds its own" hasl "$("$KX" status 2>&1)" "session: bug-20 "
+  t    "...and so does the linked one"  hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
+  "$KX" close bug-20 abandoned -- worktree test >/dev/null
+  t    "...closing one leaves the other open" hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
+  cp "$K/.agents/debug/sessions/bug-20/approvals" "$WORK/debugchk-wt/.agents/debug/sessions/bug-20/approvals"
+  t    "...the closed one's line copied into the other closes nothing" bash -c "cd '$WORK/debugchk-wt' && .agents/commands/debug status | grep -qxF 'session: bug-20 (bug, #20), open'"
+  out="$(cd "$WORK/debugchk-wt" && .agents/bin/verify 2>&1)" && rc=0 || rc=$?
+  t    "...and it's a policy block there" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '.agents/debug/sessions/bug-20/approvals:1: error: [debug-approval-unrecorded] this close line belongs to another session'" _ "$out"
+  git -C "$K" worktree remove --force "$WORK/debugchk-wt"; git -C "$K" branch -q -D wt
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  echo "debug: approvals debug didn't record"
+  fresh 9
+  t    "absence: a session with no approvals says nothing" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'rootcause\tbug-9\tme\t2026-10-03\tforged\n' >> "$KS/approvals"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "a forged approval is a policy block" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | sed -n 1p | grep -qx 'BLOCK verify turn' && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-9/approvals:1: error: [debug-approval-unrecorded] this rootcause line wasn't written by debug approve, reject, or close, so it doesn't count\"" _ "$out"
+  t    "...with a fix line"             hasl "$out" "  fix: only the human approves or rejects a root cause: ask them to run .agents/commands/debug approve bug-9 (or reject bug-9 <why>); delete this line"
+  tnot "...and no date from the line"   hasl "$out" "2026-10-03"
+  t    "...the session stays open"      bash -c "'$KX' status | grep -qxF 'session: bug-9 (bug, #9), open'"
+  t    "...status says it isn't counted" hasl "$("$KX" status)" "not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-9/approvals:1 rootcause"
+  trc  "...the edit tier judges an edited approvals file, like feature-driven" 2 "$K/.agents/bin/check" .agents/debug/sessions/bug-9/approvals
+  trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  printf -- '- skill: no-such-skill\n' >> "$KP"; printf 'LIBRARIES="vendor/skills"\n' >> "$K/.agents/harness.conf"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "a forged approval and a tooling problem: still a policy block, both printed" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '[debug-approval-unrecorded]' && printf '%s' \"\$1\" | grep -qF \"infra: the playbook's skill no-such-skill isn't available\"" _ "$out"
+  git -C "$K" checkout -q .agents/debug/playbook.md .agents/harness.conf
+  printf 'close\tbug-9\tme\t2026-10-03\tabandoned\n' >> "$KS/approvals"
+  out="$("$KV" 2>&1 || true)"
+  t    "a forged close line too"        hasl "$out" ".agents/debug/sessions/bug-9/approvals:2: error: [debug-approval-unrecorded] this close line wasn't written by debug approve, reject, or close, so it doesn't count"
+  t    "...whose fix says how a session closes" hasl "$out" "  fix: a session ends only through .agents/commands/debug close bug-9 abandoned|duplicate|reviewed, or the human's approve; delete this line"
+  t    "...and it closes nothing"       bash -c "'$KX' status | grep -qxF 'session: bug-9 (bug, #9), open'"
+  "$KX" close bug-9 abandoned >/dev/null
+  t    "...and a closed session's forged line still blocks" bash -c "'$KV' >/dev/null 2>&1; test \$? = 2"
+  t    "...its fix just says to delete it: nothing's left to ask for" bash -c "'$KV' 2>&1 | grep -A1 -F 'bug-9/approvals:1: error: [debug-approval-unrecorded]' | grep -qxF '  fix: delete this line'"
+  printf 'rootcause\tbug-9 . .agents/debug/sessions/bug-9\tt (simulated human)\t2026-10-03\tx\n' > "$KS/approvals"; cp "$KS/approvals" "$WORK/sim.line"; mkdir -p "$K/.git/ai-harness"; cat "$WORK/sim.line" >> "$K/.git/ai-harness/debug-approvals"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "a simulated approval while the switch is off: a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-9/approvals:1: error: [debug-approval-simulated] this rootcause line was made by a simulated human\"" _ "$out"
+  printf 'close\tbug-9 . .agents/debug/sessions/bug-9\tt (simulated human)\t2026-10-03\tabandoned\n' | tee -a "$KS/approvals" >> "$K/.git/ai-harness/debug-approvals"
+  t    "...a simulated close's fix says to ask the human" hasl "$("$KV" 2>&1)" "  fix: only the human closes a session whose root cause waits on them: ask them to run .agents/commands/debug close bug-9 abandoned|duplicate, or to approve or reject it"
+  h="$(python3 -c 'import hashlib; print(hashlib.sha256(b"debugchk-token-123456").hexdigest())')"
+  printf '#simulated-human\t%s\n' "$h" >> "$K/.git/ai-harness/debug-approvals"
+  printf 'on\t%s\tinstall.sh --simulated-human, run from a terminal\n' "$h" > "$K/.git/ai-harness/simulated-human"
+  t    "...with the switch on, they count: no block" bash -c "'$KV' 2>&1 | sed -n 1p | grep -qx 'ok verify turn'"
+  rm -f "$KS/approvals"
+  printf 'on\t%s\tinstall.sh --simulated-human, run from a terminal\n' "$(python3 -c 'import hashlib; print(hashlib.sha256(b"agent-made-token-1234").hexdigest())')" > "$K/.git/ai-harness/simulated-human"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "a hand-written switch: a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".git/ai-harness/simulated-human:1: error: [debug-simulated-human] this simulated-human switch wasn't written by install.sh --simulated-human, so it's off\"" _ "$out"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  t    "absence: no sessions, debug says nothing about it" test "$("$KV" 2>&1)" = "ok verify turn"
+  t    "...nor on the full tier"        test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  rm -f "$K/.git/ai-harness/simulated-human"
+  fresh 16
+  "$KX" close bug-16 abandoned >/dev/null; cp "$KS/approvals" "$WORK/debugchk.close16"
+  fresh 16
+  cp "$WORK/debugchk.close16" "$KS/approvals"
+  t    "a close line from an earlier session with the same slug closes nothing" bash -c "'$KX' status | grep -qxF 'session: bug-16 (bug, #16), open'"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "...and it's a policy block"     bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-16/approvals:1: error: [debug-approval-unrecorded] this close line belongs to another session (in another worktree, or one this slug had before), so it doesn't count\"" _ "$out"
+  t    "...whose fix is to delete it"   hasl "$out" "  fix: delete this line"
+  t    "...and status lists it"         hasl "$("$KX" status)" "not counted, another session's: .agents/debug/sessions/bug-16/approvals:1 close"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  echo "debug: a check-in a check can't run"
+  fresh 15; hyp
+  "$KX" run reproduce --attempt=reproduce -- true >/dev/null; "$KX" outcome E-1 not-reproduced >/dev/null
+  rcdoc "$KR" evidence-only
+  cp "$K/.git/index" "$WORK/debugchk.index"; printf 'not an index' > "$K/.git/index"
+  out="$("$KX" approve bug-15 2>&1)" && rc=0 || rc=$?
+  cp "$WORK/debugchk.index" "$K/.git/index"
+  t    "git can't read the index: approve exits 3" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q '^infra: git ' && printf '%s' \"\$1\" | grep -qF \"debug: a check couldn't run, so approving bug-15 waits until it can\"" _ "$out"
+  tnot "...approving nothing"           test -e "$KS/approvals"
+  t    "...and once git reads it again, approve passes" bash -c "'$KX' approve bug-15 | grep -qxF 'approved bug-15'"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+fi
+}
+group grp_debug_checks
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

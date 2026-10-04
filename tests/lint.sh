@@ -90,6 +90,14 @@ grep -rnIE --exclude-dir=__pycache__ '\.agents/(workflows|stacks)/' workflows st
 n="$(wc -l < template/.agents/core/AGENTS.core.md | tr -d ' ')"
 [ "$n" -le 25 ] || finding "template/.agents/core/AGENTS.core.md:$n" budget "core rules are $n lines; keep them near 20 (max 25): every line loads in every session"
 
+# 6b. A skill's description lands in AGENTS.md's skills index, where sync counts every
+# TODO(harness-tailor) as a marker still to tailor.
+grep -E '(^|/)SKILL\.md$' "$OUT.all" | while IFS= read -r f; do
+  grep -n '^description:.*TODO(harness-tailor)' "$f" | while IFS=: read -r n _; do
+    finding "$f:$n" tailor-marker "a skill description that names TODO(harness-tailor) lands in AGENTS.md, and sync counts it as a marker left; say it in other words"
+  done
+done
+
 # 7. Never install the harness into its own repo
 [ -e .agents ] && finding ".agents:1" self-install "the harness is installed into its own repo; remove .agents/ (try it in a scratch repo under /tmp)"
 [ -e AGENTS.md ] && finding "AGENTS.md:1" self-install "AGENTS.md at the repo root means the harness got installed here; remove it"

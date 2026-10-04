@@ -332,11 +332,15 @@ _py_fmt_run() {
   else
     (cd "$AGENTS_ROOT" && "${PY_CMD[@]}" --check --diff --quiet "$@") >"$raw" 2>&1 || rc=$?
   fi
-  # Hunk lengths tell header lines from removed lines that happen to start with "-- ".
-  awk -v tool="$tool" '
+  # Hunk lengths tell header lines from removed lines that happen to start with "-- ". black names
+  # files by absolute path (through symlinks: /tmp may come out as /private/tmp), so the project's
+  # root comes off.
+  r1="$AGENTS_ROOT/" r2="$(cd "$AGENTS_ROOT" && pwd -P)/" awk -v tool="$tool" '
     function hunk_done() { return old <= 0 && new <= 0 }
     hunk_done() && /^--- / {
       f = substr($0, 5); sub(/\t.*$/, "", f); cell = ""
+      if (index(f, ENVIRON["r1"]) == 1) f = substr(f, length(ENVIRON["r1"]) + 1)
+      else if (index(f, ENVIRON["r2"]) == 1) f = substr(f, length(ENVIRON["r2"]) + 1)
       if ((i = index(f, ":cell ")) > 0) { cell = substr(f, i + 1) ": "; f = substr(f, 1, i - 1) }
       want = 1; next
     }
@@ -376,8 +380,39 @@ py_format_check() {
   _py_format_checked "${files[@]}"
 }
 
-# py_format_check_all: the same for the whole project (the formatter's own file discovery)
+# py_format_check_all: the same for the whole project (the formatter's own file discovery). black
+# reads .gitignore but not .git/info/exclude, where local mode hides the harness's own files, so
+# its findings for files git ignores are dropped (_py_fmt_seen); ruff reads both.
 py_format_check_all() { _py_format_checked .; }
+
+# _py_fmt_seen <ruff|black> .: _py_fmt_run on the whole project, minus findings for files git
+# ignores; outside git, all of them
+_py_fmt_seen() {
+  local tool="$1" seen out rc=0
+  shift
+  seen="$(mktemp)"
+  # Names as they are (quotePath off), so a non-ASCII one matches black's.
+  if ! (cd "$AGENTS_ROOT" && git -c core.quotePath=false ls-files -co --exclude-standard) > "$seen" 2>/dev/null; then
+    rm -f "$seen"
+    _py_fmt_run "$tool" "$@"
+    return $?
+  fi
+  out="$(_py_fmt_run "$tool" "$@")" || rc=$?
+  # The list goes in with -v, not as a first file: an empty one would swallow every finding.
+  printf '%s\n' "$out" | awk -v seen="$seen" -v rc="$rc" '
+    BEGIN { while ((getline l < seen) > 0) ok[l] = 1 }
+    match($0, /^[^ \t:][^:]*:[0-9]+: error: /) {
+      f = $0; sub(/:[0-9]+: error: .*/, "", f); rest = substr($0, length(f) + 1)
+      sub(/^\.\//, "", f)
+      if (!(f in ok)) next
+      $0 = f rest; found = 1
+    }
+    $0 != "" { print; other = other || !/^[^ \t:][^:]*:[0-9]+: error: / }
+    END { exit found ? 1 : (rc == 1 ? (other ? 2 : 0) : rc) }'
+  rc=$?
+  rm -f "$seen"
+  return "$rc"
+}
 
 _py_format_checked() {
   local tool rc=0 why
@@ -390,7 +425,11 @@ _py_format_checked() {
   esac
   [ -n "$PY_FORMAT" ] && why="PY_FORMAT=$PY_FORMAT asks for it"
   _py_find "$tool" || { _py_missing "$tool" "$why" PY_FORMAT; return $?; }
-  agents_lint "$tool-format" _py_fmt_run "$tool" "$@"
+  if [ "$tool" = black ] && [ "$*" = . ]; then
+    agents_lint "$tool-format" _py_fmt_seen "$tool" "$@"
+  else
+    agents_lint "$tool-format" _py_fmt_run "$tool" "$@"
+  fi
 }
 
 # --- lint ---------------------------------------------------------------------------------

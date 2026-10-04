@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# debug workflow CLI. Harness-owned: replaced on upgrade. `debug --help` lists the commands.
+#   debug start <kind> <ref | -> [--file=<path>]   open a session for a bug report
+#   debug run <step> [--attempt=...] -- <cmd...>  run a command; its output becomes evidence
+#   debug outcome <E-n> <outcome>                 record how an attempt turned out
+#   debug status [slug]                           where a session stands
+#   debug approve <slug> | reject <slug> <why>    the root-cause check-in (people only)
+#   debug close <slug> <reason>                   end a session without an approval
+# Runs from whichever library has the pack. The project is the one the pack sits in
+# (.agents/builtin/ or .agents/library/), else $AGENTS_ROOT, else the nearest directory at or
+# above the working directory with an .agents/harness.conf.
+PACK="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$#" -eq 1 ] && { [ "$1" = -h ] || [ "$1" = --help ]; }; then   # the usage needs no project
+  command -v python3 >/dev/null 2>&1 || { echo "debug: python3 not found" >&2; exit 3; }
+  exec python3 "$PACK/debug_tools.py" cli "$PWD" "$1"
+fi
+case "$PACK" in
+  */.agents/builtin/workflows/*|*/.agents/library/workflows/*) ROOT="${PACK%/.agents/*}" ;;
+  *)
+    ROOT="${AGENTS_ROOT:-}"
+    if [ -z "$ROOT" ]; then
+      ROOT="$PWD"
+      while [ ! -f "$ROOT/.agents/harness.conf" ] && [ "$ROOT" != / ]; do ROOT="$(dirname "$ROOT")"; done
+      [ -f "$ROOT/.agents/harness.conf" ] || { echo "debug: run it inside a project with the harness installed" >&2; exit 2; }
+    fi ;;
+esac
+command -v python3 >/dev/null 2>&1 || { echo "debug: python3 not found" >&2; exit 3; }
+exec python3 "$PACK/debug_tools.py" cli "$ROOT" "$@"

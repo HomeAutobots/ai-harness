@@ -1,0 +1,7 @@
+# debug workflow (ai-harness pack)
+deny-cmd .agents/commands/debug approve   # approving a root cause is a human decision
+deny-cmd .agents/commands/debug reject   # rejecting a root cause is a human decision
+deny-cmd .agents/builtin/workflows/debug/bin/debug approve   # approving a root cause is a human decision
+deny-cmd .agents/builtin/workflows/debug/bin/debug reject   # rejecting a root cause is a human decision
+deny-regex ^(?![ \t]*(?:[\w./-]*/)?(?:tasks[ \t]+ask|echo|printf)\b(?:[ \t]+(?:[^\s'"$`\;&|<>()]+|'[^'\n]*'|"[^"$`\\\n]*"))*[ \t]*\Z)[\s\S]*(^|[\s/;&|("'`])(?:debug(?:_tools\.py)?['"]?\s+(?:['"]?cli['"]?\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?['"]?(?:approve|reject)|approvals(?:\.py)?['"]?\s+['"]?simulated-human)\b   # approving or rejecting a root cause is a human decision, and so is turning on the simulated human (this catches the usual spellings; debug itself also refuses in an agent shell, and only approvals it records count). A plain one-line tasks ask, echo, or printf that only names it is fine.
+deny-regex (^|[\s;&|("'`])--simulated-human\b   # only a person turns on the simulated human (install.sh --simulated-human), and never in a real project
