@@ -3221,6 +3221,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...a backticked E-8 is a citation" hasl "$out" "] E-8 isn't in this session's evidence"
   t    "...XE-5, H-7x, and lowercase e-7 aren't" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 3
   rcdoc "$KR" evidence-only
+  printf '\nIn italics: _E-9_ and _H-4_.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "...nor do underscore italics hide one (_E-9_, _H-4_)" bash -c "printf '%s' \"\$1\" | grep -qF 'root-cause.md:$(line_of "$KR" 'In italics'): error: [debug-evidence-missing] E-9 isn'\''t' && printf '%s' \"\$1\" | grep -qF '] H-4 isn'\''t'" _ "$out"
+  rcdoc "$KR" evidence-only
   printf '# E-3\nstep: gather-evidence\n\n## Output\nIt subtracts, I looked.\n' > "$KS/evidence/E-3.md"
   printf '\nE-3 says so.\nE-3 again, and E-3.\nE-3 once more.\n' >> "$KR"
   out="$("$KV" 2>&1 || true)"

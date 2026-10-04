@@ -48,8 +48,8 @@ TAIL = 60   # lines of a command's output kept in its evidence entry (E-<n>.md).
             # read E-<n>.log: checks/state.sh leaves *.log out of verify's cache key.
 STATE_KEYS = ("kind", "ref", "start", "branch", "seq", "step", "status", "note", "confirm_after")
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
-EID = re.compile(r"(?<![A-Za-z0-9-])E-([0-9]+)(?!\w)")   # (?!\w): the \b hypotheses() ends a heading's id with
-HID = re.compile(r"(?<![A-Za-z0-9-])H-([0-9]+)(?!\w)")
+EID = re.compile(r"(?<![A-Za-z0-9-])E-([0-9]+)(?![A-Za-z0-9])")   # h_sections() ends a heading's id the same way
+HID = re.compile(r"(?<![A-Za-z0-9-])H-([0-9]+)(?![A-Za-z0-9])")
 # A check that emits a policy-block kind must list it here, or it exits 1.
 BLOCKING = ("debug-approval-unrecorded", "debug-approval-simulated", "debug-simulated-human")
 
@@ -558,7 +558,7 @@ def citations(path, kinds, only=None):
     """[(kind, n, [line nos])] of the ids a file cites outside fences (on the lines in only, when
     given), kind 'E' or 'H' (only those in kinds), in the order they're first cited; each line once
     per id. An id is E- or H- in capitals, then digits, with no letter, digit or hyphen before it
-    and no letter, digit or underscore after it ('E-1.', '(E-2, E-3)'; not 'XE-5', 'H-7x' or 'e-7'),
+    and no letter or digit after it ('E-1.', '(E-2, E-3)', '_E-4_'; not 'XE-5', 'H-7x' or 'e-7'),
     so E-10 is never E-1. Ids in code spans and URLs count ('`E-9`'); fenced ones don't."""
     found = {}
     for n, line in unfenced(read_lines(path))[0]:
@@ -1101,7 +1101,7 @@ def h_sections(path):
     out, cur = [], None
     lines, at = unfenced(read_lines(path))
     for n, line in lines:
-        m = re.match(r"^## H-([0-9]+)\b", line)
+        m = re.match(r"^## H-([0-9]+)(?![A-Za-z0-9])", line)   # ends like HID, so citations agree
         if m:
             cur = [int(m.group(1)), n, "open", False, {n}]
             out.append(cur)
