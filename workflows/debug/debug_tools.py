@@ -450,10 +450,10 @@ def no_repro_attempt(ctx):
 
 def heading(line):
     """A level 1 or 2 markdown heading as (level, name), the name normalized for matching: spaces
-    collapsed, a trailing colon and closing hashes dropped, lowercased ('  ## Ruled  Out: ##' ->
-    'ruled out'). None for any other line ('###', '#12 says', '##Cause')."""
+    collapsed, a trailing colon (and a space before it) and closing hashes dropped, lowercased
+    ('  ## Ruled  Out : ##' -> 'ruled out'). None for any other line ('###', '#12 says', '##Cause')."""
     m = re.match(r"^ {0,3}(#{1,2})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$", line)
-    return (len(m.group(1)), " ".join(m.group(2).split()).rstrip(":").lower()) if m else None
+    return (len(m.group(1)), " ".join(m.group(2).split()).rstrip(":").strip().lower()) if m else None
 
 
 CONF_LINE = re.compile(r"^\s*(?:[-*+]\s+)?[*_`]*confidence[*_`]*\s*:[\s*_`]*([A-Za-z-]*)", re.I)
@@ -501,7 +501,8 @@ def rc_format(ctx):
     """debug-format (edit when root-cause.md is edited, turn, full, check-in): a fixed heading is
     missing (one finding names them all), the Confidence: line under ## Reproduction is missing
     or isn't what the recorded attempts support (confidence(), which honors confirm_after), or
-    another Confidence line anywhere says something else."""
+    another Confidence line anywhere says something else. With none under ## Reproduction, the
+    first one elsewhere is named as being in the wrong place."""
     rc = ctx.path("root-cause.md") if ctx.slug else ""
     if not rc or not ctx.judged(rc):
         return []
@@ -515,7 +516,14 @@ def rc_format(ctx):
                            "use the fixed headings, in order: %s" % ", ".join("## " + x for x in HEADINGS)))
     want = confidence(evidence(ctx.sdir), ctx.state)
     after = confirm_after(ctx.state)
-    if stated is None:
+    if stated is None and others:   # one elsewhere and none under ## Reproduction: it's in the wrong place
+        n, v = others.pop(0)
+        out.append(finding(rel, n, "debug-format",
+                           "a Confidence line outside ## Reproduction (Confidence: %s); move it there%s"
+                           % (v[:40] or "(empty)", code),
+                           "move it under ## Reproduction%s" % ("" if v == want else ", and make it 'Confidence: "
+                                                               "%s', what the recorded attempts support" % want)))
+    elif stated is None:
         out.append(finding(rel, heads.get("reproduction", 1), "debug-format",
                            "no 'Confidence:' line under ## Reproduction%s" % code,
                            "add 'Confidence: %s', what the recorded attempts support" % want))

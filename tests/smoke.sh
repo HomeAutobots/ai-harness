@@ -3194,6 +3194,13 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$("$KV" 2>&1 || true)"
   t    "a fence that never closes is named on the heading finding" hasl "$out" "root-cause.md has no '## Cause', '## Evidence', '## Reproduction', '## Ruled out', '## Fix direction' sections (the fence at line 5 never closes, so the rest of the file is code)"
   t    "...and on the Confidence finding" hasl "$out" "no 'Confidence:' line under ## Reproduction (the fence at line 5 never closes, so the rest of the file is code)"
+  printf '# Root cause\n\n## Summary :\nConfidence: evidence-only\n## Cause\n## Evidence\n## Reproduction\nE-1.\n## Ruled out\n## Fix direction\n' > "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "a heading with a space before its colon still counts" bash -c "! printf '%s' \"\$1\" | grep -qF 'has no'" _ "$out"
+  t    "a Confidence line outside ## Reproduction is named as misplaced" hasl "$out" "root-cause.md:4: error: [debug-format] a Confidence line outside ## Reproduction (Confidence: evidence-only); move it there"
+  t    "...not as a missing one too"    bash -c "! printf '%s' \"\$1\" | grep -qF \"no 'Confidence:' line\"" _ "$out"
+  edit "$KR" 's/^Confidence: evidence-only/Confidence: confirmed/'
+  t    "...and when it says too much, the fix says what to make it" hasl "$("$KV" 2>&1)" "  fix: move it under ## Reproduction, and make it 'Confidence: evidence-only', what the recorded attempts support"
 fi
 }
 group grp_debug_checks
