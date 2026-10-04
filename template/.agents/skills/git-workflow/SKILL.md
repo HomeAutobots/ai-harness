@@ -17,4 +17,4 @@ Use gitflow for the mechanics. It builds names and messages that pass the checks
 6. **Review.** `gitflow review` lists the comments. Address every one: fix it, or explain why not. Never skip one silently. A comment that conflicts with the requirement, the plan, or another reviewer is a question for the human (`tasks ask`). Fixes go in as new commits unless the project rebases, pass the `validate` implementation gate, and get a reply per thread saying what changed.
 7. **Merge.** Only if `merge` is in `GIT_AGENT_MAY`, the PR is approved, and checks are green: `gitflow merge`. Never approve your own PR.
 
-When a git hook or the policy hook rejects a command, read the reason: it names the rule and the fix. Don't route around it with `--no-verify`, a different branch name, or raw git.
+When a git hook or the policy hook rejects a command, read the reason: it names the rule and the fix. Don't route around it with `--no-verify`, `core.hooksPath`, a different branch name, or raw git.

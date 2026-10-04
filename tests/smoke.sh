@@ -351,6 +351,149 @@ fi
 }
 group grp_policy
 
+grp_hook_gaps() {   # roadmap rows 44 (tool coverage), 36 (commit hooks stay on), 45 (agents_step)
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "hook tool coverage"
+  HG=$(repo hookgaps)
+  "$HARNESS/install.sh" --team "$HG" >/dev/null 2>&1
+  mkdir -p "$HG/src"
+  hgrc(){ local tool="$1" payload="$2" rc=0; hook "$HG" pre-tool "$tool" "$payload" >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }
+  hgout(){ hook "$HG" pre-tool "$1" "$2" 2>/dev/null || true; }
+  gsok(){ python3 -c "import json,sys; d=json.loads(sys.argv[1] or '{}'); assert $2" "$1"; }   # gsok <json text> <expr>
+  # Copilot CLI's rg (its grep, under another name): the camelCase payload, toolArgs a JSON string
+  pl='{"toolName":"rg","toolArgs":"{\"pattern\":\"KEY\",\"path\":\".env\"}"}'   # (a variable: bash 3.2 splits \" inside "$(...)")
+  t    "copilot rg: a search of a secret is denied" test "$(hgrc copilot "$pl")" = 2
+  t    "...with the deny JSON naming the path" bash -c "printf '%s' '{\"toolName\":\"rg\",\"toolArgs\":\"{\\\"pattern\\\":\\\"KEY\\\",\\\"path\\\":\\\".env\\\"}\"}' | (cd '$HG' && .agents/hooks/run pre-tool --tool=copilot) | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"permissionDecision\"]==\"deny\" and \".env\" in d[\"permissionDecisionReason\"]'"
+  pl='{"toolName":"rg","toolArgs":"{\"pattern\":\"KEY\",\"path\":\"src\"}"}'
+  t    "copilot rg: an ordinary search passes" test "$(hgrc copilot "$pl")" = 0
+  t    "copilot rg (PascalCase payload): denied the same" test "$(hgrc copilot '{"hook_event_name":"PreToolUse","tool_name":"rg","tool_input":{"pattern":"x","path":"certs/a.key"}}')" = 2
+  hgrc copilot '{"toolName":"zz_mystery"}' >/dev/null
+  t    "copilot rg isn't an unknown tool (an unknown one is)" bash -c "grep -q 'unknown-tool	zz_mystery$' '$HG/.agents/cache/hook-events.log' && ! grep -q 'unknown-tool	rg$' '$HG/.agents/cache/hook-events.log'"
+  # Claude Code's PowerShell and Monitor run commands (tool_input.command)
+  t    "claude PowerShell: policy-checked" test "$(hgrc claude '{"tool_name":"PowerShell","tool_input":{"command":"sudo Get-ChildItem"}}')" = 2
+  t    "claude PowerShell: an ordinary command passes" test "$(hgrc claude '{"tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem -Recurse"}}')" = 0
+  t    "claude Monitor: its command is policy-checked" test "$(hgrc claude '{"tool_name":"Monitor","tool_input":{"command":"tail -f .env"}}')" = 2
+  t    "claude Monitor: a WebSocket watch (no command) passes" test "$(hgrc claude '{"tool_name":"Monitor","tool_input":{"ws":{"url":"wss://example.com/feed"}}}')" = 0
+  # Gemini CLI's read_many_files, grep_search, glob: every path field the docs name
+  t    "gemini read_many_files: a secret in include is denied" gsok "$(hgout gemini '{"tool_name":"read_many_files","tool_input":{"include":["README.md",".env"]}}')" "d['decision'] == 'deny' and '.env' in d['reason']"
+  t    "gemini read_many_files: older releases' paths list too" gsok "$(hgout gemini '{"tool_name":"read_many_files","tool_input":{"paths":["src/a.py",".env"]}}')" "d['decision'] == 'deny'"
+  t    "gemini read_many_files: ordinary files pass" gsok "$(hgout gemini '{"tool_name":"read_many_files","tool_input":{"include":["README.md","src/**/*.py"]}}')" "d.get('decision') != 'deny'"
+  pl="{\"tool_name\":\"grep_search\",\"tool_input\":{\"pattern\":\"x\",\"dir_path\":\"$HOME/.ssh/keys\"}}"
+  t    "gemini grep_search: dir_path is checked" gsok "$(hgout gemini "$pl")" "d['decision'] == 'deny'"
+  t    "gemini grep_search: so is path" gsok "$(hgout gemini '{"tool_name":"grep_search","tool_input":{"pattern":"x","path":".env"}}')" "d['decision'] == 'deny'"
+  t    "gemini search_file_content (grep_search's legacy name) too" gsok "$(hgout gemini '{"tool_name":"search_file_content","tool_input":{"pattern":"x","path":".env"}}')" "d['decision'] == 'deny'"
+  pl="{\"tool_name\":\"glob\",\"tool_input\":{\"pattern\":\"*\",\"dir_path\":\"$HOME/.aws/conf\"}}"
+  t    "gemini glob: dir_path is checked" gsok "$(hgout gemini "$pl")" "d['decision'] == 'deny'"
+  t    "gemini grep_search: an ordinary search passes" gsok "$(hgout gemini '{"tool_name":"grep_search","tool_input":{"pattern":"x","dir_path":"src"}}')" "d.get('decision') != 'deny'"
+  # The matchers that bring those tools to the hook, rendered fresh and on an upgrade
+  jget(){ python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print($2)" "$1"; }
+  t    "claude matcher: PowerShell and Monitor join" test "$(jget "$HG/.claude/settings.json" "d['hooks']['PreToolUse'][0]['matcher']")" = "Bash|PowerShell|Monitor|Read|Grep|Glob|AskUserQuestion"
+  edit "$HG/.agents/harness.conf" 's/^ADAPTERS=.*/ADAPTERS="claude gemini"/'
+  "$HG/.agents/bin/sync" >/dev/null 2>&1
+  t    "gemini matcher: the read and search tools join" test "$(jget "$HG/.gemini/settings.json" "d['hooks']['BeforeTool'][0]['matcher']")" = "run_shell_command|read_file|read_many_files|grep_search|search_file_content|glob"
+  python3 - "$HG" <<'EOF'
+import json, sys
+for f, ev, old in ((".claude/settings.json", "PreToolUse", "Bash|Read|Grep|Glob|AskUserQuestion"),
+                   (".gemini/settings.json", "BeforeTool", "run_shell_command|read_file")):
+    p = sys.argv[1] + "/" + f
+    d = json.load(open(p))
+    d["hooks"][ev][0]["matcher"] = old
+    json.dump(d, open(p, "w"))
+EOF
+  "$HARNESS/install.sh" "$HG" >/dev/null 2>&1
+  t    "upgrade: an old install's claude matcher is re-rendered" test "$(jget "$HG/.claude/settings.json" "[g['matcher'] for g in d['hooks']['PreToolUse']]")" = "['Bash|PowerShell|Monitor|Read|Grep|Glob|AskUserQuestion']"
+  t    "upgrade: ...and its gemini matcher" test "$(jget "$HG/.gemini/settings.json" "[g['matcher'] for g in d['hooks']['BeforeTool']]")" = "['run_shell_command|read_file|read_many_files|grep_search|search_file_content|glob']"
+  # Absence: hooks off, or the policy hook left out, changes nothing
+  t    "absence: hooks off lets the rg search through" bash -c "printf '%s' '{\"toolName\":\"rg\",\"toolArgs\":\"{\\\"path\\\":\\\".env\\\"}\"}' | (cd '$HG' && AGENTS_HOOKS=off .agents/hooks/run pre-tool --tool=copilot)"
+  t    "absence: ...and the PowerShell command" bash -c "printf '%s' '{\"tool_name\":\"PowerShell\",\"tool_input\":{\"command\":\"sudo x\"}}' | (cd '$HG' && AGENTS_HOOKS=off .agents/hooks/run pre-tool --tool=claude)"
+  edit "$HG/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
+  "$HG/.agents/bin/sync" >/dev/null 2>&1
+  t    "absence: no policy in HOOKS, no pre-tool matcher" bash -c "! grep -q PreToolUse '$HG/.claude/settings.json' && ! grep -q BeforeTool '$HG/.gemini/settings.json'"
+  t    "absence: ...and the PowerShell command passes" test "$(hgrc claude '{"tool_name":"PowerShell","tool_input":{"command":"sudo x"}}')" = 0
+  edit "$HG/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy edit turn questions"/'
+  "$HG/.agents/bin/sync" >/dev/null 2>&1
+
+  echo "commit hooks stay on (core.hooksPath, .git/hooks)"
+  printf 'GIT_LOCAL_HOOKS="on"\n' >> "$HG/.agents/git.conf"
+  (cd "$HG" && .agents/bin/gitflow install-hooks >/dev/null 2>&1)
+  commit "$HG" "harness"
+  git -C "$HG" checkout -q -b topic
+  cc(){ local rc=0; (cd "$HG" && .agents/bin/gitflow check-cmd "$1") >/dev/null 2>&1 || rc=$?; printf '%s' "$rc"; }
+  for c in 'git -c core.hooksPath=/dev/null commit -m x' 'git -c "core.hooksPath=/dev/null" commit -m x' \
+           'git -c CORE.HOOKSPATH=x status' 'git -C . -c core.hooksPath= commit -m x' \
+           'git --config-env=core.hooksPath=HP commit -m x' 'git --config-env core.hooksPath=HP commit -m x' \
+           'git config core.hooksPath /dev/null' 'git config --global core.hooksPath .husky' \
+           'git config --local --unset core.hooksPath' 'git config --unset-all core.hookspath' \
+           'git config set core.hooksPath x' 'git config unset --global core.hooksPath' \
+           'git config --file .git/config core.hooksPath x' 'git config core.hooksPath ""' \
+           'git config --remove-section core' 'git config rename-section core old' 'git -C . config core.hooksPath x' \
+           'git config -t path core.hooksPath /dev/null' 'git --git-dir .git -c core.hooksPath=x commit -m y' \
+           'git --no-optional-locks -c core.hooksPath=/dev/null commit -m y' 'git -p commit -n -m y'; do
+    t  "denied: $c" test "$(cc "$c")" = 2
+  done
+  for c in 'git config core.hooksPath' 'git config --get core.hooksPath' 'git config get core.hooksPath' \
+           'git config --show-origin core.hooksPath' 'git config user.name Someone' 'git config --global core.editor vim' \
+           'git config --unset user.email' 'git config --remove-section alias' 'git -c color.ui=never status' \
+           'git -c user.name=x commit -m y' 'git commit -m "normal work"' 'git -C' \
+           'git config core.hooksPath 2>/dev/null' 'git config --global core.hooksPath >/dev/null 2>&1' \
+           'git config core.hooksPath > /tmp/hp' 'git --version'; do
+    t  "allowed: $c" test "$(cc "$c")" = 0
+  done
+  out="$(cd "$HG" && .agents/bin/gitflow check-cmd 'git -c core.hooksPath=/dev/null commit -m x' 2>&1 || true)"
+  t    "...the reason says why"       hasl "$out" "commit hooks can't be switched off: core.hooksPath decides which git hooks run"
+  t    "through the hook: -c core.hooksPath denied" test "$(hgrc claude '{"tool_name":"Bash","tool_input":{"command":"git -c core.hooksPath=/dev/null commit -qam x"}}')" = 2
+  t    "through the hook: git config core.hooksPath denied" test "$(hgrc claude '{"tool_name":"Bash","tool_input":{"command":"git config core.hooksPath /dev/null"}}')" = 2
+  t    "through the hook: inside bash -c too" test "$(hgrc claude '{"tool_name":"Bash","tool_input":{"command":"bash -c \"git config core.hooksPath x\""}}')" = 2
+  t    "through the hook: a normal commit passes" test "$(hgrc claude '{"tool_name":"Bash","tool_input":{"command":"git add -A && git commit -m \"normal work\""}}')" = 0
+  t    "through the hook: normal git config passes" test "$(hgrc claude '{"tool_name":"Bash","tool_input":{"command":"git config user.name Someone"}}')" = 0
+  t    "through the hook: reading core.hooksPath quietly passes" test "$(hgrc claude '{"tool_name":"Bash","tool_input":{"command":"git config core.hooksPath >/dev/null 2>&1 && echo set"}}')" = 0
+  shpl(){ python3 -c 'import json,sys; print(json.dumps({"tool_name":sys.argv[1],"tool_input":{"command":sys.argv[2]}}))' "$1" "$2"; }
+  for c in 'rm .git/hooks/commit-msg' 'rm -f .git/hooks/pre-push && git commit -m x' 'mv .git/hooks/commit-msg /tmp/x' \
+           'chmod -x .git/hooks/commit-msg' 'echo exit 0 > .git/hooks/commit-msg' 'printf x >> ".git/hooks/pre-push"' \
+           'cp /dev/null .git/hooks/commit-msg' 'ln -sf /bin/true .git/hooks/commit-msg' "sed -i '' 1d .git/hooks/commit-msg" \
+           'rm -rf .git/hooks' 'truncate -s0 .git/hooks/commit-msg' 'bash -c "rm .git/hooks/commit-msg"' \
+           "sh -c 'chmod -x .git/hooks/commit-msg'" '/bin/rm .git/hooks/commit-msg' 'find .git/hooks -delete' \
+           'find .git/hooks -type f -exec rm {} +' 'perl -pi -e s/a/b/ .git/hooks/commit-msg' 'rm .git\hooks\commit-msg'; do
+    t  "policy denies: $c" test "$(hgrc claude "$(shpl Bash "$c")")" = 2
+  done
+  for c in 'Remove-Item .git\hooks\commit-msg' 'Set-Content -Path .git/hooks/commit-msg -Value x' 'del .git\hooks\pre-push'; do
+    t  "policy denies (PowerShell): $c" test "$(hgrc claude "$(shpl PowerShell "$c")")" = 2
+  done
+  for c in 'cat .git/hooks/commit-msg' 'ls -la .git/hooks' 'head -5 .git/hooks/pre-push > /tmp/hook-copy' 'grep -l gitflow .git/hooks/*' \
+           '.agents/bin/gitflow install-hooks' 'find .git/hooks -type f' 'find .git/hooks -exec cat {} +' 'Get-Content .git\hooks\commit-msg'; do
+    t  "policy allows: $c" test "$(hgrc claude "$(shpl Bash "$c")")" = 0
+  done
+  out="$(policy "$HG" test 'rm .git/hooks/commit-msg' 2>&1 || true)"
+  t    "policy test names the rule"   bash -c "printf '%s' \"\$1\" | grep -q '^blocked: this command is blocked by policy: changing or removing git hooks' && printf '%s' \"\$1\" | grep -q '^.agents/policy.conf:29: deny-regex'" _ "$out"
+  out="$(policy "$HG" test 'git config core.hooksPath /dev/null' 2>&1 || true)"
+  t    "policy test: core.hooksPath is gitflow's block" hasl "$out" "core.hooksPath decides which git hooks run, and setting it is the human's step (.agents/git.conf)"
+  printf "GIT_COMMIT_PATTERN='^Add '\n" >> "$HG/.agents/git.conf"
+  echo a > "$HG/a.txt"; git -C "$HG" add a.txt
+  tnot "the git hooks still run: a subject the commit-msg hook rejects fails" git -C "$HG" commit -qm "nope"
+  t    "...and a person's gitflow commit goes through them" bash -c "cd '$HG' && .agents/bin/gitflow commit 'Add a' >/dev/null 2>&1 && git log -1 --format=%s | grep -qx 'Add a'"
+  t    "absence: hooks off, core.hooksPath isn't checked" bash -c "printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git config core.hooksPath x\"}}' | (cd '$HG' && AGENTS_HOOKS=off .agents/hooks/run pre-tool --tool=claude)"
+  t    "absence: ...nor are writes to .git/hooks" bash -c "printf '%s' '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm .git/hooks/commit-msg\"}}' | (cd '$HG' && AGENTS_HOOKS=off .agents/hooks/run pre-tool --tool=claude)"
+fi
+
+echo "agents_step: exit 2 is never a policy block"
+AS="$WORK/agents-step"; mkdir -p "$AS"
+for n in 0 1 2 3; do printf '#!/bin/sh\necho "step out %s"\nexit %s\n' "$n" "$n" > "$AS/exit$n"; chmod +x "$AS/exit$n"; done
+SR=$(repo stepblock)
+"$HARNESS/install.sh" --team "$SR" >/dev/null 2>&1
+asrc(){ local rc=0; (unset AGENTS_ROOT; . "$SR/.agents/lib/feedback.sh"; agents_step demo "$AS/$1") >"$AS/out" 2>&1 || rc=$?; printf '%s' "$rc"; }
+t    "agents_step: 0 stays 0"          test "$(asrc exit0)" = 0
+t    "agents_step: 1 stays 1"          test "$(asrc exit1)" = 1
+t    "agents_step: 2 comes back as 1"  test "$(asrc exit2)" = 1
+t    "...and the FAIL line keeps the real code and output" bash -c "grep -qx 'FAIL demo (exit 2)' '$AS/out' && grep -qx 'step out 2' '$AS/out'"
+t    "agents_step: 3 stays 3"          test "$(asrc exit3)" = 3
+t    "agents_step: a missing command is still INFRA (3)" test "$(asrc nope)" = 3
+printf '#!/usr/bin/env bash\n. "$AGENTS_ROOT/.agents/lib/feedback.sh"\nagents_step tests "%s/exit2"\n' "$AS" > "$SR/.agents/checks/turn.sh"
+commit "$SR" "tier"; echo x >> "$SR/README.md"
+out="$(cd "$SR" && .agents/bin/verify --no-cache 2>&1)" && rc=0 || rc=$?
+t    "verify: a tier step that exits 2 is FAIL (1), not BLOCK" bash -c "test '$rc' = 1 && printf '%s' \"\$1\" | head -1 | grep -qx 'FAIL verify turn'" _ "$out"
+}
+group grp_hook_gaps
+
 grp_guard() {
 echo "guard"
 G=$(repo guard)
@@ -4431,7 +4574,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "codex: session and turn start"    jok "$C" "'session-start' in d['hooks']['SessionStart'][0]['hooks'][0]['command'] and 'turn-start' in d['hooks']['UserPromptSubmit'][0]['hooks'][0]['command']"
   t    "codex: command starts at the repo top" grep -qF 'git rev-parse --show-toplevel' "$C"
   t    "gemini: hand-added hook and keys kept" jok "$G" "d['theme'] == 'dark' and d['hooks']['AfterTool'][0]['hooks'][0]['command'] == './fmt.sh'"
-  t    "gemini: policy on shell and reads" jok "$G" "d['hooks']['BeforeTool'][0]['matcher'] == 'run_shell_command|read_file' and d['hooks']['BeforeTool'][0]['hooks'][0]['timeout'] == 10000"
+  t    "gemini: policy on shell and reads" jok "$G" "d['hooks']['BeforeTool'][0]['matcher'] == 'run_shell_command|read_file|read_many_files|grep_search|search_file_content|glob' and d['hooks']['BeforeTool'][0]['hooks'][0]['timeout'] == 10000"
   t    "gemini: edit feedback on write_file and replace" jok "$G" "d['hooks']['AfterTool'][1]['matcher'] == 'write_file|replace' and 'post-edit --tool=gemini' in d['hooks']['AfterTool'][1]['hooks'][0]['command']"
   t    "gemini: stop gate on AfterAgent, in ms" jok "$G" "d['hooks']['AfterAgent'][0]['hooks'][0]['timeout'] == 360000 and 'matcher' not in d['hooks']['AfterAgent'][0]"
   t    "gemini: session and turn start, named" jok "$G" "d['hooks']['SessionStart'][0]['hooks'][0]['name'] == 'ai-harness session-start' and 'turn-start' in d['hooks']['BeforeAgent'][0]['hooks'][0]['command']"
@@ -4729,15 +4872,15 @@ $(run pre-tool gemini '{"session_id":"u1","tool_name":"mcp_docs_search","tool_in
   t    "...as post-edit"                  grep -q "	copilot	post-edit	unknown-tool	replace_string_in_file$" "$UL"
   run pre-tool copilot "$(printf '%s' "$P1" | sed 's/u2/u3/')" >/dev/null
   t    "a new session logs it again"      test "$(unk)" = 3
-  out="$(run pre-tool claude '{"session_id":"u2","tool_name":"Monitor","tool_input":{"command":"tail -f log"}}')" && rc=0 || rc=$?
+  out="$(run pre-tool claude '{"session_id":"u2","tool_name":"WebFetch","tool_input":{"url":"https://example.com","prompt":"x"}}')" && rc=0 || rc=$?
   t    "claude: an unknown tool is allowed, quietly" test "$rc:$out" = "0:"
-  t    "...and logged"                    grep -q "	claude	pre-tool	unknown-tool	Monitor$" "$UL"
+  t    "...and logged"                    grep -q "	claude	pre-tool	unknown-tool	WebFetch$" "$UL"
   out="$(run pre-tool codex '{"session_id":"u2","tool_name":"local_shell","tool_input":{"command":["ls"]}}')" && rc=0 || rc=$?
   t    "codex: an unknown tool is allowed, quietly" test "$rc:$out" = "0:"
   t    "...and logged"                    grep -q "	codex	pre-tool	unknown-tool	local_shell$" "$UL"
-  out="$(run pre-tool gemini '{"session_id":"u2","tool_name":"read_many_files","tool_input":{"paths":["x"]}}')" && rc=0 || rc=$?
+  out="$(run pre-tool gemini '{"session_id":"u2","tool_name":"list_directory","tool_input":{"dir_path":"src"}}')" && rc=0 || rc=$?
   t    "gemini: an unknown tool still answers {}" test "$rc:$out" = "0:{}"
-  t    "...and is logged"                 grep -q "	gemini	pre-tool	unknown-tool	read_many_files$" "$UL"
+  t    "...and is logged"                 grep -q "	gemini	pre-tool	unknown-tool	list_directory$" "$UL"
   out="$(run post-edit gemini '{"session_id":"u2","tool_name":"save_memory","tool_input":{"fact":"x"}}')"
   t    "gemini: post-edit still answers {}" test "$out" = "{}"
   out="$(run pre-tool copilot '{"sessionId":"u2","toolName":"bash","toolArgs":"{\"command\":\"git push\"}"}')" && rc=0 || rc=$?

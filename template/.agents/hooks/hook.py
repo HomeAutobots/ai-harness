@@ -38,8 +38,13 @@ EDIT_TOOLS = {
     "edit", "write", "multiedit", "create", "str_replace_editor", "str_replace_based_edit_tool",
     "apply_patch", "notebookedit", "replace", "write_file",
 }
-SHELL_TOOLS = {"bash", "shell", "run_shell_command", "powershell", "terminal", "run_in_terminal"}
-READ_TOOLS = {"read", "view", "read_file", "grep", "glob", "search"}
+# Claude Code's Monitor runs a command (tool_input.command) under Bash's permission rules (its tools
+# reference); its PowerShell tool takes the same input as Bash (its hooks reference).
+SHELL_TOOLS = {"bash", "shell", "run_shell_command", "powershell", "terminal", "run_in_terminal", "monitor"}
+# Copilot CLI's rg is its grep under another name (its command reference: "grep (or rg)"). Gemini
+# CLI's read_many_files, grep_search (legacy alias search_file_content) and glob: its tools reference.
+READ_TOOLS = {"read", "view", "read_file", "grep", "glob", "search", "rg",
+              "read_many_files", "grep_search", "search_file_content"}
 QUESTION_TOOLS = {"askuserquestion", "ask_user", "askuser"}
 # Tools a hook may see that need no rule here: Copilot CLI's other built-ins (its hooks reference,
 # "Tool names for hook matching"). Copilot hooks have no matcher, so they see every tool call.
@@ -465,13 +470,24 @@ def pre_tool(tool, data, conf):
             if isinstance(value, list):   # an argv list, as in ["bash", "-lc", "<script>"]
                 value = " ".join(shlex.quote(str(v)) for v in value)
         elif name in READ_TOOLS:
-            kind, value = "read", (args.get("file_path") or args.get("path") or args.get("filePath")
-                                   or args.get("absolute_path") or "")
+            # Every path the call names is checked: file_path (Claude, Gemini), path (Claude's grep
+            # and glob, and what Copilot's are read by), filePath, absolute_path (older Gemini
+            # read_file), dir_path (Gemini's grep_search and glob), and each entry of Gemini
+            # read_many_files' include (and paths, which older releases take; v0.10.0's docs).
+            value = [args.get(k) for k in ("file_path", "path", "filePath", "absolute_path", "dir_path")]
+            for k in ("include", "paths"):
+                value += args[k] if isinstance(args.get(k), list) else [args.get(k)]
+            value = [v for v in value if isinstance(v, str) and v]
+            kind = "read"
     reason = None
     if kind == "shell":
         reason = shell_denied(str(value), rules, cwd)
     elif kind == "read":
-        reason = read_denied(str(value), rules, cwd)
+        for v in value if isinstance(value, list) else [value]:
+            reason = read_denied(str(v), rules, cwd)
+            if reason:
+                value = v
+                break
     if reason:
         log_event(tool, "pre-tool", "deny", str(value))
         return deny(tool, reason + ". Ask the human if this is really needed.")

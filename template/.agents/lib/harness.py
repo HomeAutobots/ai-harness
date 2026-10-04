@@ -150,7 +150,8 @@ def claude_render(existing, conf, rules, enabled, prev_deny):
         if matcher:
             g = {"matcher": matcher, **g}
         return g
-    pre = (["Bash|Read|Grep|Glob"] if "policy" in feats else []) + (["AskUserQuestion"] if "questions" in feats else [])
+    # PowerShell and Monitor run commands too (Claude Code's hooks and tools references).
+    pre = (["Bash|PowerShell|Monitor|Read|Grep|Glob"] if "policy" in feats else []) + (["AskUserQuestion"] if "questions" in feats else [])
     post = (["Edit|Write|MultiEdit|NotebookEdit"] if "edit" in feats else []) + (["AskUserQuestion"] if "questions" in feats else [])
     if pre:
         want["PreToolUse"] = [group("pre-tool", 10, "|".join(pre))]
@@ -360,7 +361,10 @@ def gemini_hooks(conf):
                         "timeout": seconds * 1000}]}
         return dict({"matcher": matcher}, **g) if matcher else g
     if "policy" in feats:
-        want["BeforeTool"] = [group("pre-tool", 10, "run_shell_command|read_file")]
+        # The shell, and every tool that reads or searches files (Gemini CLI's tools reference;
+        # search_file_content is grep_search's legacy name)
+        want["BeforeTool"] = [group("pre-tool", 10, "run_shell_command|read_file|read_many_files"
+                                                    "|grep_search|search_file_content|glob")]
     if "edit" in feats:
         want["AfterTool"] = [group("post-edit", edit_t, "write_file|replace")]
     if "questions" in feats:
