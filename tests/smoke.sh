@@ -2718,9 +2718,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
   t    "an unknown DEBUG_ASK check-in: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_ASK: unknown check-in 'bogus' (rootcause)\"" _ "$out"
   cp "$WORK/debug.conf" "$G/.agents/harness.conf"
-  printf 'DEBUG_KINDS="bug crash"\n' >> "$G/.agents/harness.conf"
+  shipped="$(cd "$GP/kinds" && ls -- *.md | sed 's/\.md$//' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+  printf 'DEBUG_KINDS="bug nope"\n' >> "$G/.agents/harness.conf"
   out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
-  t    "an unknown DEBUG_KINDS workflow: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_KINDS: unknown workflow 'crash' (bug)\"" _ "$out"
+  t    "an unknown DEBUG_KINDS workflow: infra (3), naming the shipped ones" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_KINDS: unknown workflow 'nope' ($shipped)\"" _ "$out"
   cp "$WORK/debug.conf" "$G/.agents/harness.conf"
   H=$(repo debug-simh)
   out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$H" 2>&1)" && rc=0 || rc=$?
@@ -2744,8 +2745,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "start --help: its usage, exit 0" bash -c "'$CX' start --help | grep -qxF 'usage: debug start <kind> <ref | -> [--file=<path>]'"
   trc  "start with an unknown option: exit 3" 3 "$CX" start bug '#12' --force
   tnot "...and nothing made"             test -e "$CS"
-  out="$("$CX" start crash '#12' 2>&1)" && rc=0 || rc=$?
-  t    "start needs a workflow the pack ships (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF 'debug: no such workflow: crash (shipped: bug)'" _ "$out"
+  shipped="$(cd "$C/.agents/builtin/workflows/debug/kinds" && ls -- *.md | sed 's/\.md$//' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+  out="$("$CX" start nope '#12' 2>&1)" && rc=0 || rc=$?
+  t    "start needs a workflow the pack ships (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF 'debug: no such workflow: nope (shipped: $shipped)'" _ "$out"
   out="$("$CX" start bug 'not a ref' 2>&1)" && rc=0 || rc=$?
   t    "start needs a ticket key, #<n>, or - (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"^debug: not a ref isn't a ref: give a ticket key\"" _ "$out"
   trc  "start - needs a report"          2 bash -c "printf '' | '$CX' start bug -"
@@ -2936,9 +2938,9 @@ except d.ConfError as e:
   "$NC/.agents/commands/debug" start bug '#1' >/dev/null
   edit "$NC/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'   # else the uncommitted harness files fill status's first 8
   t    "a repo with no commits yet: status lists a staged file" bash -c "'$NC/.agents/commands/debug' status | grep -q '^experiments in the tree: src/a\.c:1$'"
-  edit "$CS/bug-12/state" 's/^kind: bug$/kind: crash/'
-  t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no crash workflow"
-  edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'
+  edit "$CS/bug-12/state" 's/^kind: bug$/kind: nope/'
+  t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no nope workflow"
+  edit "$CS/bug-12/state" 's/^kind: nope$/kind: bug/'
   printf 'rootcause\tbug-12\tsomeone\t2026-10-03\tabc\n' > "$CS/bug-12/approvals"
   out="$("$CX" status)"
   t    "status names an approval debug didn't record" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-12/approvals:1 rootcause' && printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open'" _ "$out"
@@ -3845,6 +3847,47 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_debug_run
+grp_debug_kinds() {   # the failing-test, crash, and field workflows (docs/specs/2026-10-04-debug-kinds-design.md)
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflows: failing test, crash, field"
+  Q=$(repo debugkinds)
+  mkdir -p "$Q/src"; printf 'int add(int a, int b) { return a - b; }\n' > "$Q/src/calc.c"; commit "$Q" base
+  "$HARNESS/install.sh" --team --workflow debug "$Q" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$Q/.agents/checks/$tier.sh"; done
+  commit "$Q" harness
+  QX="$Q/.agents/commands/debug"; QK="$Q/.agents/builtin/workflows/debug/kinds"; QS="$Q/.agents/debug/sessions"
+  QP="$Q/.agents/debug/playbook.md"
+  kindchk() {  # kindchk <kind> <its steps> <its bindable steps, comma-separated>: what every workflow must do
+    local k="$1" steps="$2" unbound="$3" f="$QK/$1.md" out slug b
+    edit "$Q/.agents/harness.conf" "s/^DEBUG_KINDS=.*/DEBUG_KINDS=\"bug $k\"/"
+    t    "$k: the kind file's steps, in order" test "$(sed -n 's/^steps: //p' "$f")" = "$steps"
+    t    "$k: a section per step"        bash -c "for s in $steps; do grep -q \"^## [0-9]\\. \$s\$\" '$f' || exit 1; done"
+    out="$(printf 'Report for %s\n' "$k" | "$QX" start "$k" - 2>&1)"
+    slug="$k-report-for-$k"
+    t    "$k: debug start $k - works"   hasl "$out" "started $slug ($k, pasted report): .agents/debug/sessions/$slug"
+    t    "$k: steps: names its kind file" hasl "$out" "steps: .agents/builtin/workflows/debug/kinds/$k.md"
+    t    "$k: the session starts at intake" grep -qx 'step: intake' "$QS/$slug/state"
+    t    "$k: status lists its unbound steps" hasl "$("$QX" status)" "steps with no playbook bindings: $unbound (.agents/debug/playbook.md)"
+    t    "$k: debug run takes each of its steps" bash -c "for s in $steps; do '$QX' run \$s -- true >/dev/null || exit 1; done"
+    b="$(sed -n 's/^bindable: //p' "$f")"
+    for s in $b; do printf '## %s\n- run: echo %s\n\n' "$s" "$s"; done > "$QP"
+    t    "$k: a binding for each bindable step passes the playbook check" test "$("$Q/.agents/bin/verify" --tier=full --no-cache 2>&1)" = "ok verify full"
+    tnot "$k: ...and status lists none" hasl "$("$QX" status)" "steps with no playbook bindings"
+    git -C "$Q" checkout -q .agents/debug/playbook.md
+    "$QX" close "$slug" abandoned >/dev/null
+  }
+  echo "debug: the failing-test workflow"
+  kindchk test "intake reproduce gather-evidence hypothesize isolate root-cause check-in" "intake, reproduce, gather-evidence, isolate"
+  t    "test: intake fetches the failed CI log" grep -qF 'gh run view <run-id> --log-failed' "$QK/test.md"
+  recipe="$(sed -n "s/.*-- bash -c '\(p=0; f=0; .*\)'\`\.\$/\1/p" "$QK/test.md")"
+  "$QX" start test - <<< 'add test flakes' >/dev/null
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/[ \$((i % 4)) -ne 0 ]}" 2>&1)" && rc=0 || rc=$?
+  t    "test: the steps' run-it-N-times recipe counts passes and fails" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'passed 15, failed 5'" _ "$out" "$recipe"
+  t    "test: a flaky failure is partial, a pass here a finding" bash -c "grep -qF 'some is \`partial\`' '$QK/test.md' && grep -qF 'A pass here is a finding in itself' '$QK/test.md'"
+  t    "test: the test, flakiness, and the environment are causes too" bash -c "grep -qF 'the test is wrong' '$QK/test.md' && grep -qF 'not the code' '$QK/test.md'"
+fi
+}
+group grp_debug_kinds
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
