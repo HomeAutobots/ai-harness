@@ -3691,6 +3691,25 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_debug_checks
+grp_guard_shapes() {   # .agents/lib/guard_shapes.py: guard's secret rules for Python, shared by mcp_render and the debug pack
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "guard's secret rules for Python (.agents/lib/guard_shapes.py)"
+  GS=$(repo guardshapes); "$HARNESS/install.sh" --team "$GS" >/dev/null 2>&1
+  GL="$GS/.agents/lib"
+  GQ="import sys; sys.path.insert(0, sys.argv[1]); import guard_shapes as g; print(g.key_shape(sys.argv[2]))"
+  t    "guard_shapes is installed in .agents/lib" test -f "$GL/guard_shapes.py"
+  t    "...names a key shape guard knows" test "$(python3 -B -c "$GQ" "$GL" "token $FAKE_GH here" 2>&1)" = "GitHub token"
+  t    "...a placeholder isn't one"      test "$(python3 -B -c "$GQ" "$GL" 'password = "your-password-1234"' 2>&1)" = "None"
+  printf 'secret\tacme_[a-z0-9]{16}\tAcme key: remove it\n' > "$GS/.agents/guard.patterns"
+  t    "...the project's own rules count" test "$(python3 -B -c "$GQ" "$GL" "acme_k8hq2mzx7lp4wd9r" 2>&1)" = "Acme key"
+  rm -f "$GS/.agents/guard.patterns"
+  t    "mcp_render reads the rules through it" test "$(python3 -B -c "import sys; sys.path.insert(0, sys.argv[1]); import mcp_render, guard_shapes; print(mcp_render.key_shape is guard_shapes.key_shape)" "$GL" 2>&1)" = True
+  printf '{"command": "x", "args": ["%s"]}\n' "$FAKE_GH" > "$WORK/guardshapes.json"
+  t    "...and still refuses a key shape in a server file" hasl "$(python3 "$GL/mcp_render.py" check "$WORK/guardshapes.json" 2>&1 || true)" "args[0] holds a literal secret (GitHub token)"
+  tnot "...leaving no bytecode in .agents/lib" test -e "$GL/__pycache__"
+fi
+}
+group grp_guard_shapes
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
