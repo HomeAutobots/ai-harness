@@ -10,6 +10,7 @@ trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
+unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK   # the debug pack reads these from the environment too
 # shellcheck disable=SC2046  # one name per word
 unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT $(compgen -v PY_ || true)   # the python stack reads these; an activated venv mustn't decide its tests
 
@@ -2616,6 +2617,49 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_approvals
+grp_debug() {   # the debug pack (docs/specs/2026-10-03-debug-workflows-design.md): install, the CLI, sessions
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflow: install and absence"
+  G=$(repo debug)
+  mkdir -p "$G/src"; printf 'int add(int a, int b) { return a - b; }\n' > "$G/src/calc.c"; commit "$G" base
+  "$HARNESS/install.sh" --team --workflow debug "$G" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$G/.agents/checks/$tier.sh"; done
+  commit "$G" harness
+  GX="$G/.agents/commands/debug"; GD="$G/.agents/debug"
+  t    "debug settings appended, with their defaults" bash -c "grep -qx 'DEBUG_DIR=\".agents/debug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_KINDS=\"bug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_SCOPE=\"\*\*\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_ASK=\"rootcause\"' '$G/.agents/harness.conf'"
+  t    "approve and reject denied in policy" bash -c "grep -q '^deny-cmd .agents/commands/debug approve' '$G/.agents/policy.conf' && grep -q '^deny-cmd .agents/commands/debug reject' '$G/.agents/policy.conf'"
+  t    "playbook seeded"                 test -f "$GD/playbook.md"
+  t    "...and shared in team mode"      git -C "$G" ls-files --error-unmatch .agents/debug/playbook.md
+  t    "sessions stay local"             bash -c "mkdir -p '$GD/sessions/x' && touch '$GD/sessions/x/state' && git -C '$G' check-ignore -q .agents/debug/sessions/x/state"
+  rm -rf "$GD/sessions"
+  t    "debug command wrapper written"   test -x "$GX"
+  t    "debug --help: usage, exit 0"     bash -c "'$GX' --help | grep -q '^usage: debug'"
+  trc  "--help among other words: exit 3" 3 "$GX" --help start
+  trc  "an unknown command: usage, exit 2" 2 "$GX" frobnicate
+  t    "absence: no session, verify quiet" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  t    "absence: no session, full tier quiet" test "$("$G/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$G/src/calc.c"
+  t    "absence: no session, a change in scope passes" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  git -C "$G" checkout -q src/calc.c
+  trc  "the policy blocks an agent's debug approve" 2 policy "$G" test ".agents/commands/debug approve bug-1"
+  trc  "...debug reject"                 2 policy "$G" test ".agents/commands/debug reject bug-1 nope"
+  trc  "...spelled through debug_tools.py" 2 policy "$G" test "python3 .agents/builtin/workflows/debug/debug_tools.py cli . approve bug-1"
+  trc  "...and the shared simulated-human command" 2 policy "$G" test "python3 .agents/lib/approvals.py simulated-human . on debug"
+  trc  "naming it in a one-line tasks ask is fine" 0 policy "$G" test ".agents/bin/tasks ask bug-1 T1 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
+  trc  "debug status and run aren't blocked" 0 policy "$G" test ".agents/commands/debug status"
+  hook "$G" turn-start claude '{"session_id":"g1"}' >/dev/null 2>&1
+  edit "$G/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
+  t    "the stop gate notes a DEBUG_* change in the turn" hasl "$(hook "$G" stop-gate claude '{"session_id":"g1"}' 2>&1)" "harness.conf changed during this turn: DEBUG_SCOPE"
+  edit "$G/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="**"/'
+  H=$(repo debug-simh)
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$H" 2>&1)" && rc=0 || rc=$?
+  t    "--simulated-human works with debug alone" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q 'install: simulated human: on'" _ "$out"
+  t    "...recorded in debug's record"   grep -q '^#simulated-human	' "$H/.git/ai-harness/debug-approvals"
+  N=$(repo debug-none); "$HARNESS/install.sh" --team "$N" >/dev/null 2>&1
+  t    "absence: no pack, no DEBUG_* settings, command, dir, or rules" bash -c "! grep -q '^DEBUG_' '$N/.agents/harness.conf' && test ! -e '$N/.agents/commands/debug' && test ! -e '$N/.agents/debug' && ! grep -q 'debug approve' '$N/.agents/policy.conf'"
+fi
+}
+group grp_debug
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"

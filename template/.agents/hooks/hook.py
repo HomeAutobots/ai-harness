@@ -9,8 +9,8 @@ Translates each tool's hook protocol into the harness's tool-agnostic checks:
                 after a question to the human, record the question and answer in the ledger
   session-start remind the agent of questions still waiting on the human; tell Codex when the
                 AGENTS.override.md sync wrote in local mode is out of date
-  turn-start    snapshot the working tree (and the simulated-human switch, and WORKFLOWS, STACKS
-                and FDD_* in harness.conf) when a prompt arrives
+  turn-start    snapshot the working tree (and the simulated-human switch, and WORKFLOWS, STACKS,
+                FDD_* and DEBUG_* in harness.conf) when a prompt arrives
   stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
                 anything; block with the findings until it passes (bounded retries). A
                 simulated-human switch that appeared or changed during the turn is marked flagged;
@@ -608,12 +608,12 @@ def turn_start(tool, data, conf):
     return allow(tool, "turn-start")
 
 
-GATE_KEYS = re.compile(r"^(WORKFLOWS|STACKS|FDD_[A-Z0-9_]*)$")
+GATE_KEYS = re.compile(r"^(WORKFLOWS|STACKS|FDD_[A-Z0-9_]*|DEBUG_[A-Z0-9_]*)$")
 
 
 def gate_conf():
-    """WORKFLOWS, STACKS and FDD_* as .agents/harness.conf sets them (the last line of each wins):
-    the settings that turn checks on and off."""
+    """WORKFLOWS, STACKS, FDD_* and DEBUG_* as .agents/harness.conf sets them (the last line of each
+    wins): the settings that turn checks on and off."""
     path = os.path.join(ROOT, ".agents", "harness.conf")
     if not os.path.isfile(path):
         return {}
@@ -750,8 +750,9 @@ def stop_gate(tool, data, conf):
     # Only gate turns that changed the tree, the branches, or the simulated-human switch. Without a
     # snapshot, gate any dirty tree.
     flagged = switch_flagged(tool, key)
-    # WORKFLOWS, STACKS or FDD_* changed in the turn: the human hears of it once, when the stop is
-    # allowed (a block's message goes to the agent), and verify runs, since what it checks changed.
+    # WORKFLOWS, STACKS, FDD_* or DEBUG_* changed in the turn: the human hears of it once, when the
+    # stop is allowed (a block's message goes to the agent), and verify runs, since what it checks
+    # changed.
     conf_note, conf_keys, conf_now = gate_conf_changed(key)
 
     def allow_noted(note=""):
