@@ -672,6 +672,89 @@ def experiments_left(ctx):
     return out
 
 
+def since_commits(root, also_not=()):
+    """Commits made since AGENTS_SINCE (verify --since; the stop gate passes HEAD and the branch tips
+    its turn started from): what HEAD or a local branch has now that none of those had, leaving out
+    merges, anything a remote has (a pull), and copies with the same patch as a commit they had (a
+    rebase). The same rule as the feature-driven pack's; packs don't import each other. also_not:
+    more commits whose history doesn't count (the session's start). Newest first; empty without
+    AGENTS_SINCE."""
+    since = os.environ.get("AGENTS_SINCE", "").split()
+    if not since:
+        return []
+    new = git(root, "rev-list", "--no-merges", "HEAD", "--branches", "--not", *since, *also_not,
+              "--remotes", "--").split()
+    gone = git(root, "rev-list", "--no-merges", *since, "--not", "HEAD", "--branches", "--").split() if new else []
+    if gone:
+        old = set(patch_ids(root, gone).values())
+        ids = patch_ids(root, new)
+        new = [c for c in new if ids.get(c) not in old]
+    return new
+
+
+def patch_ids(root, commits):
+    """{commit: stable patch id} (git patch-id), for telling a rebased copy from new work."""
+    try:
+        show = subprocess.run(["git", "-C", root, "show", "--no-color", "--no-ext-diff"] + list(commits),
+                              capture_output=True).stdout
+        out = subprocess.run(["git", "-C", root, "patch-id", "--stable"], input=show,
+                             capture_output=True).stdout.decode(errors="replace")
+    except OSError:
+        return {}
+    return {c: p for p, c in (l.split()[:2] for l in out.splitlines() if len(l.split()) >= 2)}
+
+
+def commit_lines(root, c):
+    """{path: first changed line} for one commit, relative to root (files outside it left out)."""
+    parent = git(root, "rev-parse", "-q", "--verify", c + "^").strip()
+    if parent:
+        return {p: n for p, (n, _) in diff_first_lines(root, parent, c).items()}
+    names = git_raw(root, "show", "--format=", "--name-only", "-z", "--root", *(DIFF_OPTS + (c,)))
+    return {p: 1 for p in names.split("\0") if p}   # a first commit: no diff to place a line in
+
+
+def session_start(root, st):
+    """The commit HEAD was at when the session started (its state's start), or '' when there's none."""
+    s = st.get("start", "")
+    return git(root, "rev-parse", "-q", "--verify", s + "^{commit}").strip() \
+        if re.fullmatch(r"[0-9a-f]{7,64}", s) else ""
+
+
+@check
+def committed(ctx):
+    """debug-committed (turn and full, with verify --since): a commit since then, made while the
+    session was open (not in its start's history), that changes project code: files in DEBUG_SCOPE
+    outside .agents/ and DEBUG_DIR that sync didn't write (in_scope, harness_made). One finding per
+    commit, oldest first, at its first file's first changed line; past 5, the fifth names the rest."""
+    if not ctx.slug or ctx.tier not in ("turn", "full") or not ctx.conf["DEBUG_SCOPE"].split():
+        return []
+    start = session_start(ctx.root, ctx.state)
+    hits = []   # (commit, {path: line}, [paths]), oldest first
+    for c in reversed(since_commits(ctx.root, [start] if start else [])):
+        lines = commit_lines(ctx.root, c)
+        files = sorted(p for p in lines if in_scope(ctx.root, ctx.conf, p))
+        made = harness_made(ctx.root, files, (c + "^", c))
+        files = [p for p in files if p not in made]
+        if files:
+            hits.append((c, lines, files))
+    kind, scope = "debug-committed", ctx.conf["DEBUG_SCOPE"]
+    fix = ("the debug workflow investigates; the fix goes through the project's own process once the root "
+           "cause is approved. Undo %s and keep the work as uncommitted changes (git reset --soft %s~1 undoes "
+           "it and any later commit), or ask the human") % (
+        "the commit" if len(hits) == 1 else "these commits", hits[0][0][:7] if hits else "")
+    out = [finding(fs[0], ls[fs[0]], kind, "commit %s changes %s while debug session %s is open"
+                   % (c[:7], ", ".join(fs[:3]) + (" and %d more" % (len(fs) - 3) if len(fs) > 3 else ""),
+                      ctx.slug), fix)
+           for c, ls, fs in (hits[:4] if len(hits) > 5 else hits)]
+    if len(hits) > 5:
+        c, ls, fs = hits[4]
+        out.append(finding(fs[0], ls[fs[0]], kind, "%d more commits change files in DEBUG_SCOPE (%s) while debug "
+                           "session %s is open: %s%s" % (len(hits) - 4, scope, ctx.slug,
+                                                         ", ".join(h[0][:7] for h in hits[4:12]),
+                                                         ", ..." if len(hits) > 12 else ""), fix))
+    return out
+
+
 # ------------------------------------------------------------------ the debug command
 
 CLI = {}   # name -> (function, usage line, options it takes), in the order usage lists them

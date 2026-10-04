@@ -3356,6 +3356,36 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$KX" reject bug-7 'not it' >/dev/null
   t    "after a reject sets root-cause.md aside, experiments are fine again" test "$("$KV" 2>&1)" = "ok verify turn"
   rm -f "$K/src/probe.c"
+  echo "debug: commits during a session"
+  fresh 8
+  hook "$K" turn-start claude '{"session_id":"k1"}' >/dev/null 2>&1
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; (cd "$K" && git -c core.hooksPath=/dev/null commit -qam "Fix add")
+  out="$(hook "$K" stop-gate claude '{"session_id":"k1"}' 2>&1)" && rc=0 || rc=$?
+  t    "a commit during a session: the stop gate blocks" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \"src/calc.c:1: error: [debug-committed] commit \$2 changes src/calc.c while debug session bug-8 is open\"" _ "$out" "$(git -C "$K" rev-parse --short=7 HEAD)"
+  t    "verify --since judges it too"   hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed]"
+  t    "...plain verify sees a clean tree" test "$("$KV" 2>&1)" = "ok verify turn"
+  git -C "$K" reset -q --hard HEAD~1
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  hook "$K" turn-start claude '{"session_id":"k2"}' >/dev/null 2>&1
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; (cd "$K" && git -c core.hooksPath=/dev/null commit -qam "Fix add")
+  trc  "absence: no session, a commit in the turn passes" 0 hook "$K" stop-gate claude '{"session_id":"k2"}'
+  fresh 9
+  t    "a commit made before the session started passes" test "$("$KV" --since=HEAD~1 2>&1)" = "ok verify turn"
+  printf '\n' >> "$K/.agents/debug/playbook.md"
+  awk '{ print } /<!-- harness:core:start -->/ { print "- A rule from a newer harness." }' "$K/AGENTS.md" > "$K/AGENTS.tmp" && mv "$K/AGENTS.tmp" "$K/AGENTS.md"
+  commit "$K" "Upgrade the harness"
+  t    "...so does one that changes only harness files" test "$("$KV" --since=HEAD~2 2>&1)" = "ok verify turn"
+  printf 'notes\n' >> "$K/README.md"; commit "$K" "Notes"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
+  t    "...and one outside DEBUG_SCOPE" test "$("$KV" --since=HEAD~3 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/harness.conf
+  for i in 1 2 3 4 5 6; do printf 'int c%s;\n' "$i" > "$K/src/c$i.c"; commit "$K" "c$i"; done
+  out="$("$KV" --since=HEAD~6 2>&1 || true)"
+  t    "six commits: five findings"     test "$(printf '%s\n' "$out" | grep -c '\[debug-committed\]')" = 5
+  t    "...the fifth names the rest"    hasl "$out" "src/c5.c:1: error: [debug-committed] 2 more commits change files in DEBUG_SCOPE (**) while debug session bug-9 is open: $(git -C "$K" rev-parse --short=7 HEAD~1), $(git -C "$K" rev-parse --short=7 HEAD)"
+  t    "...and the oldest's fix keeps the work as uncommitted changes" hasl "$out" "git reset --soft $(git -C "$K" rev-parse --short=7 HEAD~5)~1"
+  git -C "$K" reset -q --hard HEAD~9
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
 fi
 }
 group grp_debug_checks
