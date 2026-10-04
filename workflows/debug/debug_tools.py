@@ -32,6 +32,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -45,7 +46,7 @@ BINDINGS = ("skill", "run", "context")
 CLOSE_REASONS = ("abandoned", "duplicate", "reviewed")
 TAIL = 60   # lines of a command's output kept in its evidence entry (E-<n>.md). Checks must never
             # read E-<n>.log: checks/state.sh leaves *.log out of verify's cache key.
-STATE_KEYS = ("kind", "ref", "start", "branch", "seq", "step", "status", "note")
+STATE_KEYS = ("kind", "ref", "start", "branch", "seq", "step", "status", "note", "confirm_after")
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
 EID = re.compile(r"(?<![A-Za-z0-9-])E-([0-9]+)(?![0-9])")
 HID = re.compile(r"(?<![A-Za-z0-9-])H-([0-9]+)(?![0-9])")
@@ -635,7 +636,9 @@ def cmd_start(root, words, opts, after):
 
 def evidence(sdir):
     """{n: {step, attempt, outcome, command, exit, head}} from the header of each evidence/E-<n>.md
-    (the lines before its first '## ')."""
+    (the lines before its first '## '), values stripped. Only regular files, and only entries whose
+    header has the command: and exit: lines debug run always writes: a hand-written note isn't
+    evidence."""
     ed = os.path.join(sdir, "evidence")
     try:
         names = os.listdir(ed)
@@ -643,17 +646,24 @@ def evidence(sdir):
         return {}
     out = {}
     for name in names:
-        m = re.fullmatch(r"E-([0-9]+)\.md", name)
+        m = re.fullmatch(r"E-([1-9][0-9]*)\.md", name)
         if not m:
             continue
+        path = os.path.join(ed, name)
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+        except OSError:
+            continue
         meta = {}
-        for l in read_lines(os.path.join(ed, name)):
+        for l in read_lines(path):
             if l.startswith("## "):
                 break
-            k, sep, v = l.partition(": ")
-            if sep and k in ("step", "attempt", "outcome", "command", "exit", "head"):
-                meta[k] = v
-        out[int(m.group(1))] = meta
+            k, sep, v = l.partition(":")
+            if sep and k.strip() in ("step", "attempt", "outcome", "command", "exit", "head"):
+                meta[k.strip()] = v.strip()
+        if "command" in meta and "exit" in meta:
+            out[int(m.group(1))] = meta
     return out
 
 
@@ -799,8 +809,8 @@ def cmd_outcome(root, words, opts, after):
     path = os.path.join(sdir, "evidence", "E-%d.md" % n)
     lines = read_lines(path)
     end = next((i for i, l in enumerate(lines) if l.startswith("## ")), len(lines))
-    header = [l for l in lines[:end] if not l.startswith("outcome: ")]
-    at = next(i for i, l in enumerate(header) if l.startswith("attempt: "))
+    header = [l for l in lines[:end] if not re.match(r"\s*outcome\s*:", l)]
+    at = next(i for i, l in enumerate(header) if re.match(r"\s*attempt\s*:", l))
     write_text(path, "\n".join(header[:at + 1] + ["outcome: " + words[1]] + header[at + 1:] + lines[end:]) + "\n")
     print("E-%d: %s (%s attempt)" % (n, words[1], meta["attempt"]))
     return 0
@@ -808,60 +818,144 @@ def cmd_outcome(root, words, opts, after):
 
 # ------------------------------------------------------------------ where a session stands
 
+H_STATUSES = ("open", "confirmed", "ruled")
+
+
 def hypotheses(path):
-    """[(n, line no, status)] for each '## H-<n>: <claim>' section in hypotheses.md. status is the
-    first word of its '- status:' line (open, confirmed, ruled), open when there's none."""
-    out = []
+    """[(n, line no, status)] for each '## H-<n>: <claim>' section in hypotheses.md, in file order (an
+    id written twice is there twice). status is the first word of the section's first '- status:'
+    line, any case, with *, _ or backticks around it allowed: open, confirmed, ruled (ruled out), or
+    unclear for any other word or none; open when there's no status line. Any other heading ends a
+    section."""
+    out, cur = [], None
     for n, line in enumerate(read_lines(path), 1):
         m = re.match(r"^## H-([0-9]+)\b", line)
         if m:
-            out.append([int(m.group(1)), n, "open"])
+            cur = [int(m.group(1)), n, "open", False]
+            out.append(cur)
             continue
-        s = re.match(r"^\s*[-*]\s+status:\s*([A-Za-z]+)", line)
-        if s and out and out[-1][2] == "open":
-            out[-1][2] = s.group(1).lower()
-    return [tuple(h) for h in out]
+        if line.startswith("#"):
+            cur = None
+            continue
+        s = re.match(r"^\s*[-*]\s+[*_`]*status[*_`]*\s*:(.*)$", line, re.I)
+        if s and cur is not None and not cur[3]:
+            w = re.match(r"[\s*_`]*([A-Za-z]+)", s.group(1))
+            word = w.group(1).lower() if w else ""
+            cur[2], cur[3] = (word if word in H_STATUSES else "unclear"), True
+    return [tuple(h[:3]) for h in out]
 
 
-def confidence(ev):
-    """What the recorded attempts support: confirmed when a confirmation attempt triggered the bug
-    through the stated cause, reproduced when a reproduction attempt did, else evidence-only."""
-    got = {(e.get("attempt"), e.get("outcome")) for e in ev.values()}
-    if ("confirm", "reproduced") in got:
+def confirm_after(st):
+    """The state's confirm_after: confirmation attempts up to this E-number came before a rejected
+    root cause, so they don't confirm the current one. 0 when it's missing or not a number."""
+    v = (st or {}).get("confirm_after", "").strip()
+    return int(v) if v.isdigit() else 0
+
+
+def confidence(ev, st):
+    """What the recorded attempts support: confirmed when a confirmation attempt after the state's
+    confirm_after triggered the bug through the stated cause, reproduced when any attempt
+    reproduced it (a confirmation attempt is a reproduction too), else evidence-only."""
+    after = confirm_after(st)
+    hits = [(n, e.get("attempt")) for n, e in ev.items() if e.get("outcome") == "reproduced"]
+    if any(a == "confirm" and n > after for n, a in hits):
         return "confirmed"
-    if ("reproduce", "reproduced") in got:
+    if any(a in ATTEMPTS for _, a in hits):
         return "reproduced"
     return "evidence-only"
 
 
+C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def c_unquote(text):
+    """The string a C-style quoted token at the start of text stands for (git quotes a path with a
+    tab, newline, quote or backslash in it), or None when the token doesn't close."""
+    out, i = bytearray(), 1
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            return out.decode("utf-8", "replace")
+        if c == "\\" and text[i + 1:i + 2] in C_ESCAPES:
+            out.append(C_ESCAPES[text[i + 1]])
+            i += 2
+            continue
+        if c == "\\" and re.fullmatch(r"[0-3][0-7]{2}", text[i + 1:i + 4]):
+            out.append(int(text[i + 1:i + 4], 8))
+            i += 4
+            continue
+        out += c.encode("utf-8")
+        i += 1
+    return None
+
+
+def diff_path(rest):
+    """The path in a 'diff --git <rest>' line, or None. With --no-renames and fixed prefixes both
+    sides name the same path, 'a/P b/P', each side C-quoted when P needs it."""
+    if rest.startswith('"'):
+        p = c_unquote(rest)
+        return p[2:] if p and p.startswith("a/") else None
+    p = rest[2:2 + (len(rest) - 5) // 2]
+    return p if p and rest == "a/%s b/%s" % (p, p) else None
+
+
+def git_raw(root, *args):
+    """git's stdout as text, newlines untouched (a carriage return in a path or a line stays one)."""
+    return subprocess.run(["git", "-C", root, "-c", "core.quotePath=false"] + list(args),
+                          capture_output=True).stdout.decode("utf-8", "replace")
+
+
+def diff_first_lines(root, *rev):
+    """{path: first changed line} from one 'git diff -U0' (rev: 'HEAD', '--cached', ...): the new
+    side's start of each file's first hunk, 1 for a change with no hunk (binary, mode, an empty
+    file). Paths are relative to root; the user's diff settings (external tools, textconv,
+    renames, prefixes) can't change the output."""
+    out, cur = {}, None
+    text = git_raw(root, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", "--relative",
+                   "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", *rev)
+    for line in text.split("\n"):
+        if line.startswith("diff --git "):
+            cur = diff_path(line[len("diff --git "):])
+            if cur is not None and cur not in out:
+                out[cur] = 0
+        elif cur is not None and out[cur] == 0 and line.startswith("@@ "):
+            m = re.match(r"@@ -\S+ \+(\d+)", line)
+            out[cur] = max(int(m.group(1)), 1) if m else 1
+    return {p: n or 1 for p, n in out.items()}
+
+
+def changed_lines(root):
+    """{path: first changed line} for every uncommitted change, relative to root: the working tree
+    and the index against HEAD (a change only staged counts too; the working tree's line wins), and
+    new files git doesn't ignore (line 1). In a repo with no commits yet, every staged file counts.
+    Three git processes, however many files changed."""
+    got = {}
+    if git(root, "rev-parse", "-q", "--verify", "HEAD").strip():
+        got.update(diff_first_lines(root, "--cached", "HEAD"))
+        got.update(diff_first_lines(root, "HEAD"))
+    else:
+        got.update(diff_first_lines(root, "--cached"))
+    for p in git_raw(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if p:
+            got.setdefault(p, 1)
+    return got
+
+
 def first_changed_line(root, path):
-    m = re.search(r"^@@ -\S+ \+(\d+)", git(root, "diff", "-U0", "--no-color", "--no-ext-diff", "HEAD", "--", path),
-                  re.M)
-    return max(int(m.group(1)), 1) if m else 1
+    """The first changed line of one repo-relative path (1 when it has none)."""
+    return changed_lines(root).get(path, 1)
 
 
 def changed_in_scope(root, conf):
-    """[(path, line)] for uncommitted changes (working tree and index against HEAD, and new files git
-    doesn't ignore) to files in DEBUG_SCOPE, leaving out .agents/ and DEBUG_DIR: the experiments a
-    session leaves in the tree. Paths are relative to root; line is the first changed one."""
+    """[(path, first changed line)] for the uncommitted changes (changed_lines) to files in
+    DEBUG_SCOPE, leaving out .agents/ and DEBUG_DIR: the experiments a session leaves in the tree.
+    Empty when DEBUG_SCOPE is."""
+    if not conf["DEBUG_SCOPE"].split():
+        return []
     dd = debug_dir(root, conf) + os.sep
-    pre = git(root, "rev-parse", "--show-prefix").strip()
-    has_head = bool(git(root, "rev-parse", "-q", "--verify", "HEAD").strip())
-    paths = set()
-    if has_head:
-        for p in git(root, "diff", "--name-only", "--no-renames", "HEAD", "--", ".").splitlines():
-            paths.add(p[len(pre):] if pre and p.startswith(pre) else p)
-    else:
-        paths.update(git(root, "ls-files", "--cached", "--", ".").splitlines())
-    paths.update(git(root, "ls-files", "--others", "--exclude-standard", "--", ".").splitlines())
-    out = []
-    for p in sorted(x for x in paths if x):
-        if p.startswith(".agents/") or os.path.join(root, p).startswith(dd) or not matches_any(p, conf["DEBUG_SCOPE"]):
-            continue
-        tracked = has_head and os.path.isfile(os.path.join(root, p)) and \
-            bool(git(root, "ls-files", "--", p).strip())
-        out.append((p, first_changed_line(root, p) if tracked else 1))
-    return out
+    return [(p, n) for p, n in sorted(changed_lines(root).items())
+            if not p.startswith(".agents/") and not os.path.normpath(os.path.join(root, p)).startswith(dd)
+            and matches_any(p, conf["DEBUG_SCOPE"])]
 
 
 def where(root):
@@ -885,16 +979,24 @@ def print_status(root, conf, switch, session):
     tries = ["E-%d %s: %s" % (n, ev[n]["attempt"], ev[n].get("outcome", "outcome not recorded"))
              for n in sorted(ev) if ev[n].get("attempt") in ATTEMPTS]
     print("attempts: %s" % ("; ".join(tries) if tries else "none yet"))
-    print("confidence: %s" % confidence(ev))
-    hs = hypotheses(os.path.join(sdir, "hypotheses.md"))
-    open_h = ["H-%d" % n for n, _, s in hs if s == "open"]
-    print("hypotheses: %d open%s, %d confirmed, %d ruled out"
-          % (len(open_h), " (%s)" % ", ".join(open_h) if open_h else "",
-             len([1 for h in hs if h[2] == "confirmed"]), len([1 for h in hs if h[2] == "ruled"])))
+    print("confidence: %s" % confidence(ev, st))
+    by = {}
+    for n, _, s in hypotheses(os.path.join(sdir, "hypotheses.md")):
+        if n not in by.setdefault(s, []):
+            by[s].append(n)
+
+    def ids(s):
+        return " (%s)" % ", ".join("H-%d" % n for n in by[s]) if by.get(s) else ""
+    print("hypotheses: %d open%s, %d confirmed, %d ruled out%s"
+          % (len(by.get("open", [])), ids("open"), len(by.get("confirmed", [])), len(by.get("ruled", [])),
+             ", %d unclear%s" % (len(by["unclear"]), ids("unclear")) if by.get("unclear") else ""))
     rc = os.path.join(sdir, "root-cause.md")
     print("root cause: %s" % (shown(root, rc) if os.path.isfile(rc) else "not written yet"))
-    left = changed_in_scope(root, conf)
-    print("experiments in the tree: %s" % (", ".join("%s:%d" % x for x in left) if left else "none"))
+    if not conf["DEBUG_SCOPE"].split():
+        print("experiments: not checked (DEBUG_SCOPE is empty)")
+    else:
+        left = changed_in_scope(root, conf)
+        print("experiments in the tree: %s" % (", ".join("%s:%d" % x for x in left) if left else "none"))
     gaps = unbound_steps(root, conf, kind)
     if gaps:
         print("steps with no playbook bindings: %s (%s)" % (", ".join(gaps), shown(root, playbook_path(root, conf))))

@@ -2761,7 +2761,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...while an issue ref still starts" hasl "$("$CX" start bug '#12')" "started bug-12-3"
   cp "$WORK/debugcli.git.conf" "$C/.agents/git.conf"
   rm -rf "$CS" "$C"/.agents/plans/bug-*
+  out="$("$CX" status 2>&1)" && rc=0 || rc=$?
+  t    "status with no session: exit 0, says how to start one" bash -c "test $rc = 0 && test \"\$1\" = 'no open session on $CB (start one: .agents/commands/debug start <kind> <ref>)'" _ "$out"
   trc  "run with no session: exit 2"    2 "$CX" run reproduce -- true
+  t    "...and says there's none on this branch" hasl "$("$CX" run reproduce -- true 2>&1 >/dev/null || true)" "debug: no open session on $CB; start one with"
   trc  "outcome with no session: exit 2" 2 "$CX" outcome E-1 reproduced
   "$CX" start bug '#12' >/dev/null
   trc  "run needs -- and a command"     2 "$CX" run reproduce
@@ -2843,6 +2846,45 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...hypotheses by status"        hasl "$out" "hypotheses: 1 open (H-2), 1 confirmed, 0 ruled out"
   t    "...experiments in the tree"     hasl "$out" "experiments in the tree: src/calc.c:1"
   git -C "$C" checkout -q src/calc.c
+  printf '## H-3: a status in bold\n- **Status**: `Ruled` out (E-2)\n\n## H-4: no such status\n- status: maybe\n\n## H-2: listed twice\n- status: open\n\n# Notes\n- status: confirmed\n' >> "$CS/bug-12/hypotheses.md"
+  t    "...bold or odd statuses, a duplicate id once, a heading ends a section" hasl "$("$CX" status)" "hypotheses: 1 open (H-2), 1 confirmed, 1 ruled out, 1 unclear (H-4)"
+  mkdir "$CS/bug-12/evidence/E-93.md"
+  printf 'step: isolate\nattempt: confirm\noutcome: reproduced\n' > "$CS/bug-12/evidence/E-90.md"
+  printf 'step: isolate\ncommand: true\nexit: 0\n' > "$CS/bug-12/evidence/E-01.md"
+  t    "...a note, a dir, or E-01 isn't evidence" bash -c "'$CX' status | grep -qxF 'evidence: $nev ($evl)' && '$CX' status | grep -qxF 'confidence: reproduced'"
+  rm -rf "$CS/bug-12/evidence/E-93.md" "$CS/bug-12/evidence/E-90.md" "$CS/bug-12/evidence/E-01.md"
+  printf 'one\ntwo\nthree\nfour\n' > "$C/src/lines.c"; commit "$C" lines
+  edit "$C/src/lines.c" 's/^three$/three probe/'
+  printf 'new\n' > "$C/src/new.c"
+  printf 'staged\n' > "$C/src/staged.c"; git -C "$C" add src/staged.c; rm "$C/src/staged.c"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$C/src/calc.c"; git -C "$C" add src/calc.c; git -C "$C" show HEAD:src/calc.c > "$C/src/calc.c"
+  mkdir -p "$C/dbg"; printf 'notes\n' > "$C/dbg/notes.md"
+  out="$("$CX" status)"
+  t    "...experiments: the first changed line, untracked and staged-only files" hasl "$out" "experiments in the tree: dbg/notes.md:1, src/calc.c:1, src/lines.c:3, src/new.c:1, src/staged.c:1"
+  t    "...a change on line 3 is file:3" hasl "$out" "src/lines.c:3"
+  t    "...an untracked file"           hasl "$out" "src/new.c:1"
+  t    "...a change only in the index"  hasl "$out" "src/calc.c:1"
+  t    "...a staged new file deleted from the tree" hasl "$out" "src/staged.c:1"
+  DX="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; r = sys.argv[2]; d.use_lib(r); c = dict(d.load_conf(r), DEBUG_DIR='dbg'); print(' '.join(p for p, _ in d.changed_in_scope(r, c)))"
+  t    "...but nothing under a DEBUG_DIR outside .agents/" test "$(python3 -B -c "$DX" "$GP" "$C" 2>&1)" = "src/calc.c src/lines.c src/new.c src/staged.c"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
+  t    "...DEBUG_SCOPE empty: not checked" hasl "$("$CX" status)" "experiments: not checked (DEBUG_SCOPE is empty)"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="**"/'
+  git -C "$C" reset -q -- src; git -C "$C" checkout -q src; rm -rf "$C/src/new.c" "$C/dbg"
+  t    "...and none once they're gone"  hasl "$("$CX" status)" "experiments in the tree: none"
+  edit "$CS/bug-12/state" 's/^kind: bug$/kind: crash/'
+  t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no crash workflow"
+  edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'
+  printf 'rootcause\tbug-12\tsomeone\t2026-10-03\tabc\n' > "$CS/bug-12/approvals"
+  out="$("$CX" status)"
+  t    "status names an approval debug didn't record" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'not counted, not written by debug approve or reject: .agents/debug/sessions/bug-12/approvals:1 rootcause' && printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open'" _ "$out"
+  rm -f "$CS/bug-12/approvals"
+  CF="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; ev = {1: {'attempt': 'reproduce', 'outcome': 'reproduced'}, 2: {'attempt': 'confirm', 'outcome': 'reproduced'}}; print(d.confidence(ev, {}), d.confidence(ev, {'confirm_after': '1'}), d.confidence(ev, {'confirm_after': '2'}), d.confidence(ev, {'confirm_after': 'x'}), d.confidence({2: ev[2]}, {'confirm_after': '2'}), d.confidence({1: {'attempt': 'reproduce', 'outcome': 'not-reproduced'}, 2: {'attempt': 'confirm', 'outcome': 'partial'}}, {}))"
+  t    "confidence: a confirm attempt counts only after confirm_after" test "$(python3 -B -c "$CF" "$GP" 2>&1)" = "confirmed confirmed reproduced confirmed reproduced evidence-only"
+  printf 'confirm_after: 7\n' >> "$CS/bug-12/state"
+  RS="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; s = sys.argv[2]; d.write_state(s, d.read_state(s)); print(d.read_state(s).get('confirm_after'))"
+  t    "...and the state file keeps confirm_after" test "$(python3 -B -c "$RS" "$GP" "$CS/bug-12" 2>&1)" = 7
+  edit "$CS/bug-12/state" '/^confirm_after: /d'
   git -C "$C" checkout -q -b other
   t    "another branch: no session here, and where one is" bash -c "'$CX' status | grep -qxF 'no open session on other; open elsewhere: bug-12 ($CB)'"
   t    "status <slug> works from any branch" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open'"
