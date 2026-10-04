@@ -2229,6 +2229,171 @@ fi
 }
 group grp_pilot2_small
 
+grp_fdd_trace() {   # pilot 2 issues 8, 9, 13 (roadmap rows 33, 34, 38) and fdd approve inspect on built work
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "feature-driven: inspect needs built work, inspected features, turning FDD off, wrong branch"
+  T=$(repo fdd-trace)
+  printf 'int f();\n' > "$T/argh.h"; commit "$T" base
+  git -C "$T" branch -m main; TB=main   # the base, whatever init.defaultBranch says
+  "$HARNESS/install.sh" --team --workflow feature-driven "$T" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$T/.agents/checks/$tier.sh"; done
+  edit "$T/.agents/harness.conf" 's/^FDD_SCOPE=.*/FDD_SCOPE="argh.h"/'
+  commit "$T" harness
+  TD="$T/.agents/fdd"; TX="$T/.agents/commands/fdd"; tk(){ (cd "$T" && .agents/bin/tasks "$@" >/dev/null); }
+  mkdir -p "$TD/designs"
+  printf '# Features\n\n## Parsing\n### FS-1 Options\n- F-1 Treat the arguments after a marker as positionals for the parser\n- F-2 Count the occurrences of a flag for the parser [ARGH-12]\n- F-3 Report the count of a flag to the caller\n- F-4 Name the long form of a flag for the help [ARGH-14]\n' > "$TD/features.md"
+  "$TX" approve list >/dev/null
+  printf '# F-1\nStop at the marker.\n' > "$TD/designs/F-1.md"; "$TX" approve design F-1 >/dev/null
+  tk new f-1 F1; tk add f-1 "F-1: marker"; tk set f-1 T1 doing
+  echo '// a' >> "$T/argh.h"
+  out="$("$T/.agents/bin/verify" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "absence: an in-progress feature, nothing inspected, no links: no new findings" bash -c "test $rc = 0 && ! printf '%s' \"\$1\" | grep -q fdd-" _ "$out"
+  # fdd approve inspect: only built work (a done task with a commit git finds).
+  out="$("$TX" approve inspect F-1 2>&1)" && rc=0 || rc=$?
+  t    "approve inspect refuses while nothing is done" bash -c "test $rc = 1"
+  t    "...says why, for a person"      hasl "$out" "fdd: F-1 isn't built yet, so there's nothing to inspect: no plan task for it is done with its commit recorded"
+  t    "...and what to do"              hasl "$out" "Run this again once the code is committed and the agent has set the task done with that commit."
+  tnot "...and records nothing"         grep -q '^inspect' "$TD/approvals"
+  tk set f-1 T1 "done" deadbeefdeadbeef
+  out="$("$TX" approve inspect F-1 2>&1)" && rc=0 || rc=$?
+  t    "pilot 2: a fake SHA can't be inspected" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -q \"records commit deadbeefdeadbeef, which isn't a commit in this repo, so fdd status shows it as 'built (commit not found)'\"" _ "$out"
+  t    "...naming the task to fix"      hasl "$out" "tasks set f-1 T1 done <sha>"
+  (cd "$T" && git -c core.hooksPath=/dev/null commit -qam marker)
+  tk set f-1 T1 "done" HEAD
+  t    "a real commit: approve inspect works" bash -c "'$TX' approve inspect F-1 | grep -qx 'approved inspect F-1'"
+  # Row 34: pilot 2's repro, new work through a new task on the inspected feature.
+  tk add f-1 "F-1: unrelated cleanup"; tk set f-1 T2 doing
+  echo '// b' >> "$T/argh.h"
+  out="$("$T/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+  t    "pilot 2: a doing task on an inspected feature is a finding" hasl "$out" ".agents/plans/f-1/tasks.json:3: error: [fdd-inspected] F-1 is inspected; new work needs a new feature in the list"
+  t    "...exit 1"                      test "$rc" = 1
+  t    "...whose fix names the reopen"  hasl "$out" "ask the human to reopen it by approving its design again (.agents/commands/fdd approve design F-1)"
+  tail -n 2 "$TD/approvals" | head -n 1 >> "$TD/approvals"   # the agent copies the old design line after the inspection
+  t    "a copied design line doesn't reopen it" hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "[fdd-inspected] F-1 is inspected"
+  edit "$TD/approvals" '$d'
+  "$TX" approve design F-1 >/dev/null
+  t    "the human re-approving the design reopens it" "$T/.agents/bin/verify"
+  t    "...back at built until the next inspection" bash -c "'$TX' status F-1 | grep -q ': 89% built (reopened)$'"
+  tk set f-1 T2 "done" HEAD
+  "$TX" approve inspect F-1 >/dev/null
+  t    "a new inspection closes it again" bash -c "'$TX' status F-1 | grep -q ': 100% inspected$'"
+  tk add f-1 "F-1: more"; tk set f-1 T3 doing
+  t    "...and new work on it is a finding again" hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "tasks.json:4: error: [fdd-inspected]"
+  grep '^inspect' "$TD/approvals" | head -n 1 >> "$TD/approvals"   # the agent copies the first inspection, from before the reopen
+  t    "a copied older inspection doesn't reopen it either" hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "tasks.json:4: error: [fdd-inspected]"
+  t    "...nor change what status shows" bash -c "'$TX' status F-1 | grep -q ': 100% inspected$'"
+  edit "$TD/approvals" '$d'
+  tk set f-1 T3 "done" HEAD
+  git -C "$T" checkout -q argh.h
+  # Row 33: pilot 2's repro, FDD_DIR moved away with a feature's task doing.
+  tk new f-3 F3; tk add f-3 "F-3: report"; tk set f-3 T1 doing
+  mv "$TD" "$WORK/fdd-trace-moved"
+  echo '// x' >> "$T/argh.h"
+  out="$("$T/.agents/bin/verify" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "pilot 2: FDD_DIR moved while a task is doing is a finding" hasl "$out" ".agents/plans/f-3/tasks.json:2: error: [fdd-list-missing] F-3's task is doing, but there's no feature list at .agents/fdd/features.md (FDD_DIR .agents/fdd doesn't exist), so no feature gate runs"
+  t    "...exit 1"                      test "$rc" = 1
+  t    "...on the turn tier too"        hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "[fdd-list-missing] F-3's task is doing"
+  edit "$T/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/elsewhere"|'
+  t    "...and FDD_DIR pointed elsewhere" hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "no feature list at .agents/elsewhere/features.md (FDD_DIR .agents/elsewhere doesn't exist)"
+  edit "$T/.agents/harness.conf" 's|^FDD_DIR=.*|FDD_DIR=".agents/fdd"|'
+  mkdir "$TD"
+  out="$("$T/.agents/bin/verify" 2>&1 || true)"
+  t    "...and only features.md gone"   bash -c "printf '%s' \"\$1\" | grep -q \"F-3's task is doing, but there's no feature list at .agents/fdd/features.md, so no feature gate runs\"" _ "$out"
+  rmdir "$TD"
+  tk set f-3 T1 todo
+  t    "absence: no list and no doing feature task: quiet" "$T/.agents/bin/verify" --tier=full
+  mv "$WORK/fdd-trace-moved" "$TD"
+  git -C "$T" checkout -q argh.h
+  # Row 33: the stop gate notes WORKFLOWS, STACKS or FDD_* changing during the turn.
+  hook "$T" turn-start claude '{"session_id":"tc1"}' >/dev/null 2>&1
+  out="$(hook "$T" stop-gate claude '{"session_id":"tc1"}' 2>&1)" && rc=0 || rc=$?
+  t    "absence: no settings change, no note" bash -c "test $rc = 0 && test -z \"\$1\"" _ "$out"
+  hook "$T" turn-start claude '{"session_id":"tc2"}' >/dev/null 2>&1
+  edit "$T/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS=""/'
+  out="$(hook "$T" stop-gate claude '{"session_id":"tc2"}' 2>&1)" && rc=0 || rc=$?
+  t    "pilot 2: WORKFLOWS emptied in the turn: the stop gate notes it" bash -c "test $rc = 0 && printf '%s' \"\$1\" | python3 -c 'import json,sys; assert json.load(sys.stdin)[\"systemMessage\"].startswith(\"Note: \")'" _ "$out"
+  t    "...naming the setting and its values" hasl "$out" 'harness.conf changed during this turn: WORKFLOWS \"feature-driven\" -> \"\"'
+  t    "...and logs it"                 grep -q 'stop-gate	conf-changed	WORKFLOWS' "$T/.agents/cache/hook-events.log"
+  t    "...once"                        test -z "$(hook "$T" stop-gate claude '{"session_id":"tc2"}' 2>&1)"
+  edit "$T/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="feature-driven"/'
+  hook "$T" turn-start claude '{"session_id":"tc3"}' >/dev/null 2>&1
+  printf 'FDD_ASK="list"\nSTACKS="python"\n' >> "$T/.agents/harness.conf"
+  out="$(hook "$T" stop-gate claude '{"session_id":"tc3"}' 2>&1 || true)"
+  t    "FDD_* and STACKS changes are noted, each with its values" bash -c "printf '%s' \"\$1\" | grep -q 'FDD_ASK .*list design inspect.* -> .*list.*; STACKS .* -> .*python'" _ "$out"
+  edit "$T/.agents/harness.conf" '$d'; edit "$T/.agents/harness.conf" '$d'
+  printf '#!/usr/bin/env bash\necho "argh.h:1: error: red"; exit 1\n' > "$T/.agents/checks/turn.sh"
+  hook "$T" turn-start claude '{"session_id":"tc4"}' >/dev/null 2>&1
+  edit "$T/.agents/harness.conf" 's/^FDD_ASK=.*/FDD_ASK="list design"/'
+  out="$(hook "$T" stop-gate claude '{"session_id":"tc4"}' 2>&1)" && rc=0 || rc=$?
+  t    "a blocked stop tells the agent too" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q 'harness.conf changed during this turn: FDD_ASK'" _ "$out"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$T/.agents/checks/turn.sh"
+  t    "...and the human hears it when the stop is allowed" hasl "$(hook "$T" stop-gate claude '{"session_id":"tc4"}' 2>&1)" "harness.conf changed during this turn: FDD_ASK"
+  edit "$T/.agents/harness.conf" 's/^FDD_ASK=.*/FDD_ASK="list design inspect"/'
+  rm -f "$T"/.agents/cache/conf-*
+  t    "absence: no turn-start snapshot, no note" test -z "$(hook "$T" stop-gate claude '{"session_id":"tc4"}' 2>&1)"
+  commit "$T" settled
+  # Row 38: pilot 2's repro, F-3 built on F-2's ticket branch.
+  printf '# F-2\nCount.\n' > "$TD/designs/F-2.md"; "$TX" approve design F-2 >/dev/null
+  printf '# F-3\nReport.\n' > "$TD/designs/F-3.md"; "$TX" approve design F-3 >/dev/null
+  (cd "$T" && .agents/bin/gitflow start ARGH-12 flag occurrence count >/dev/null 2>&1)
+  t    "gitflow start made the pilot's branch" test "$(git -C "$T" symbolic-ref --short HEAD)" = argh-12-flag-occurrence-count
+  tk new f-2 F2; tk add f-2 "F-2: count"; tk set f-2 T1 doing
+  t    "absence: a doing task with no plan linked is quiet" "$T/.agents/bin/verify"
+  tk link f-2
+  echo '// c' >> "$T/argh.h"
+  t    "on its own linked branch: quiet" "$T/.agents/bin/verify"
+  (cd "$T" && git -c core.hooksPath=/dev/null commit -qam count)
+  tk set f-2 T1 "done" HEAD; tk set f-3 T1 doing
+  echo '// d' >> "$T/argh.h"
+  out="$("$T/.agents/bin/verify" 2>&1)" && rc=0 || rc=$?
+  t    "pilot 2: a feature on another feature's branch is a finding" hasl "$out" ".agents/plans/f-3/tasks.json:2: error: [fdd-wrong-branch] F-3's task is doing on argh-12-flag-occurrence-count, the branch of plan f-2 (F-2)"
+  t    "...whose fix covers paused work" hasl "$out" "If this work is paused, set its task back to todo (tasks set f-3 T1 todo)"
+  t    "...exit 1"                      test "$rc" = 1
+  tk link f-3 report-count
+  out="$("$T/.agents/bin/verify" 2>&1 || true)"
+  t    "a plan linked to another branch is a finding at its Branch line" hasl "$out" ".agents/plans/f-3/plan.md:$(line_of "$T/.agents/plans/f-3/plan.md" 'Branch:'): error: [fdd-wrong-branch] F-3's plan f-3 is linked to branch report-count, but this is argh-12-flag-occurrence-count"
+  git -C "$T" checkout -q -b report-count   # same commit: the uncommitted change comes along
+  t    "on the linked branch: quiet"    "$T/.agents/bin/verify"
+  git -C "$T" checkout -q -b scratch-same-commit
+  t    "a branch switch alone refreshes the cached result" hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "[fdd-wrong-branch] F-3's plan f-3 is linked to branch report-count"
+  git -C "$T" checkout -q report-count
+  git -C "$T" checkout -q --detach
+  t    "absence: a detached HEAD is quiet" "$T/.agents/bin/verify"
+  git -C "$T" checkout -q report-count
+  edit "$T/.agents/plans/f-3/plan.md" '/^Branch:/d'; edit "$T/.agents/plans/f-2/plan.md" "s/^Branch:.*/Branch: $TB/"
+  git -C "$T" checkout -q argh.h; git -C "$T" checkout -q "$TB"; echo '// e' >> "$T/argh.h"
+  t    "absence: an old plan linked to the base branch doesn't claim it" "$T/.agents/bin/verify"
+  edit "$T/.agents/plans/f-2/plan.md" '/^Branch:/d'
+  # The ticket in the branch name, when GIT_BRANCH puts it there.
+  git -C "$T" checkout -q -b feature/ARGH-12-count
+  t    "absence: no GIT_BRANCH template, a ticket-looking branch is quiet" "$T/.agents/bin/verify"
+  printf 'GIT_BRANCH="{type}/{ticket}-{slug}"\n' >> "$T/.agents/git.conf"
+  out="$("$T/.agents/bin/verify" 2>&1 || true)"
+  t    "a feature on another feature's ticket branch is a finding" hasl "$out" "[fdd-wrong-branch] F-3's task is doing on feature/ARGH-12-count, whose ticket ARGH-12 is F-2's"
+  tk set f-3 T1 todo; tk new f-4 F4; tk add f-4 "F-4: long names"; tk set f-4 T1 doing
+  printf '# F-4\nLong names.\n' > "$TD/designs/F-4.md"; "$TX" approve design F-4 >/dev/null
+  out="$("$T/.agents/bin/verify" 2>&1 || true)"
+  t    "...and a feature with its own ticket on the wrong one" hasl "$out" "F-4's task is doing on feature/ARGH-12-count, whose ticket ARGH-12 is F-2's"
+  git -C "$T" checkout -q -b feature/ARGH-99-other
+  t    "...or on a ticket no feature has" hasl "$("$T/.agents/bin/verify" 2>&1 || true)" "whose ticket ARGH-99 isn't F-4's (ARGH-14)"
+  git -C "$T" checkout -q -b feature/ARGH-14-long-names
+  t    "the feature's own ticket branch: quiet" "$T/.agents/bin/verify"
+  t    "the FDD skill says to link the plan at gitflow start" grep -q 'tasks link <slug>' "$HARNESS/workflows/feature-driven/skill/SKILL.md"
+  # Absence: without the pack, the same ledger, links, branch and settings change nothing.
+  N=$(repo fdd-trace-nopack)
+  "$HARNESS/install.sh" --team "$N" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$N/.agents/checks/$tier.sh"; done
+  printf 'GIT_BRANCH="{type}/{ticket}-{slug}"\n' >> "$N/.agents/git.conf"
+  commit "$N" harness
+  git -C "$N" checkout -q -b feature/ARGH-12-count
+  (cd "$N" && .agents/bin/tasks new f-3 F3 >/dev/null && .agents/bin/tasks add f-3 "F-3: report" >/dev/null && .agents/bin/tasks set f-3 T1 doing >/dev/null && .agents/bin/tasks link f-3 elsewhere >/dev/null)
+  echo x >> "$N/README.md"
+  out="$("$N/.agents/bin/verify" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "absence: no pack, no FDD findings" bash -c "test $rc = 0 && ! printf '%s' \"\$1\" | grep -q fdd-" _ "$out"
+fi
+}
+group grp_fdd_trace
+
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
 HX="$WORK/hx"; mkdir -p "$HX"   # a copy of the harness plus a test pack

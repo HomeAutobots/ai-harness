@@ -27,7 +27,14 @@ real ticket key.
 
 The list approval holds a hash of `model.md` and `features.md` together, so editing either one
 voids it, not just `features.md`. A design approval holds a hash of that one design file. An
-inspection records the commit and is final.
+inspection records the commit and is final: `fdd approve inspect` refuses until the feature is
+built (a `done` task records a commit git finds), and new work on an inspected feature is a
+finding (`fdd-inspected`). To reopen one, approve its design again: an approval that comes later
+in the record than the inspection (the record's order, so moving or copying lines in `approvals`
+doesn't count) sets the inspection aside, and the feature is back at built until you inspect it
+again (`fdd status` shows `89% built (reopened)`). That's also the only way back after a design
+edit following an inspection, so approving the design again always reopens, and the old commit
+still counts as built: check that the new work is in before you inspect again.
 
 ## Checks
 | Tier | Finding | Meaning |
@@ -38,10 +45,12 @@ inspection records the commit and is final.
 | edit (when `approvals` is edited), turn, full | `fdd-approval-simulated` | an approval a simulated human made, while the switch is off; it doesn't count, and it's a policy block |
 | turn, full | `fdd-simulated-human` | a simulated-human switch that `install.sh --simulated-human` didn't write, or that appeared or changed during an agent turn; it's off, and it's a policy block |
 | turn, full | `fdd-not-local` | `FDD_DIR` is in the repo but git tracks files in it or doesn't ignore it |
-| turn, full | `fdd-list-missing` | the approved list was deleted |
+| turn, full | `fdd-list-missing` | the approved list was deleted, or a task in progress names a feature while `features.md` or the whole `FDD_DIR` is missing (moved, deleted, or `FDD_DIR` pointed elsewhere) |
 | turn, full (when a change outside `FDD_DIR` and `.agents/` is judged) | `fdd-scope-empty` | `FDD_SCOPE` matches no tracked file and no new one git doesn't ignore, so every gate below would stay quiet; set it to where the code is |
 | turn, full | `fdd-list-unapproved` | in-scope code changed while the list isn't approved, or changed since |
 | turn, full | `fdd-unknown` | a task in progress names a feature that isn't in the list |
+| turn, full | `fdd-inspected` | a task in progress names a feature you inspected and haven't reopened |
+| turn, full | `fdd-wrong-branch` | a task in progress on a branch its plan isn't linked to (`tasks link`); on a branch another feature's plan is linked to (the base branch aside); or, when `GIT_BRANCH` in `.agents/git.conf` has `{ticket}`, on a branch whose ticket belongs to another feature or isn't the feature's |
 | turn, full | `fdd-untraced` | in-scope code changed with no task in progress naming a feature |
 | turn, full | `fdd-no-design` | building a feature without its design, or before you approved it |
 | commit message | leak | a feature ID from your list anywhere in the message; use the ticket key |
@@ -56,13 +65,23 @@ counts, though, even one that doesn't touch `FDD_SCOPE` or belongs to another fe
 `fdd status` shows the same milestones.
 
 ## Notes
-- **Nothing configured, nothing happens.** Until `features.md` exists, every check is quiet and commits pass.
+- **Nothing configured, nothing happens.** Until `features.md` exists, every check is quiet and commits pass,
+  except `fdd-list-missing` for a task in progress whose description starts with a feature ID.
   After that, an `FDD_SCOPE` that matches nothing is a finding (`fdd-scope-empty`, exit 1), not a
   quiet pass: the default `src/**` matches nothing in a repo without `src/`, and an untailored
   scope would otherwise turn every gate off.
 - **Tracing is local.** A change belongs to the feature whose plan task is `doing`, or, for a commit
   made in the turn, the feature whose task is `done` with that commit recorded; nothing in the code says so.
 - **Gates.** `FDD_ASK` picks the check-ins that need your approval; the others get an agent review only.
+- **Branches.** The skill has the agent `tasks link` each plan to its branch at `gitflow start`.
+  With no links and no `{ticket}` in `GIT_BRANCH`, `fdd-wrong-branch` never fires, and a detached
+  HEAD is never judged. It reads only the project's `.agents/git.conf`, not a personal one.
+- **Turning it off shows.** Moving `FDD_DIR` away with a feature's task in progress is
+  `fdd-list-missing`. Removing `feature-driven` from `WORKFLOWS` turns the pack off, so the pack
+  can't say so; instead the stop gate notes any change to `WORKFLOWS`, `STACKS`, or `FDD_*` in
+  `.agents/harness.conf` during an agent turn, with the old and new values, for you to see (and
+  logs it as `conf-changed` in `.agents/cache/hook-events.log`). It's a note, not a finding:
+  harness-tailor and your own requests change these too.
 - **Approve in your own terminal.** `fdd approve` refuses in a shell an agent tool started
   (`CLAUDECODE`, `GEMINI_CLI`, or `CURSOR_AGENT` set), so Claude Code's `!` prefix won't do. Each
   approval is also recorded in the git dir; a line in `approvals` without that record, say one an
