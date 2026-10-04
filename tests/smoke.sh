@@ -2904,7 +2904,7 @@ except d.ConfError as e:
   edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'
   printf 'rootcause\tbug-12\tsomeone\t2026-10-03\tabc\n' > "$CS/bug-12/approvals"
   out="$("$CX" status)"
-  t    "status names an approval debug didn't record" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'not counted, not written by debug approve or reject: .agents/debug/sessions/bug-12/approvals:1 rootcause' && printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open'" _ "$out"
+  t    "status names an approval debug didn't record" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-12/approvals:1 rootcause' && printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open'" _ "$out"
   rm -f "$CS/bug-12/approvals"
   CF="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; ev = {1: {'attempt': 'reproduce', 'outcome': 'reproduced'}, 2: {'attempt': 'confirm', 'outcome': 'reproduced'}}; print(d.confidence(ev, {}), d.confidence(ev, {'confirm_after': '1'}), d.confidence(ev, {'confirm_after': '2'}), d.confidence(ev, {'confirm_after': 'x'}), d.confidence({2: ev[2]}, {'confirm_after': '2'}), d.confidence({1: {'attempt': 'reproduce', 'outcome': 'not-reproduced'}, 2: {'attempt': 'confirm', 'outcome': 'partial'}}, {}))"
   t    "confidence: a confirm attempt counts only after confirm_after" test "$(python3 -B -c "$CF" "$GP" 2>&1)" = "confirmed confirmed reproduced confirmed reproduced evidence-only"
@@ -3017,6 +3017,11 @@ except d.ConfError as e:
   "$SMX" run isolate -- true >/dev/null
   t    "...and run still moves the step of an approval that doesn't count" grep -qx 'step: isolate' "$SMS/state"
   cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
+  "$SMX" start bug '#2' >/dev/null
+  t    "simulated human on: an agent's close that didn't need the human isn't marked simulated" bash -c "CLAUDECODE=1 '$SMX' close bug-2 abandoned | grep -qxF 'closed bug-2 (abandoned)'"
+  mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
+  t    "...so it stays closed once the switch is off" bash -c "'$SMX' status bug-2 | grep -qxF 'session: bug-2 (bug, #2), closed (abandoned)'"
+  cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
   "$CX" start bug '#13' >/dev/null
   trc  "close needs a reason it knows"  2 "$CX" close bug-13 fixed
   out="$("$CX" close nosuch reviewed 2>&1)" && rc=0 || rc=$?
@@ -3027,7 +3032,7 @@ except d.ConfError as e:
   git -C "$C" checkout -q src/calc.c
   t    "absence: no root-cause.md, the agent closes abandoned, with a note" bash -c "CLAUDECODE=1 '$CX' close bug-13 abandoned 'reporter went quiet' | grep -qxF 'closed bug-13 (abandoned: reporter went quiet)'"
   t    "...the session is closed"       bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
-  t    "...the close is recorded"       bash -c "grep -q '^close	bug-13	.*	abandoned: reporter went quiet$' '$C/.git/ai-harness/debug-approvals' && grep -q '^close	bug-13	' '$CS/bug-13/approvals'"
+  t    "...the close is recorded, as an agent's" bash -c "grep -q '^close-agent	bug-13	.*	abandoned: reporter went quiet$' '$C/.git/ai-harness/debug-approvals' && grep -q '^close-agent	bug-13	' '$CS/bug-13/approvals'"
   t    "...and its task is done"        bash -c "'$C/.agents/bin/tasks' list bug-13 | grep -q 'T1.*done'"
   trc  "closing it again: exit 1"       1 "$CX" close bug-13 duplicate
   t    "the policy lets an agent close a session" policy "$C" test ".agents/commands/debug close bug-13 duplicate 'see bug-12'"
@@ -3048,13 +3053,30 @@ except d.ConfError as e:
   t    "absence: DEBUG_ASK empty, the agent closes a reviewed root cause" bash -c "CLAUDECODE=1 '$CX' close bug-14 reviewed | grep -qxF 'closed bug-14 (reviewed)'"
   edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
   t    "rootcause back in DEBUG_ASK: a reviewed close no longer counts" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open, closed as reviewed but DEBUG_ASK has rootcause'"
-  t    "...while an abandoned one stays closed" bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "absence: an agent's close with no root-cause.md still counts after DEBUG_ASK changes" bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
   t    "a person's terminal closes a root cause that waits on them" bash -c "'$CX' close bug-14 duplicate 'same as bug-13' | grep -qxF 'closed bug-14 (duplicate: same as bug-13)'"
+  t    "...and that close counts, with the root cause there" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), closed (duplicate: same as bug-13)' && tail -1 '$CS/bug-14/approvals' | grep -q '^close	bug-14	'"
+  "$CX" start bug '#20' >/dev/null; rcdoc "$CS/bug-20/root-cause.md" evidence-only
+  mv "$CS/bug-20/root-cause.md" "$WORK/debugcli.rc20"
+  CLAUDECODE=1 "$CX" close bug-20 abandoned >/dev/null
+  mv "$WORK/debugcli.rc20" "$CS/bug-20/root-cause.md"
+  t    "an agent's close made with root-cause.md set aside doesn't count once it's back" bash -c "'$CX' status bug-20 | grep -qxF 'session: bug-20 (bug, #20), open, closed by an agent but its root cause waits on you'"
+  "$CX" close bug-20 abandoned >/dev/null
+  "$CX" start bug '#21' >/dev/null; rcdoc "$CS/bug-21/root-cause.md" evidence-only
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  CLAUDECODE=1 "$CX" close bug-21 abandoned >/dev/null
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  t    "...nor one made while DEBUG_ASK was empty, once rootcause is back" bash -c "'$CX' status bug-21 | grep -qxF 'session: bug-21 (bug, #21), open, closed by an agent but its root cause waits on you'"
+  "$CX" close bug-21 abandoned >/dev/null
   "$CX" start bug '#17' >/dev/null; rcdoc "$CS/bug-17/root-cause.md" evidence-only; "$CX" reject bug-17 wrong operands >/dev/null
   trc  "the agent can't close a rejected root cause either (2)" 2 env CLAUDECODE=1 "$CX" close bug-17 abandoned
   "$CX" close bug-17 abandoned >/dev/null
   t    "status of a closed session keeps its verdict" bash -c "'$CX' status bug-17 | grep -qxF 'session: bug-17 (bug, #17), closed (abandoned), root cause rejected'"
-  "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only; "$CX" approve bug-18 >/dev/null
+  "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only
+  cp "$C/.agents/harness.conf" "$WORK/debugcli.conf18"; edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
+  "$CX" run hypothesize -- "$CX" approve bug-18 >/dev/null
+  cp "$WORK/debugcli.conf18" "$C/.agents/harness.conf"
+  t    "an approval made during a run freezes the step" bash -c "'$CX' status bug-18 | grep -qxF 'session: bug-18 (bug, #18), approved' && grep -qx 'step: check-in' '$CS/bug-18/state'"
   trc  "close of an approved session: exit 1" 1 "$CX" close bug-18 abandoned
   "$CX" start bug '#19' >/dev/null; mv "$CS/bug-19/state" "$CS/bug-19/state.real"; ln -s state.real "$CS/bug-19/state"
   trc  "close refuses a symlinked state (2)" 2 "$CX" close bug-19 abandoned

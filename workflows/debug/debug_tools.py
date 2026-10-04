@@ -324,16 +324,40 @@ def reviewed_void(conf, close):
     return close is not None and close[4].split(":", 1)[0] == "reviewed" and "rootcause" in conf["DEBUG_ASK"].split()
 
 
+CLOSES = ("close", "close-agent")
+
+
+class OFF:   # a simulated-human switch that's off, for lines that never need the human
+    state = "off"   # close-agent: made in an agent's shell without the simulated human's token
+
+
+def agent_close_void(conf, close, sdir, v):
+    """True when a recorded close is an agent's abandoned or duplicate one that doesn't count: the
+    root cause waits on the human now (DEBUG_ASK has rootcause, and root-cause.md exists or the
+    verdict v is rejected or changed), however it was when the agent closed it."""
+    return close is not None and close[0] == "close-agent" and \
+        close[4].split(":", 1)[0] in ("abandoned", "duplicate") and "rootcause" in conf["DEBUG_ASK"].split() and \
+        (os.path.isfile(os.path.join(sdir, "root-cause.md")) or v in ("rejected", "changed"))
+
+
+def void_close(conf, close, sdir, v):
+    """Why a recorded close doesn't count, as status says it, or '' when it counts (or there's none)."""
+    if reviewed_void(conf, close):
+        return "closed as reviewed but DEBUG_ASK has rootcause"
+    if agent_close_void(conf, close, sdir, v):
+        return "closed by an agent but its root cause waits on you"
+    return ""
+
+
 def not_open(root, conf, slug, sdir, st, switch):
     """Why a session isn't open ('approved', 'closed (abandoned)'), or '' while it is. Both come
     only from lines debug recorded (approve, close), never from the state file, which an agent can
-    edit; a reviewed close counts only while DEBUG_ASK lacks rootcause."""
-    close = last_line(root, slug, sdir, switch, ("close",))
-    if close is not None and not reviewed_void(conf, close):
+    edit. A close counts unless void_close() says why not."""
+    v = verdict(root, slug, sdir, switch)
+    close = last_line(root, slug, sdir, switch, CLOSES)
+    if close is not None and not void_close(conf, close, sdir, v):
         return "closed (%s)" % (close[4] or "no reason given")
-    if verdict(root, slug, sdir, switch) == "approved":
-        return "approved"
-    return ""
+    return "approved" if v == "approved" else ""
 
 
 def current_session(root, conf, switch):
@@ -814,7 +838,7 @@ def cmd_run(root, words, opts, after):
     write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
                              ["", "Full output: E-%d.log" % n]) + "\n")
     st = read_state(sdir)   # fresh: the session may have been closed while the command ran
-    if not not_open(root, conf, slug, sdir, st, switch).startswith("closed"):   # only a recorded close freezes the step
+    if not not_open(root, conf, slug, sdir, st, switch):   # a recorded close or approval freezes the step
         st["step"] = step
         write_state(sdir, st)
     print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
@@ -1031,10 +1055,9 @@ def print_status(root, conf, switch, session):
         state = why + (", " + VERDICT_SAID[v] if v in VERDICT_SAID else "")
     elif why:
         state = why
-    elif reviewed_void(conf, last_line(root, slug, sdir, switch, ("close",))):
-        state = "open, closed as reviewed but DEBUG_ASK has rootcause"
     else:
-        state = "open" + (", " + VERDICT_SAID[v] if v in VERDICT_SAID else "")
+        void = void_close(conf, last_line(root, slug, sdir, switch, CLOSES), sdir, v)
+        state = "open" + (", " + void if void else "") + (", " + VERDICT_SAID[v] if v in VERDICT_SAID else "")
     print("session: %s (%s, %s), %s" % (slug, kind, "pasted report" if st.get("ref") == "-" else st.get("ref", "?"),
                                         state))
     print("step: %s" % st.get("step", "?"))
@@ -1067,7 +1090,7 @@ def print_status(root, conf, switch, session):
     if gaps:
         print("steps with no playbook bindings: %s (%s)" % (", ".join(gaps), shown(root, playbook_path(root, conf))))
     _, unrecorded, simulated = ap.classify(root, KEY, approvals_path(sdir), switch)
-    for label, rows in (("not written by debug approve or reject", unrecorded),
+    for label, rows in (("not written by debug approve, reject, or close", unrecorded),
                         ("made by a simulated human while the switch is off", simulated)):
         if rows:
             print("not counted, %s: %s" % (label, ", ".join(
@@ -1266,7 +1289,9 @@ def cmd_close(root, words, opts, after):
     are in the tree, and in an agent's shell while the root cause waits on the human (DEBUG_ASK has
     rootcause and root-cause.md exists, or it was rejected or changed since its approval). reviewed:
     a root cause the agent reviewed, only when DEBUG_ASK lacks rootcause, after the check-in set
-    passes; it stops counting if rootcause goes back into DEBUG_ASK. Otherwise an agent may run it."""
+    passes; it stops counting if rootcause goes back into DEBUG_ASK. Otherwise an agent may run it;
+    an agent's abandoned or duplicate close (close-agent) stops counting once the root cause waits on
+    the human, so moving root-cause.md aside or emptying DEBUG_ASK for a moment gets it nothing."""
     if len(words) < 2 or words[1] not in CLOSE_REASONS:
         return bad("close")
     reason, note = words[1], one_line(" ".join(words[2:] + (after or [])))
@@ -1277,7 +1302,7 @@ def cmd_close(root, words, opts, after):
         return session
     slug, sdir, st = session
     rc = os.path.join(sdir, "root-cause.md")
-    asks = "rootcause" in conf["DEBUG_ASK"].split()
+    asks, waits = "rootcause" in conf["DEBUG_ASK"].split(), False
     if reason == "reviewed":
         if asks:
             print("debug: DEBUG_ASK has rootcause, so the human approves this root cause: ask them to run %s "
@@ -1298,7 +1323,12 @@ def cmd_close(root, words, opts, after):
                   "them to commit or stash it)" % (slug, ", ".join("%s:%d" % x for x in left)), file=sys.stderr)
             return 1
     text = reason + (": " + note if note else "")
-    line, sim = ap.new_line(root, "close", slug, text, switch)
+    # Marked simulated only when it took the human (the token got it past refused); otherwise an
+    # agent's close would reopen once the switch goes off. In an agent's shell without the token,
+    # it's a close-agent line, which stops counting if the root cause comes to wait on the human.
+    by_agent = ap.blocked_shell(switch) is not None
+    kind = "close-agent" if by_agent else "close"
+    line, sim = ap.new_line(root, kind, slug, text, switch if waits and ap.agent_shell() else OFF)
     ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
     append_line(approvals_path(sdir), line)
     st.update(status="closed", note=text)
