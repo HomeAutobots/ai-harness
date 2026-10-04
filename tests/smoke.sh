@@ -2820,8 +2820,12 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$CX" run gather-evidence -- echo BBB >/dev/null
   wait "$bgrun" || true
   t    "two runs at once get two entries" bash -c "test \$(find '$CS/bug-12/evidence' -name 'E-*.md' | wc -l) -eq $((nmd + 2)) && a=\$(grep -lx AAA '$CS'/bug-12/evidence/E-*.md) && b=\$(grep -lx BBB '$CS'/bug-12/evidence/E-*.md) && test -n \"\$a\" && test -n \"\$b\" && test \"\$a\" != \"\$b\""
-  "$CX" run hypothesize -- sh -c "printf 'status: closed\n' >> '$CS/bug-12/state'" >/dev/null
-  t    "a session closed during a run stays closed" bash -c "grep -qx 'status: closed' '$CS/bug-12/state' && ! grep -qx 'step: hypothesize' '$CS/bug-12/state'"
+  "$CX" start bug PROJ-40 >/dev/null
+  "$CX" run hypothesize -- "$CX" close bug-proj-40 abandoned >/dev/null
+  t    "a session closed during a run stays closed" bash -c "grep -qx 'status: closed' '$CS/bug-proj-40/state' && ! grep -qx 'step: hypothesize' '$CS/bug-proj-40/state' && '$CX' status bug-proj-40 | grep -qxF 'session: bug-proj-40 (bug, PROJ-40), closed (abandoned)'"
+  printf 'status: closed\n' >> "$CS/bug-12/state"
+  "$CX" run hypothesize -- true >/dev/null
+  t    "...while a state file that says closed doesn't freeze the step" grep -qx 'step: hypothesize' "$CS/bug-12/state"
   edit "$CS/bug-12/state" '/^status: closed$/d'
   head -c 1100000 /dev/zero | tr '\0' a > "$WORK/big1.txt"
   out="$("$CX" run gather-evidence -- cat "$WORK/big1.txt")"
@@ -3015,12 +3019,15 @@ except d.ConfError as e:
   cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
   "$CX" start bug '#13' >/dev/null
   trc  "close needs a reason it knows"  2 "$CX" close bug-13 fixed
+  out="$("$CX" close nosuch reviewed 2>&1)" && rc=0 || rc=$?
+  t    "close of no such session says so, even for reviewed (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -q '^debug: no session nosuch '" _ "$out"
   printf 'int add(int a, int b) { return a - b; } /* probe */\n' > "$C/src/calc.c"
   out="$("$CX" close bug-13 abandoned 2>&1)" && rc=0 || rc=$?
   t    "close refuses while experiments are in the tree" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'revert the experiments before closing bug-13: src/calc.c:1'" _ "$out"
   git -C "$C" checkout -q src/calc.c
-  t    "close abandoned, with a note"   bash -c "'$CX' close bug-13 abandoned 'reporter went quiet' | grep -qxF 'closed bug-13 (abandoned: reporter went quiet)'"
+  t    "absence: no root-cause.md, the agent closes abandoned, with a note" bash -c "CLAUDECODE=1 '$CX' close bug-13 abandoned 'reporter went quiet' | grep -qxF 'closed bug-13 (abandoned: reporter went quiet)'"
   t    "...the session is closed"       bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "...the close is recorded"       bash -c "grep -q '^close	bug-13	.*	abandoned: reporter went quiet$' '$C/.git/ai-harness/debug-approvals' && grep -q '^close	bug-13	' '$CS/bug-13/approvals'"
   t    "...and its task is done"        bash -c "'$C/.agents/bin/tasks' list bug-13 | grep -q 'T1.*done'"
   trc  "closing it again: exit 1"       1 "$CX" close bug-13 duplicate
   t    "the policy lets an agent close a session" policy "$C" test ".agents/commands/debug close bug-13 duplicate 'see bug-12'"
@@ -3028,21 +3035,48 @@ except d.ConfError as e:
   "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null
   printf '## H-1: add subtracts\n- status: confirmed (E-1)\n' >> "$CS/bug-14/hypotheses.md"
   rcdoc "$CS/bug-14/root-cause.md" evidence-only
+  (cd "$C" && .agents/bin/tasks ask bug-14 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-14' >/dev/null)
+  out="$(CLAUDECODE=1 "$CX" close bug-14 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "the agent can't close a root cause that waits on the human (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF 'debug: closing a session whose root cause waits on you is the human'" _ "$out"
+  t    "...the session stays open, its check-in question too" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open' && '$C/.agents/bin/tasks' questions --open --plan=bug-14 | grep -q 'debug approve bug-14'"
   out="$(CLAUDECODE=1 "$CX" close bug-14 reviewed 2>&1)" && rc=0 || rc=$?
   t    "close reviewed: not while DEBUG_ASK has rootcause" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
+  edit "$CS/bug-14/state" 's/^status: open$/status: closed/'; printf 'note: reviewed\n' >> "$CS/bug-14/state"
+  t    "a state file that says closed closes nothing" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open'"
+  edit "$CS/bug-14/state" 's/^status: closed$/status: open/'; edit "$CS/bug-14/state" '/^note: /d'
   edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
   t    "absence: DEBUG_ASK empty, the agent closes a reviewed root cause" bash -c "CLAUDECODE=1 '$CX' close bug-14 reviewed | grep -qxF 'closed bug-14 (reviewed)'"
   edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  t    "rootcause back in DEBUG_ASK: a reviewed close no longer counts" bash -c "'$CX' status bug-14 | grep -qxF 'session: bug-14 (bug, #14), open, closed as reviewed but DEBUG_ASK has rootcause'"
+  t    "...while an abandoned one stays closed" bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "a person's terminal closes a root cause that waits on them" bash -c "'$CX' close bug-14 duplicate 'same as bug-13' | grep -qxF 'closed bug-14 (duplicate: same as bug-13)'"
+  "$CX" start bug '#17' >/dev/null; rcdoc "$CS/bug-17/root-cause.md" evidence-only; "$CX" reject bug-17 wrong operands >/dev/null
+  trc  "the agent can't close a rejected root cause either (2)" 2 env CLAUDECODE=1 "$CX" close bug-17 abandoned
+  "$CX" close bug-17 abandoned >/dev/null
+  t    "status of a closed session keeps its verdict" bash -c "'$CX' status bug-17 | grep -qxF 'session: bug-17 (bug, #17), closed (abandoned), root cause rejected'"
+  "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only; "$CX" approve bug-18 >/dev/null
+  trc  "close of an approved session: exit 1" 1 "$CX" close bug-18 abandoned
+  "$CX" start bug '#19' >/dev/null; mv "$CS/bug-19/state" "$CS/bug-19/state.real"; ln -s state.real "$CS/bug-19/state"
+  trc  "close refuses a symlinked state (2)" 2 "$CX" close bug-19 abandoned
+  rm -rf "$CS/bug-19" "$C/.agents/plans/bug-19"
   # Upgrades: an open session survives a re-install; an install from before a key gets its default.
   "$CX" start bug '#15' >/dev/null
+  "$CX" run gather-evidence -- true >/dev/null
+  cp "$CS/bug-15/state" "$WORK/debugcli.state"; cp "$CS/bug-15/report.md" "$WORK/debugcli.report"
   "$HARNESS/install.sh" --team "$C" >/dev/null 2>&1
+  t    "upgrade: a re-install leaves the session's files as they were" bash -c "cmp -s '$CS/bug-15/state' '$WORK/debugcli.state' && cmp -s '$CS/bug-15/report.md' '$WORK/debugcli.report' && test -f '$CS/bug-15/evidence/E-1.md'"
+  t    "...and harness.conf has one DEBUG_ASK line" test "$(grep -c '^DEBUG_ASK=' "$C/.agents/harness.conf")" = 1
   t    "upgrade: an open session survives a re-install" bash -c "'$CX' status | grep -qxF 'session: bug-15 (bug, #15), open'"
-  t    "...and run still captures evidence" bash -c "'$CX' run gather-evidence -- true | grep -qF 'E-1 (gather-evidence, exit 0)'"
+  t    "...a recorded close too"        bash -c "'$CX' status bug-13 | grep -qxF 'session: bug-13 (bug, #13), closed (abandoned: reporter went quiet)'"
+  t    "...and run still captures evidence" bash -c "'$CX' run gather-evidence -- true | grep -qF 'E-2 (gather-evidence, exit 0)' && test -f '$CS/bug-15/evidence/E-2.md'"
   cp "$C/.agents/harness.conf" "$WORK/debugcli.conf"
   edit "$C/.agents/harness.conf" '/^DEBUG_/d'
   t    "upgrade: no DEBUG_* keys, the defaults apply" bash -c "'$CX' status | grep -qxF 'session: bug-15 (bug, #15), open' && '$CX' start bug '#16' | grep -q '^started bug-16 '"
+  out="$(CLAUDECODE=1 "$CX" close bug-16 reviewed 2>&1)" && rc=0 || rc=$?
+  t    "...DEBUG_ASK's default has rootcause, so close reviewed is refused (1)" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'DEBUG_ASK has rootcause, so the human approves this root cause'" _ "$out"
   t    "...and verify stays quiet"     test "$("$C/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
   cp "$WORK/debugcli.conf" "$C/.agents/harness.conf"
+  "$CX" close bug-15 abandoned >/dev/null; "$CX" close bug-16 abandoned >/dev/null
 fi
 }
 group grp_debug_cli

@@ -6,7 +6,7 @@ project's own tools through its playbook (DEBUG_DIR/playbook.md). It investigate
 root cause the human approves; the fix goes through the project's own process. Each session lives
 in DEBUG_DIR/sessions/<slug>/, local and never committed: report.md, evidence/E-<n>.md and .log
 (written by debug run), hypotheses.md, root-cause.md, state, and approvals (written only by debug
-approve and reject; each line is also recorded in the git dir, .git/ai-harness/debug-approvals,
+approve, reject, and close; each line is also recorded in the git dir, .git/ai-harness/debug-approvals,
 through the harness's .agents/lib/approvals.py). Settings come from .agents/harness.conf only,
 never the environment (checks/state.sh and the stop gate read just the file); a missing key means
 its default, and a value this pack doesn't know is a tooling problem (exit 3):
@@ -291,16 +291,23 @@ def approvals_path(sdir):
     return os.path.join(sdir, "approvals")
 
 
-def verdict(root, slug, sdir, switch):
-    """'approved', 'rejected', 'changed', or '': the session's counted approvals line that debug
-    approve or reject recorded last (its place in the git-dir record) decides. An approval binds
-    the hash of root-cause.md as it was: once the file differs (or is gone), it's 'changed', and
-    the session is open again. An approval with no hash binds nothing, so it's 'changed' too."""
+def last_line(root, slug, sdir, switch, kinds):
+    """The fields of the session's counted approvals line of one of these kinds that debug recorded
+    last (its place in the git-dir record), or None."""
     counted, _, _ = ap.classify(root, KEY, approvals_path(sdir), switch)
     best, at = None, None
     for _, parts, p in counted:
-        if parts[1] == slug and parts[0] in ("rootcause", "reject") and (at is None or p >= at):
+        if parts[1] == slug and parts[0] in kinds and (at is None or p >= at):
             best, at = parts, p
+    return best
+
+
+def verdict(root, slug, sdir, switch):
+    """'approved', 'rejected', 'changed', or '': the session's counted approvals line that debug
+    approve or reject recorded last decides. An approval binds the hash of root-cause.md as it was:
+    once the file differs (or is gone), it's 'changed', and the session is open again. An approval
+    with no hash binds nothing, so it's 'changed' too."""
+    best = last_line(root, slug, sdir, switch, ("rootcause", "reject"))
     if best is None:
         return ""
     if best[0] == "reject":
@@ -308,11 +315,22 @@ def verdict(root, slug, sdir, switch):
     return "approved" if best[4] and best[4] == sha(os.path.join(sdir, "root-cause.md")) else "changed"
 
 
-def not_open(root, slug, sdir, st, switch):
-    """Why a session isn't open ('approved', 'closed (abandoned)'), or '' while it is. Approved
-    comes only from a recorded approval, never from the state file alone."""
-    if st.get("status") == "closed":
-        return "closed (%s)" % (st.get("note") or "no reason given")
+VERDICT_SAID = {"rejected": "root cause rejected", "changed": "root cause changed since its approval"}
+
+
+def reviewed_void(conf, close):
+    """True when a recorded close is a reviewed one that doesn't count: DEBUG_ASK has rootcause now,
+    so the human approves the root cause."""
+    return close is not None and close[4].split(":", 1)[0] == "reviewed" and "rootcause" in conf["DEBUG_ASK"].split()
+
+
+def not_open(root, conf, slug, sdir, st, switch):
+    """Why a session isn't open ('approved', 'closed (abandoned)'), or '' while it is. Both come
+    only from lines debug recorded (approve, close), never from the state file, which an agent can
+    edit; a reviewed close counts only while DEBUG_ASK lacks rootcause."""
+    close = last_line(root, slug, sdir, switch, ("close",))
+    if close is not None and not reviewed_void(conf, close):
+        return "closed (%s)" % (close[4] or "no reason given")
     if verdict(root, slug, sdir, switch) == "approved":
         return "approved"
     return ""
@@ -323,7 +341,7 @@ def current_session(root, conf, switch):
     (on a detached HEAD, the newest started detached); None when there's none."""
     br, found = current_branch(root), None
     for slug, sdir, st in all_sessions(root, conf):
-        if st.get("branch", "") == br and not not_open(root, slug, sdir, st, switch):
+        if st.get("branch", "") == br and not not_open(root, conf, slug, sdir, st, switch):
             found = (slug, sdir, st)
     return found
 
@@ -757,7 +775,8 @@ def cmd_run(root, words, opts, after):
     if len(words) != 1 or not after or (attempt is not None and attempt not in ATTEMPTS):
         return bad("run")
     conf = load_conf(root)
-    cur = current_session(root, conf, ap.Switch(root))
+    switch = ap.Switch(root)
+    cur = current_session(root, conf, switch)
     if not cur:
         return no_session(root)
     slug, sdir, st = cur
@@ -795,7 +814,7 @@ def cmd_run(root, words, opts, after):
     write_text(md, "\n".join(header + ["", "## Output (last %d lines)" % TAIL, ""] + tail +
                              ["", "Full output: E-%d.log" % n]) + "\n")
     st = read_state(sdir)   # fresh: the session may have been closed while the command ran
-    if st.get("status") != "closed":   # an approval that no longer counts doesn't freeze the step
+    if not not_open(root, conf, slug, sdir, st, switch).startswith("closed"):   # only a recorded close freezes the step
         st["step"] = step
         write_state(sdir, st)
     print("E-%d (%s%s, exit %d): %s" % (n, step, ", %s attempt" % attempt if attempt else "", rc, shown(root, md)))
@@ -1006,10 +1025,16 @@ def where(root):
 def print_status(root, conf, switch, session):
     slug, sdir, st = session
     kind = st.get("kind", "?")
-    why = not_open(root, slug, sdir, st, switch)
+    why = not_open(root, conf, slug, sdir, st, switch)
     v = verdict(root, slug, sdir, switch)
-    state = why or {"rejected": "open, root cause rejected",
-                    "changed": "open, root cause changed since its approval"}.get(v, "open")
+    if why.startswith("closed"):
+        state = why + (", " + VERDICT_SAID[v] if v in VERDICT_SAID else "")
+    elif why:
+        state = why
+    elif reviewed_void(conf, last_line(root, slug, sdir, switch, ("close",))):
+        state = "open, closed as reviewed but DEBUG_ASK has rootcause"
+    else:
+        state = "open" + (", " + VERDICT_SAID[v] if v in VERDICT_SAID else "")
     print("session: %s (%s, %s), %s" % (slug, kind, "pasted report" if st.get("ref") == "-" else st.get("ref", "?"),
                                         state))
     print("step: %s" % st.get("step", "?"))
@@ -1066,7 +1091,7 @@ def cmd_status(root, words, opts, after):
         session = current_session(root, conf, switch)
     if not session:
         elsewhere = ["%s (%s)" % (s, st.get("branch") or "detached HEAD") for s, d, st in all_sessions(root, conf)
-                     if not not_open(root, s, d, st, switch)]
+                     if not not_open(root, conf, s, d, st, switch)]
         print("no open session %s%s" % (where(root), "; open elsewhere: " + ", ".join(elsewhere) if elsewhere else
                                         " (start one: %s start <kind> <ref>)" % debug_cmd(root)))
         return 0
@@ -1097,7 +1122,7 @@ def checkin_questions(root, slug):
     asks = re.compile(r"debug approve %s(?![A-Za-z0-9-])" % re.escape(slug))
     got = []
     for line in out.splitlines():
-        m = re.match(r"^(\S+) (Q[0-9]+) \[open\] \(T1(?:, [a-z]* gate)?\) (.*)$", line)
+        m = re.match(r"^(\S+) (Q[0-9]+) \[open\] \(T1(?:, [^)]* gate)?\) (.*)$", line)
         if m and m.group(1) == slug and asks.search(m.group(3)):
             got.append(m.group(2))
     return got
@@ -1122,9 +1147,9 @@ def finish_plan(root, slug, answer, done, tool="human"):
 SESSION_FILES = ("state", "hypotheses.md", "approvals", "root-cause.md")
 
 
-def judged_session(root, conf, switch, slug, verb):
-    """(slug, dir, state) of an open session with a root cause, or the exit code after saying why:
-    1 when there's nothing to judge, 2 when the session dir or one of its files is a symlink."""
+def open_session(root, conf, switch, slug, verb):
+    """(slug, dir, state) of an open session, or the exit code after saying why: 1 when there's no
+    such session or it isn't open, 2 when the session dir or one of its files is a symlink."""
     session = find_session(root, conf, slug)
     if not session:
         print("debug: no session %s (%s status lists the open one)" % (slug[:64], debug_cmd(root)), file=sys.stderr)
@@ -1134,10 +1159,19 @@ def judged_session(root, conf, switch, slug, verb):
         print("debug: %s: %s is a symlink, so it won't %s it; make it a plain file" % (
             slug, ", ".join(n or "the session dir" for n in links), verb), file=sys.stderr)
         return 2
-    why = not_open(root, session[0], session[1], session[2], switch)
+    why = not_open(root, conf, session[0], session[1], session[2], switch)
     if why:
         print("debug: %s is %s" % (slug, why), file=sys.stderr)
         return 1
+    return session
+
+
+def judged_session(root, conf, switch, slug, verb):
+    """(slug, dir, state) of an open session with a root cause, or the exit code after saying why
+    (open_session's, or 1 when there's no root-cause.md to judge)."""
+    session = open_session(root, conf, switch, slug, verb)
+    if isinstance(session, int):
+        return session
     if not os.path.isfile(os.path.join(session[1], "root-cause.md")):
         print("debug: %s has no root-cause.md yet, so there's nothing to %s" % (slug, verb), file=sys.stderr)
         return 1
@@ -1227,40 +1261,50 @@ def cmd_reject(root, words, opts, after):
 
 @command("close", "debug close <slug> abandoned|duplicate|reviewed [note...]")
 def cmd_close(root, words, opts, after):
-    """End a session. abandoned or duplicate: no root cause, refused while experiments are in the
-    tree. reviewed: a root cause the agent reviewed, only when DEBUG_ASK lacks rootcause, after the
-    check-in set passes. Not a human step: an agent may run it (debug approve stays the human's)."""
+    """End a session, recorded like an approval (a close line in approvals and the git-dir record),
+    so a state file edited by hand closes nothing. abandoned or duplicate: refused while experiments
+    are in the tree, and in an agent's shell while the root cause waits on the human (DEBUG_ASK has
+    rootcause and root-cause.md exists, or it was rejected or changed since its approval). reviewed:
+    a root cause the agent reviewed, only when DEBUG_ASK lacks rootcause, after the check-in set
+    passes; it stops counting if rootcause goes back into DEBUG_ASK. Otherwise an agent may run it."""
     if len(words) < 2 or words[1] not in CLOSE_REASONS:
         return bad("close")
     reason, note = words[1], one_line(" ".join(words[2:] + (after or [])))
     conf = load_conf(root)
     switch = ap.Switch(root)
+    session = open_session(root, conf, switch, words[0], "close")
+    if isinstance(session, int):
+        return session
+    slug, sdir, st = session
+    rc = os.path.join(sdir, "root-cause.md")
+    asks = "rootcause" in conf["DEBUG_ASK"].split()
     if reason == "reviewed":
-        if "rootcause" in conf["DEBUG_ASK"].split():
+        if asks:
             print("debug: DEBUG_ASK has rootcause, so the human approves this root cause: ask them to run %s "
-                  "approve %s" % (debug_cmd(root), words[0][:64]), file=sys.stderr)
+                  "approve %s" % (debug_cmd(root), slug), file=sys.stderr)
             return 1
-        session = judged_session(root, conf, switch, words[0], "review")
-        if isinstance(session, int):
-            return session
+        if not os.path.isfile(rc):
+            print("debug: %s has no root-cause.md yet, so there's nothing to review" % slug, file=sys.stderr)
+            return 1
         if not checkin(root, session, "closing"):
             return 1
     else:
-        session = find_session(root, conf, words[0])
-        why = not_open(root, *session, switch) if session else "not a session here"
-        if why:
-            print("debug: %s is %s" % (words[0][:64], why), file=sys.stderr)
-            return 1
+        waits = (asks and os.path.isfile(rc)) or verdict(root, slug, sdir, switch) in ("rejected", "changed")
+        if waits and ap.refused("debug", "closing a session whose root cause waits on you", switch):
+            return 2
         left = changed_in_scope(root, conf)
         if left:
             print("debug: revert the experiments before closing %s: %s (if they're the human's own work, ask "
-                  "them to commit or stash it)" % (session[0], ", ".join("%s:%d" % x for x in left)), file=sys.stderr)
+                  "them to commit or stash it)" % (slug, ", ".join("%s:%d" % x for x in left)), file=sys.stderr)
             return 1
-    slug, sdir, st = session
-    st.update(status="closed", note=reason + (": " + note if note else ""))
+    text = reason + (": " + note if note else "")
+    line, sim = ap.new_line(root, "close", slug, text, switch)
+    ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
+    append_line(approvals_path(sdir), line)
+    st.update(status="closed", note=text)
     write_state(sdir, st)
-    finish_plan(root, slug, "closed: " + st["note"], True, tool=None)
-    print("closed %s (%s)" % (slug, st["note"]))
+    finish_plan(root, slug, "closed: " + text, True, tool=None)
+    print("closed %s (%s)%s" % (slug, text, ap.SIMULATED if sim else ""))
     return 0
 
 
