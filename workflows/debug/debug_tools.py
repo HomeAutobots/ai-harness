@@ -21,8 +21,9 @@ is a tooling problem (exit 3):
   debug_tools.py check <edit|turn|full> <root> [files...]   the verify checks; with AGENTS_SINCE
                                                             (verify --since), turn and full also
                                                             judge what was committed since then
-Exit: 0 clean, 1 findings, 2 usage or a policy block (an approval debug didn't record, or a
-command .agents/policy.conf blocks), 3 tooling problem or an unknown option. debug run exits with
+Exit: 0 clean, 1 findings, 2 usage or a policy block (an approvals line debug didn't record, or a
+simulated one while the switch is off; a simulated-human switch that doesn't count; a command
+.agents/policy.conf blocks), 3 tooling problem or an unknown option. debug run exits with
 its command's exit code, so its 2 or 3 can come from the command too: a run that happened prints its
 "E-<n> (...)" line first. Its command gets no stdin (/dev/null) and has no time limit, and E-<n>.log
 keeps all of its output with no size cap; only the entry (E-<n>.md) is cut to the last lines.
@@ -956,7 +957,7 @@ def playbook_format(ctx):
         return []
     sections, heads, odd, open_at = read_playbook(pb)
     known = sorted({s for k in shipped_kinds() for s in read_kind(k)["bindable"]})
-    hits, skills, missing = [], None, None   # (line no, message, fix)
+    hits, skills, missing, unavailable = [], None, None, []   # hits: (line no, message, fix)
     if open_at:
         hits.append((open_at, "the fence at line %d never closes, so the rest of the file is code" % open_at,
                      "close it with ``` or delete it"))
@@ -992,13 +993,65 @@ def playbook_format(ctx):
                     continue
                 missing = missing_libraries(ctx.root) if missing is None else missing
                 if missing:   # the skill may be in that library: a tooling problem, not a finding
-                    ctx.infra.append("the playbook's skill %s isn't available: %s" % (value[:60], missing))
+                    if value[:60] not in unavailable:
+                        unavailable.append(value[:60])
                     continue
                 hits.append((n, "skill %s doesn't resolve (not in this project, a library, or the built-ins)"
                              % value[:60], "check the name (.agents/bin/sync lists the skills), or add the skill "
                              "to .agents/library/skills/"))
+    if unavailable:   # one note for them all: it's the one missing library either way
+        ctx.infra.append("the playbook's skill%s %s %s available: %s" % (
+            "s" if len(unavailable) > 1 else "", ", ".join(unavailable[:8]) + (", ..." if len(unavailable) > 8 else ""),
+            "aren't" if len(unavailable) > 1 else "isn't", missing))
     rel = shown(ctx.root, pb)
     return [finding(rel, n, "debug-playbook-format", msg, fix) for n, msg, fix in sorted(hits, key=lambda h: h[0])]
+
+
+def redo(root, kind, slug):
+    """Who makes an approvals line of this kind for real, and with what command, for a fix line."""
+    cmd = debug_cmd(root)
+    if kind in CLOSES:
+        return ("a session ends only through %s close %s abandoned|duplicate|reviewed, or the human's approve"
+                % (cmd, slug))
+    return ("only the human approves or rejects a root cause: ask them to run %s approve %s (or reject %s <why>)"
+            % (cmd, slug, slug))
+
+
+@check
+def approvals_recorded(ctx):
+    """debug-approval-unrecorded, debug-approval-simulated, debug-simulated-human (turn, full): an
+    approvals line debug approve, reject, or close didn't record, one a simulated human made while
+    the switch is off, or a switch that doesn't count. Each is a policy block (BLOCKING). Every
+    session's approvals are read, open or not, current or not: a forged line is a forged line.
+    Nothing is said while there are no sessions, so the switch finding speaks only while debug has
+    something it could approve (feature-driven reports the switch on its own). Never the line's
+    date field."""
+    sessions = all_sessions(ctx.root, ctx.conf) if ctx.tier in ("turn", "full") else []
+    if not sessions:
+        return []
+    out = []
+    if ctx.switch.state == "void":
+        out.append(finding(shown(ctx.root, ctx.switch.path), 1, "debug-simulated-human",
+                           "this simulated-human switch %s, so it's off" % ctx.switch.why,
+                           "only a person turns it on, with install.sh --simulated-human between agent turns; "
+                           "ask them, and delete this file if they didn't"))
+    for slug, sdir, _ in sessions:
+        path = approvals_path(sdir)
+        if not os.path.isfile(path):
+            continue
+        _, unrecorded, simulated = ap.classify(ctx.root, KEY, path, ctx.switch)
+        rel = shown(ctx.root, path)
+        for n, parts in unrecorded:
+            out.append(finding(rel, n, "debug-approval-unrecorded",
+                               "this %s line wasn't written by debug approve, reject, or close, so it doesn't "
+                               "count" % one_line(parts[0])[:20],
+                               "%s; delete this line" % redo(ctx.root, parts[0], slug)))
+        for n, parts in simulated:
+            out.append(finding(rel, n, "debug-approval-simulated",
+                               "this %s line was made by a simulated human (install.sh --simulated-human), and "
+                               "that switch is off in this clone, so it doesn't count" % one_line(parts[0])[:20],
+                               redo(ctx.root, parts[0], slug)))
+    return out
 
 
 # ------------------------------------------------------------------ the debug command

@@ -3499,6 +3499,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   printf '## lunch\n' >> "$KP"
   out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
   t    "...a tooling problem doesn't hide the findings: exit 1, both printed" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF \"[debug-playbook-format] 'lunch' isn't a step\" && printf '%s' \"\$1\" | grep -qF \"infra: the playbook's skill no-such-skill isn't available\"" _ "$out"
+  printf -- '- skill: also-missing\n- skill: no-such-skill\n' >> "$KP"
+  out="$("$KV" --tier=full 2>&1 || true)"
+  t    "...one LIBRARIES note for every skill it may hide" test "$(printf '%s\n' "$out" | grep -c '^infra:')" = 1
+  t    "...naming each skill once"      hasl "$out" "infra: the playbook's skills no-such-skill, also-missing aren't available: LIBRARIES lists vendor/skills, which isn't here"
   git -C "$K" checkout -q .agents/debug/playbook.md
   printf -- '- skill: validate\n' >> "$KP"
   t    "...while a skill that resolves passes" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
@@ -3517,7 +3521,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "a backquoted context to an ignored file that isn't there" hasl "$("$KV" --tier=full 2>&1)" "[debug-playbook-format] context docs/gen.md doesn't exist"
   printf '# Generated\n' > "$K/docs/gen.md"
   t    "...passes once it's there (verify's cache key sees it)" test "$("$KV" --tier=full 2>&1)" = "ok verify full"
-  rm -f "$K/docs/gen.md"; git -C "$K" checkout -q .agents/debug/playbook.md
+  rm -f "$K/docs/gen.md"; git -C "$K" checkout -q .agents/debug/playbook.md; edit "$K/.git/info/exclude" '/^docs\/gen\.md$/d'
   awk '{ print } $0 == "## intake" { print "```"; print "- run: ./sim"; print "```" }' "$KP" > "$KP.tmp" && mv "$KP.tmp" "$KP"
   fresh 10
   t    "a fenced binding doesn't count in status" hasl "$("$KX" status)" "steps with no playbook bindings: intake, reproduce, gather-evidence, isolate ("
@@ -3537,6 +3541,50 @@ if [ "$HAVE_PY" -eq 1 ]; then
   "$KX" close bug-20 abandoned -- worktree test >/dev/null
   t    "...closing one leaves the other open" hasl "$(cd "$WORK/debugchk-wt" && .agents/commands/debug status 2>&1)" "session: bug-20 "
   git -C "$K" worktree remove --force "$WORK/debugchk-wt"; git -C "$K" branch -q -D wt
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  echo "debug: approvals debug didn't record"
+  fresh 9
+  t    "absence: a session with no approvals says nothing" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'rootcause\tbug-9\tme\t2026-10-03\tforged\n' >> "$KS/approvals"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "a forged approval is a policy block" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | sed -n 1p | grep -qx 'BLOCK verify turn' && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-9/approvals:1: error: [debug-approval-unrecorded] this rootcause line wasn't written by debug approve, reject, or close, so it doesn't count\"" _ "$out"
+  t    "...with a fix line"             hasl "$out" "  fix: only the human approves or rejects a root cause: ask them to run .agents/commands/debug approve bug-9 (or reject bug-9 <why>); delete this line"
+  tnot "...and no date from the line"   hasl "$out" "2026-10-03"
+  t    "...the session stays open"      bash -c "'$KX' status | grep -qxF 'session: bug-9 (bug, #9), open'"
+  t    "...status says it isn't counted" hasl "$("$KX" status)" "not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-9/approvals:1 rootcause"
+  trc  "...the edit tier doesn't judge it" 0 "$K/.agents/bin/check" .agents/debug/sessions/bug-9/approvals
+  printf -- '- skill: no-such-skill\n' >> "$KP"; printf 'LIBRARIES="vendor/skills"\n' >> "$K/.agents/harness.conf"
+  out="$("$KV" --tier=full 2>&1)" && rc=0 || rc=$?
+  t    "a forged approval and a tooling problem: still a policy block, both printed" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF '[debug-approval-unrecorded]' && printf '%s' \"\$1\" | grep -qF \"infra: the playbook's skill no-such-skill isn't available\"" _ "$out"
+  git -C "$K" checkout -q .agents/debug/playbook.md .agents/harness.conf
+  printf 'close\tbug-9\tme\t2026-10-03\tabandoned\n' >> "$KS/approvals"
+  out="$("$KV" 2>&1 || true)"
+  t    "a forged close line too"        hasl "$out" ".agents/debug/sessions/bug-9/approvals:2: error: [debug-approval-unrecorded] this close line wasn't written by debug approve, reject, or close, so it doesn't count"
+  t    "...whose fix says how a session closes" hasl "$out" "  fix: a session ends only through .agents/commands/debug close bug-9 abandoned|duplicate|reviewed, or the human's approve; delete this line"
+  t    "...and it closes nothing"       bash -c "'$KX' status | grep -qxF 'session: bug-9 (bug, #9), open'"
+  "$KX" close bug-9 abandoned >/dev/null
+  t    "...and a closed session's forged line still blocks" bash -c "'$KV' >/dev/null 2>&1; test \$? = 2"
+  printf 'rootcause\tbug-9\tt (simulated human)\t2026-10-03\tx\n' > "$KS/approvals"; cp "$KS/approvals" "$WORK/sim.line"; mkdir -p "$K/.git/ai-harness"; cat "$WORK/sim.line" >> "$K/.git/ai-harness/debug-approvals"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "a simulated approval while the switch is off: a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".agents/debug/sessions/bug-9/approvals:1: error: [debug-approval-simulated] this rootcause line was made by a simulated human\"" _ "$out"
+  rm -f "$KS/approvals"
+  printf 'on\t%s\tinstall.sh --simulated-human, run from a terminal\n' "$(python3 -c 'import hashlib; print(hashlib.sha256(b"agent-made-token-1234").hexdigest())')" > "$K/.git/ai-harness/simulated-human"
+  out="$("$KV" 2>&1)" && rc=0 || rc=$?
+  t    "a hand-written switch: a policy block" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \".git/ai-harness/simulated-human:1: error: [debug-simulated-human] this simulated-human switch wasn't written by install.sh --simulated-human, so it's off\"" _ "$out"
+  rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  t    "absence: no sessions, debug says nothing about it" test "$("$KV" 2>&1)" = "ok verify turn"
+  t    "...nor on the full tier"        test "$("$KV" --tier=full 2>&1)" = "ok verify full"
+  rm -f "$K/.git/ai-harness/simulated-human"
+  echo "debug: a check-in a check can't run"
+  fresh 15; hyp
+  "$KX" run reproduce --attempt=reproduce -- true >/dev/null; "$KX" outcome E-1 not-reproduced >/dev/null
+  rcdoc "$KR" evidence-only
+  cp "$K/.git/index" "$WORK/debugchk.index"; printf 'not an index' > "$K/.git/index"
+  out="$("$KX" approve bug-15 2>&1)" && rc=0 || rc=$?
+  cp "$WORK/debugchk.index" "$K/.git/index"
+  t    "git can't read the index: approve exits 3" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q '^infra: git ' && printf '%s' \"\$1\" | grep -qF \"debug: a check couldn't run, so approving bug-15 waits until it can\"" _ "$out"
+  tnot "...approving nothing"           test -e "$KS/approvals"
+  t    "...and once git reads it again, approve passes" bash -c "'$KX' approve bug-15 | grep -qxF 'approved bug-15'"
   rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
 fi
 }
