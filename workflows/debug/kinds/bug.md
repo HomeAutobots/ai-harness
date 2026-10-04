@@ -39,9 +39,13 @@ the rule either way. The `debug` skill has the shared rules (evidence, experimen
   CLI with the same arguments, the app or simulator the playbook names, at the version reported if
   it differs from `HEAD` (say so if you can't get it).
 - An old version: never check it out in place, since the session follows the branch. Use a
-  worktree outside the repo, `git worktree add ../repro-<ver> <ver>`, run it there with
-  `debug run reproduce --attempt=reproduce -- bash -c 'cd ../repro-<ver> && <command>'`, and
-  remove it after (`git worktree remove ../repro-<ver>`).
+  worktree outside the repo: from the repo root, `git worktree add --detach ../repro-<ver> <ver>`,
+  run it there with
+  `debug run reproduce --attempt=reproduce -- bash -c 'cd "$(git rev-parse --show-toplevel)/../repro-<ver>" && <command>'`
+  (`debug run` starts in the project root, which can be a subdirectory of the repo; then `cd` into
+  that subdirectory of the old checkout too), and remove it after, from the repo root
+  (`git worktree remove --force ../repro-<ver>`). The entry's `head:` is the branch's commit, so
+  name `<ver>` in your notes.
 - Record it: `debug run reproduce --attempt=reproduce -- <command>`, then
   `debug outcome E-<n> reproduced|partial|not-reproduced`. Partial means some of the symptoms.
 - At least one attempt with its outcome recorded is required; a reproduction isn't. If it won't
@@ -64,9 +68,12 @@ the rule either way. The `debug` skill has the shared rules (evidence, experimen
 - Test one hypothesis at a time against its confirm and rule-out conditions: a focused test, a
   bisect, temporary logging or an assert, a smaller input. Each result is an E-id; set the
   hypothesis's status with it.
-- To bisect, with no uncommitted changes in scope (`debug status` shows none), run the whole
-  bisect inside one entry, so HEAD is back on the branch when it ends:
+- To bisect, with no tracked changes at all (`git status --untracked-files=no` prints nothing),
+  run the whole bisect inside one entry, so HEAD is back on the branch when it ends:
   `debug run isolate -- bash -c 'git bisect start <bad> <good> && git bisect run <test>; rc=$?; git bisect reset; exit $rc'`.
+  Keep `<test>` out of the project tree (a script in the session dir works: git ignores it and
+  `DEBUG_SCOPE` leaves it out), and don't call harness tools from it: in team mode each step checks
+  out that commit's `.agents/`, or none.
 - Experiments are fine until `root-cause.md` exists; keep track of them so you can revert them.
   Don't put one in a file that already had uncommitted changes. If you must, undo your own lines
   by hand; never `git checkout` that file.
