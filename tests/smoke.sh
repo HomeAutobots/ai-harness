@@ -3077,6 +3077,7 @@ except d.ConfError as e:
   t    "status of a closed session keeps its verdict" bash -c "'$CX' status bug-17 | grep -qxF 'session: bug-17 (bug, #17), closed (abandoned), root cause rejected'"
   "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only
   "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null   # the check-in wants one
+  printf '## H-1: add subtracts\n- status: confirmed (E-1)\n' >> "$CS/bug-18/hypotheses.md"   # and the H-1 it cites
   cp "$C/.agents/harness.conf" "$WORK/debugcli.conf18"; edit "$C/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="edit turn"/'
   "$CX" run hypothesize -- "$CX" approve bug-18 >/dev/null
   cp "$WORK/debugcli.conf18" "$C/.agents/harness.conf"
@@ -3201,6 +3202,51 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...not as a missing one too"    bash -c "! printf '%s' \"\$1\" | grep -qF \"no 'Confidence:' line\"" _ "$out"
   edit "$KR" 's/^Confidence: evidence-only/Confidence: confirmed/'
   t    "...and when it says too much, the fix says what to make it" hasl "$("$KV" 2>&1)" "  fix: move it under ## Reproduction, and make it 'Confidence: evidence-only', what the recorded attempts support"
+  echo "debug: cited evidence"
+  rcdoc "$KR" evidence-only
+  t    "absence: citing E-1 and H-1, which exist, says nothing" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\nSee also E-9 and H-4.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "an E-id debug run didn't capture" hasl "$out" "root-cause.md:$(line_of "$KR" 'See also'): error: [debug-evidence-missing] E-9 isn't in this session's evidence: there's no evidence/E-9.md"
+  t    "...and an H-id hypotheses.md doesn't have" hasl "$out" "root-cause.md:$(line_of "$KR" 'See also'): error: [debug-evidence-missing] H-4 isn't in hypotheses.md"
+  out="$("$KX" approve bug-6 2>&1)" && rc=0 || rc=$?
+  t    "approve refuses on it"          bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF '[debug-evidence-missing] E-9'" _ "$out"
+  trc  "the edit tier checks an edited root cause" 1 "$K/.agents/bin/check" .agents/debug/sessions/bug-6/root-cause.md
+  trc  "...and not when another file was edited" 0 "$K/.agents/bin/check" src/calc.c
+  rcdoc "$KR" evidence-only
+  printf '\nNot E-10 (E-2, E-3). XE-5, H-1x, e-7, E-2.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "ids end at a non-digit: E-10 isn't E-1, and (E-2, E-3) is two" bash -c "printf '%s' \"\$1\" | grep -qF '] E-10 isn'\''t' && printf '%s' \"\$1\" | grep -qF '] E-3 isn'\''t'" _ "$out"
+  t    "...XE-5 and lowercase e-7 aren't ids" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 2
+  rcdoc "$KR" evidence-only
+  printf '# E-3\nstep: gather-evidence\n\n## Output\nIt subtracts, I looked.\n' > "$KS/evidence/E-3.md"
+  printf '\nE-3 says so.\nE-3 again, and E-3.\nE-3 once more.\n' >> "$KR"
+  out="$("$KV" 2>&1 || true)"
+  t    "a hand-written entry isn't evidence, and says so" hasl "$out" "root-cause.md:$(line_of "$KR" 'E-3 says'): error: [debug-evidence-missing] E-3 isn't in this session's evidence: evidence/E-3.md isn't an entry debug run captured (also cited on lines $(line_of "$KR" 'E-3 again'), $(line_of "$KR" 'E-3 once'))"
+  t    "...one finding for an id cited many times" test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 1
+  rm -f "$KS/evidence/E-3.md"
+  rcdoc "$KR" evidence-only
+  printf '\nE-11\nE-12\nE-13\nH-14\nE-15\nH-16\n' >> "$KR"
+  out="$("$KX" approve bug-6 2>&1 || true)"
+  t    "at most 5 per file: the fifth names the rest" hasl "$out" "root-cause.md:$(line_of "$KR" 'E-15'): error: [debug-evidence-missing] 2 more cited ids are missing: E-15 (line $(line_of "$KR" 'E-15')), H-16 (line $(line_of "$KR" 'H-16'))"
+  t    "...five in all"                 test "$(printf '%s\n' "$out" | grep -c 'debug-evidence-missing')" = 5
+  rcdoc "$KR" evidence-only
+  printf '\n```\nE-9 in pasted output, H-4 too\n```\n' >> "$KR"
+  printf '\n```\n## H-4: a heading in a fence\n```\n' >> "$KS/hypotheses.md"
+  t    "a citation in a fence is code, not a citation" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\nH-4 is the one.\n' >> "$KR"
+  t    "...and an H-4 heading in a fence isn't a hypothesis" hasl "$("$KV" 2>&1)" "[debug-evidence-missing] H-4 isn't in hypotheses.md"
+  rcdoc "$KR" evidence-only
+  edit "$KS/hypotheses.md" '/^```$/,/^```$/d'
+  printf -- '- status: ruled out (E-7)\n' >> "$KS/hypotheses.md"
+  t    "hypotheses.md is checked too"   hasl "$("$KV" 2>&1)" "hypotheses.md:$(line_of "$KS/hypotheses.md" '(E-7)'): error: [debug-evidence-missing] E-7 isn't in this session's evidence"
+  printf '\nH-4 is the one.\n' >> "$KR"
+  out="$("$K/.agents/bin/check" .agents/debug/sessions/bug-6/hypotheses.md 2>&1)" && rc=0 || rc=$?
+  t    "the edit tier checks an edited hypotheses.md" bash -c "test $rc = 1 && printf '%s' \"\$1\" | grep -qF 'hypotheses.md:$(line_of "$KS/hypotheses.md" '(E-7)'): error: [debug-evidence-missing] E-7'" _ "$out"
+  t    "...and root-cause.md's H-ids against it" hasl "$out" "root-cause.md:$(line_of "$KR" 'H-4 is'): error: [debug-evidence-missing] H-4 isn't in hypotheses.md"
+  edit "$KS/hypotheses.md" '$d'
+  rcdoc "$KR" evidence-only
+  t    "absence: only real ids, nothing to say" test "$("$KV" 2>&1)" = "ok verify turn"
 fi
 }
 group grp_debug_checks

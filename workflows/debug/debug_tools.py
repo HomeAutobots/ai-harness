@@ -460,18 +460,12 @@ CONF_LINE = re.compile(r"^\s*(?:[-*+]\s+)?[*_`]*confidence[*_`]*\s*:[\s*_`]*([A-
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
-def root_cause(path):
-    """(headings, the required Confidence line, the other Confidence lines, open fence) for
-    root-cause.md: {name: line no} of its '## ' headings (names as heading() gives them); (line
-    no, value) of the first 'Confidence:' line under ## Reproduction, or None; [(line no, value)]
-    of every other one, in any section; the line of a fence still open at the end, or 0. A '# '
-    heading ends a section, '###' and deeper stay inside it. A Confidence line may be a list item
-    or have *, _ or backticks around its parts ('**Confidence:** `reproduced`'); values are
-    lowercased. Lines inside ``` or ~~~ fences are skipped: a backtick opener whose info string
-    has a backtick isn't a fence, and a fence closes only on a bare run of its own character at
-    least as long as the opener."""
-    heads, conf, others, sec, fence, at = {}, None, [], None, None, 0
-    for n, line in enumerate(read_lines(path), 1):
+def unfenced(lines):
+    """([(line no, line)] for the lines outside ``` and ~~~ fences, the line of a fence still open at
+    the end or 0). A backtick opener whose info string has a backtick isn't a fence, and a fence
+    closes only on a bare run of its own character at least as long as the opener."""
+    out, fence, at = [], None, 0
+    for n, line in enumerate(lines, 1):
         f = FENCE.match(line)
         if fence is None:
             if f and not (f.group(1)[0] == "`" and "`" in f.group(2)):
@@ -481,6 +475,21 @@ def root_cause(path):
             if f and f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
                 fence, at = None, 0
             continue
+        out.append((n, line))
+    return out, at
+
+
+def root_cause(path):
+    """(headings, the required Confidence line, the other Confidence lines, open fence) for
+    root-cause.md: {name: line no} of its '## ' headings (names as heading() gives them); (line
+    no, value) of the first 'Confidence:' line under ## Reproduction, or None; [(line no, value)]
+    of every other one, in any section; the line of a fence still open at the end, or 0. A '# '
+    heading ends a section, '###' and deeper stay inside it. A Confidence line may be a list item
+    or have *, _ or backticks around its parts ('**Confidence:** `reproduced`'); values are
+    lowercased. Lines inside ``` or ~~~ fences are skipped (unfenced())."""
+    heads, conf, others, sec = {}, None, [], None
+    lines, at = unfenced(read_lines(path))
+    for n, line in lines:
         h = heading(line)
         if h:
             sec = h[1] if h[0] == 2 else None
@@ -542,6 +551,69 @@ def rc_format(ctx):
                            % (v[:40] or "(empty)"),
                            "drop this line; the one under ## Reproduction says what the recorded attempts "
                            "support (%s)" % want))
+    return out
+
+
+def citations(path, kinds):
+    """[(kind, n, [line nos])] of the ids a file cites outside fences, kind 'E' or 'H' (only those
+    in kinds), in the order they're first cited; each line once per id. An id is E- or H- in
+    capitals, then digits, with no letter, digit or hyphen before it ('E-1.', '(E-2, E-3)'; not
+    'XE-5' or 'e-7'); the number ends at the first non-digit, so E-10 is never E-1."""
+    found = {}
+    for n, line in unfenced(read_lines(path))[0]:
+        hits = sorted((m.start(), k, int(m.group(1))) for k, rx in (("E", EID), ("H", HID)) if k in kinds
+                      for m in rx.finditer(line))
+        for _, k, i in hits:
+            ls = found.setdefault((k, i), [])
+            if not ls or ls[-1] != n:
+                ls.append(n)
+    return [(k, i, ls) for (k, i), ls in found.items()]   # dicts keep insertion order (3.7+)
+
+
+@check
+def evidence_missing(ctx):
+    """debug-evidence-missing (turn, full, check-in; edit when root-cause.md or hypotheses.md is
+    edited): root-cause.md cites an E-id debug run didn't capture in this session (evidence())
+    or an H-id hypotheses.md doesn't have, or hypotheses.md cites a missing E-id. An edited
+    hypotheses.md also has root-cause.md's H-ids judged, since dropping a hypothesis breaks them.
+    Citations in fenced code don't count. One finding per id per file, at the line that first
+    cites it; past 5 in a file, the fifth names the rest."""
+    if not ctx.slug:
+        return []
+    rc, hy = ctx.path("root-cause.md"), ctx.path("hypotheses.md")
+    todo = [(rc, "EH")] if os.path.isfile(rc) and (ctx.judged(rc) or ctx.judged(hy)) else []
+    todo += [(hy, "E")] if ctx.judged(hy) else []
+    if not todo:
+        return []
+    ev, hs, cmd, out = evidence(ctx.sdir), {h[0] for h in hypotheses(hy)}, debug_cmd(ctx.root), []
+    kind = "debug-evidence-missing"
+    for p, kinds in todo:
+        rel = shown(ctx.root, p)
+        bad = [c for c in citations(p, kinds) if c[1] not in (ev if c[0] == "E" else hs)]
+        for k, i, ls in (bad[:4] if len(bad) > 5 else bad):
+            also = "" if len(ls) < 2 else " (also cited on line%s %s%s)" % (
+                "s" if len(ls) > 2 else "", ", ".join(str(x) for x in ls[1:4]), ", ..." if len(ls) > 4 else "")
+            if k == "H":
+                out.append(finding(rel, ls[0], kind, "H-%d isn't in hypotheses.md%s" % (i, also),
+                                   "cite a hypothesis hypotheses.md has (a '## H-<n>: <claim>' section), or add "
+                                   "it there first"))
+            elif os.path.lexists(os.path.join(ctx.sdir, "evidence", "E-%d.md" % i)):
+                out.append(finding(rel, ls[0], kind, "E-%d isn't in this session's evidence: evidence/E-%d.md "
+                                   "isn't an entry debug run captured%s" % (i, i, also),
+                                   "capture it with %s run <step> -- <command> and cite the E-id it prints; an "
+                                   "entry written by hand (no command: and exit: lines) isn't evidence" % cmd))
+            else:
+                out.append(finding(rel, ls[0], kind, "E-%d isn't in this session's evidence: there's no "
+                                   "evidence/E-%d.md%s" % (i, i, also),
+                                   "cite only what debug run captured (%s status lists it); evidence you only "
+                                   "describe doesn't count" % cmd))
+        if len(bad) > 5:
+            rest = bad[4:]
+            out.append(finding(rel, rest[0][2][0], kind, "%d more cited ids are missing: %s%s" % (
+                len(rest), ", ".join("%s-%d (line %d)" % (k, i, ls[0]) for k, i, ls in rest[:8]),
+                ", ..." if len(rest) > 8 else ""),
+                "each is missing like the ones above: cite only E-ids debug run captured (%s status lists "
+                "them) and H-ids hypotheses.md has" % cmd))
     return out
 
 
@@ -1015,9 +1087,10 @@ def hypotheses(path):
     id written twice is there twice). status is the first word of the section's first '- status:'
     line, any case, with *, _ or backticks around it allowed: open, confirmed, ruled (ruled out), or
     unclear for any other word or none; open when there's no status line. Any other markdown heading
-    (1 to 6 #, then a space) ends a section; a line like '#12 says' or '#include' doesn't."""
+    (1 to 6 #, then a space) ends a section; a line like '#12 says' or '#include' doesn't. Lines
+    inside ``` or ~~~ fences are code, skipped (unfenced())."""
     out, cur = [], None
-    for n, line in enumerate(read_lines(path), 1):
+    for n, line in unfenced(read_lines(path))[0]:
         m = re.match(r"^## H-([0-9]+)\b", line)
         if m:
             cur = [int(m.group(1)), n, "open", False]
