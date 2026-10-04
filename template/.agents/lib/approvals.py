@@ -214,10 +214,10 @@ def classify(root, key, path, switch=None):
     return counted, unrecorded, simulated
 
 
-def may_act(switch):
-    """Whether this shell may take a human's step: None when it may (a person's terminal, or an
-    agent's shell with the simulated human's token), else the (variable, tool) of the agent shell
-    that stops it."""
+def blocked_shell(switch):
+    """The (variable, tool) of the agent shell this runs in when that keeps it from taking a human's
+    step; None when it may (a person's terminal, or an agent's shell with the simulated human's
+    token)."""
     shell = agent_shell()
     return None if not shell or switch.token_ok() else shell
 
@@ -225,7 +225,7 @@ def may_act(switch):
 def refused(prog, doing, switch):
     """True, after saying why on stderr, when this runs in a shell an agent tool started and the
     shell doesn't have the simulated human's token. doing names the step, e.g. 'approving'."""
-    shell = may_act(switch)
+    shell = blocked_shell(switch)
     if not shell:
         return False
     print("%s: %s is the human's step, and this shell was started by %s (%s is set). "

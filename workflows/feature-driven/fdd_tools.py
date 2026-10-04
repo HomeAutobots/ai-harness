@@ -884,7 +884,7 @@ def cmd_adopt(root):
         ap.adopt(root, KEY, os.path.join(d, "approvals"))   # no lines: only marks the clone adopted
         return 0
     switch = ap.Switch(root)
-    shell = ap.may_act(switch)
+    shell = ap.blocked_shell(switch)
     if shell:
         path = record_file(root)
         n = len(read_approvals(root, d, switch)[1])
