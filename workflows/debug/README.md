@@ -87,7 +87,8 @@ question and sets T1 done.
   `abandoned` and `duplicate` are refused while experiments are in the tree. `reviewed` closes a
   root cause the agent reviewed with `validate`, only while `DEBUG_ASK` is empty, after the same
   check-in set approve runs. Once a root cause waits on you, a shell Claude Code, Gemini CLI, or
-  Cursor started can't close it (Known gaps below).
+  Cursor started can't close it (Known gaps below). It waits on you only while `DEBUG_ASK` has
+  `rootcause`: with `DEBUG_ASK` empty, the agent may close a rejected root cause too.
 - Wrong arguments print the usage and exit 2. `--help` alone prints usage (`debug <command>
   --help` for one); an unknown option, or `--help` among other words, exits 3 before anything
   changes. Text for `reject` and `close` that starts with `-` goes after `--`.
@@ -184,8 +185,8 @@ like `WORKFLOWS` and `FDD_*`. A `DEBUG_DIR` other than the default doesn't get t
 - **Closes are recorded too.** `debug close` writes its line like an approval, so editing `state`
   closes nothing. An agent's `abandoned` or `duplicate` close is recorded as `close-agent` and
   stops counting if its root cause later waits on you (`DEBUG_ASK` has `rootcause`, and
-  `root-cause.md` exists, or you rejected it, or edited it after approving). A `reviewed` close counts only while `DEBUG_ASK`
-  lacks `rootcause`.
+  `root-cause.md` exists, or you rejected it, or edited it after approving). `close` refuses an
+  agent by the same rule. A `reviewed` close counts only while `DEBUG_ASK` lacks `rootcause`.
 - **Experiments end at the root cause.** Until `root-cause.md` exists, the agent may change code
   to learn something. After that, nothing uncommitted may stay in `DEBUG_SCOPE`, your own
   uncommitted work included: commit or stash it (`git stash -u`) before the check-in. If the tree

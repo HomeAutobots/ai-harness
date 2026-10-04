@@ -3082,6 +3082,17 @@ except d.ConfError as e:
   trc  "the agent can't close a rejected root cause either (2)" 2 env CLAUDECODE=1 "$CX" close bug-17 abandoned
   "$CX" close bug-17 abandoned >/dev/null
   t    "status of a closed session keeps its verdict" bash -c "'$CX' status bug-17 | grep -qxF 'session: bug-17 (bug, #17), closed (abandoned), root cause rejected'"
+  # One rule for a root cause that waits on the human: rootcause in DEBUG_ASK, and root-cause.md there or
+  # a rejected or changed verdict. With DEBUG_ASK empty, a rejected root cause doesn't wait.
+  "$CX" start bug '#22' >/dev/null; rcdoc "$CS/bug-22/root-cause.md" evidence-only; "$CX" reject bug-22 wrong operands >/dev/null
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK=""/'
+  out="$(CLAUDECODE=1 "$CX" close bug-22 abandoned 2>&1)" && rc=0 || rc=$?
+  t    "absence: DEBUG_ASK empty, the agent closes a rejected root cause" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qxF 'closed bug-22 (abandoned)'" _ "$out"
+  t    "...and that close counts"       bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), closed (abandoned), root cause rejected' && tail -1 '$CS/bug-22/approvals' | grep -q '^close-agent	bug-22 '"
+  edit "$C/.agents/harness.conf" 's/^DEBUG_ASK=.*/DEBUG_ASK="rootcause"/'
+  t    "...until rootcause is back in DEBUG_ASK: then it waits on the human again" bash -c "'$CX' status bug-22 | grep -qxF 'session: bug-22 (bug, #22), open, closed by an agent but its root cause waits on you, root cause rejected'"
+  trc  "...and the agent's close is refused again (2)" 2 env CLAUDECODE=1 "$CX" close bug-22 abandoned
+  "$CX" close bug-22 abandoned >/dev/null
   "$CX" start bug '#18' >/dev/null; rcdoc "$CS/bug-18/root-cause.md" evidence-only
   "$CX" run reproduce --attempt=reproduce -- true >/dev/null; "$CX" outcome E-1 not-reproduced >/dev/null   # the check-in wants one
   printf '## H-1: add subtracts\n- status: confirmed (E-1)\n' >> "$CS/bug-18/hypotheses.md"   # and the H-1 it cites

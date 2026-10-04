@@ -346,13 +346,20 @@ class OFF:   # a simulated-human switch that's off, for lines that never need th
     state = "off"   # close-agent: made in an agent's shell without the simulated human's token
 
 
+def waits_on_human(conf, sdir, v):
+    """True when the session's root cause waits on the human: DEBUG_ASK has rootcause, and
+    root-cause.md exists or the verdict v is rejected or changed. With DEBUG_ASK empty nothing
+    waits: the agent reviews the root cause and may close the session. close refuses an agent's
+    close by this rule, and agent_close_void voids one by it, so the two never disagree."""
+    return "rootcause" in conf["DEBUG_ASK"].split() and \
+        (os.path.isfile(os.path.join(sdir, "root-cause.md")) or v in ("rejected", "changed"))
+
+
 def agent_close_void(conf, close, sdir, v):
     """True when a recorded close is an agent's abandoned or duplicate one that doesn't count: the
-    root cause waits on the human now (DEBUG_ASK has rootcause, and root-cause.md exists or the
-    verdict v is rejected or changed), however it was when the agent closed it."""
+    root cause waits on the human now (waits_on_human), however it was when the agent closed it."""
     return close is not None and close[0] == "close-agent" and \
-        close[4].split(":", 1)[0] in ("abandoned", "duplicate") and "rootcause" in conf["DEBUG_ASK"].split() and \
-        (os.path.isfile(os.path.join(sdir, "root-cause.md")) or v in ("rejected", "changed"))
+        close[4].split(":", 1)[0] in ("abandoned", "duplicate") and waits_on_human(conf, sdir, v)
 
 
 def void_close(conf, close, sdir, v):
@@ -2142,8 +2149,8 @@ def cmd_reject(root, words, opts, after):
 def cmd_close(root, words, opts, after):
     """End a session, recorded like an approval (a close line in approvals and the git-dir record),
     so a state file edited by hand closes nothing. abandoned or duplicate: refused while experiments
-    are in the tree, and in an agent's shell while the root cause waits on the human (DEBUG_ASK has
-    rootcause and root-cause.md exists, or it was rejected or changed since its approval). reviewed:
+    are in the tree, and in an agent's shell while the root cause waits on the human (waits_on_human:
+    DEBUG_ASK has rootcause, and root-cause.md exists or it was rejected or changed). reviewed:
     a root cause the agent reviewed, only when DEBUG_ASK lacks rootcause, after the check-in set
     passes; it stops counting if rootcause goes back into DEBUG_ASK. Otherwise an agent may run it;
     an agent's abandoned or duplicate close (close-agent) stops counting once the root cause waits on
@@ -2171,7 +2178,7 @@ def cmd_close(root, words, opts, after):
         if got:
             return got
     else:
-        waits = (asks and os.path.isfile(rc)) or verdict(root, slug, sdir, switch) in ("rejected", "changed")
+        waits = waits_on_human(conf, sdir, verdict(root, slug, sdir, switch))
         if waits and ap.refused("debug", "closing a session whose root cause waits on you", switch):
             return 2
         left = changed_in_scope(root, conf)
