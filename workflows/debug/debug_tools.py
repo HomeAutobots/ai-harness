@@ -7,8 +7,9 @@ root cause the human approves; the fix goes through the project's own process. E
 in DEBUG_DIR/sessions/<slug>/, local and never committed: report.md, evidence/E-<n>.md and .log
 (written by debug run), hypotheses.md, root-cause.md, state, and approvals (written only by debug
 approve and reject; each line is also recorded in the git dir, .git/ai-harness/debug-approvals,
-through the harness's .agents/lib/approvals.py). Settings come from .agents/harness.conf
-(environment variables override); a missing key means its default:
+through the harness's .agents/lib/approvals.py). Settings come from .agents/harness.conf only,
+never the environment (checks/state.sh and the stop gate read just the file); a missing key means
+its default, and a value this pack doesn't know is a tooling problem (exit 3):
 
   DEBUG_DIR     the playbook and sessions/, repo-relative or absolute (default .agents/debug)
   DEBUG_KINDS   the workflows that are on (default bug)
@@ -38,11 +39,13 @@ ATTEMPTS = ("reproduce", "confirm")
 OUTCOMES = ("reproduced", "partial", "not-reproduced")
 BINDINGS = ("skill", "run", "context")
 CLOSE_REASONS = ("abandoned", "duplicate", "reviewed")
-TAIL = 60   # lines of a command's output kept in its evidence entry
+TAIL = 60   # lines of a command's output kept in its evidence entry (E-<n>.md). Checks must never
+            # read E-<n>.log: checks/state.sh leaves *.log out of verify's cache key.
 STATE_KEYS = ("kind", "ref", "start", "branch", "seq", "step", "status", "note")
 SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
 EID = re.compile(r"(?<![A-Za-z0-9-])E-([0-9]+)(?![0-9])")
 HID = re.compile(r"(?<![A-Za-z0-9-])H-([0-9]+)(?![0-9])")
+# A check that emits a policy-block kind must list it here, or it exits 1.
 BLOCKING = ("debug-approval-unrecorded", "debug-approval-simulated", "debug-simulated-human")
 
 
@@ -96,13 +99,19 @@ def read_conf(path, prefix):
 
 def load_conf(root):
     """DEBUG_* from .agents/harness.conf over the defaults (an install from before a key has no
-    line for it), then the environment. An empty DEBUG_DIR means the default, as in checks/state.sh."""
+    line for it). Never the environment: checks/state.sh (verify's cache key) and the stop gate's
+    settings note read only the file, and DEBUG_* is a common name. An empty DEBUG_DIR means the
+    default, as in checks/state.sh. A check-in or workflow this pack doesn't know raises ConfError."""
     conf = dict(DEFAULTS)
     conf.update(read_conf(os.path.join(root, ".agents", "harness.conf"), "DEBUG_"))
-    for k in DEFAULTS:
-        if k in os.environ:
-            conf[k] = os.environ[k]
     conf["DEBUG_DIR"] = conf["DEBUG_DIR"] or DEFAULTS["DEBUG_DIR"]
+    for w in conf["DEBUG_ASK"].split():
+        if w != "rootcause":
+            raise ConfError("DEBUG_ASK: unknown check-in '%s' (rootcause)" % w)
+    kinds = shipped_kinds()
+    for w in conf["DEBUG_KINDS"].split():
+        if w not in kinds:
+            raise ConfError("DEBUG_KINDS: unknown workflow '%s' (%s)" % (w, " ".join(kinds)))
     return conf
 
 
@@ -393,8 +402,11 @@ def cli(root, a):
         print(usage_text())
         return 0
     if not a or a[0] not in CLI:
-        if a and a[0] in ("-h", "--help"):
-            print("debug: -h or --help with other arguments; nothing was done", file=sys.stderr)
+        if a and a[0].startswith("-") and a[0] != "-":
+            if a[0] in ("-h", "--help"):
+                print("debug: -h or --help with other arguments; nothing was done", file=sys.stderr)
+            else:
+                print("debug: unknown option '%s' (a command's options go after it)" % a[0], file=sys.stderr)
             print(usage_text(), file=sys.stderr)
             return 3
         return bad(None)
@@ -422,6 +434,7 @@ def cli(root, a):
             opts[k] = w.split("=", 1)[1] if "=" in w else ""
             continue
         words.append(w)
+    use_lib(root)   # once the line parsed, so usage and refusals work without the approvals library
     return fn(root, words, opts, after)
 
 
@@ -440,13 +453,12 @@ def main(argv):
 
 
 def dispatch(a):
-    at = 2 if a[:1] == ["check"] else 1   # where the project root is in the arguments
-    if len(a) > at:
-        use_lib(os.path.abspath(a[at]))
     if len(a) >= 3 and a[0] == "check" and a[1] in ("edit", "turn", "full"):
-        return cmd_check(a[1], os.path.abspath(a[2]), a[3:])
+        root = os.path.abspath(a[2])
+        use_lib(root)   # once a command matched, so a bad one still gets the usage
+        return cmd_check(a[1], root, a[3:])
     if len(a) >= 2 and a[0] == "cli":
-        return cli(os.path.abspath(a[1]), a[2:])
+        return cli(os.path.abspath(a[1]), a[2:])   # cli() loads the library once the line parses
     print(__doc__.strip(), file=sys.stderr)
     return 2
 

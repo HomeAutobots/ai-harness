@@ -2636,21 +2636,53 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "debug --help: usage, exit 0"     bash -c "'$GX' --help | grep -q '^usage: debug'"
   trc  "--help among other words: exit 3" 3 "$GX" --help start
   trc  "an unknown command: usage, exit 2" 2 "$GX" frobnicate
+  trc  "a leading unknown option: exit 3" 3 "$GX" --verbose status
+  t    "debug --help works outside a project" bash -c "cd '$WORK' && env -u AGENTS_ROOT '$HARNESS/workflows/debug/bin/debug' --help | grep -q '^usage: debug'"
+  trc  "...while a command there still needs one (2)" 2 bash -c "cd '$WORK' && env -u AGENTS_ROOT '$HARNESS/workflows/debug/bin/debug' status"
   t    "absence: no session, verify quiet" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
   t    "absence: no session, full tier quiet" test "$("$G/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  tnot "debug_tools leaves no bytecode in .agents/lib" test -e "$G/.agents/lib/__pycache__"
+  mv "$G/.agents/lib/approvals.py" "$WORK/debug.approvals.py"
+  out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
+  t    "debug_tools without .agents/lib/approvals.py: infra (3), re-run install.sh" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: this project's harness has no .agents/lib/approvals.py; re-run install.sh\"" _ "$out"
+  t    "...while debug --help still works" bash -c "'$GX' --help | grep -q '^usage: debug'"
+  trc  "...and an unknown command still gets the usage (2)" 2 "$GX" frobnicate
+  mv "$WORK/debug.approvals.py" "$G/.agents/lib/approvals.py"
   printf 'int add(int a, int b) { return a + b; }\n' > "$G/src/calc.c"
   t    "absence: no session, a change in scope passes" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
   git -C "$G" checkout -q src/calc.c
   trc  "the policy blocks an agent's debug approve" 2 policy "$G" test ".agents/commands/debug approve bug-1"
   trc  "...debug reject"                 2 policy "$G" test ".agents/commands/debug reject bug-1 nope"
   trc  "...spelled through debug_tools.py" 2 policy "$G" test "python3 .agents/builtin/workflows/debug/debug_tools.py cli . approve bug-1"
+  trc  "...with a quoted root that has a space" 2 policy "$G" test "python3 .agents/builtin/workflows/debug/debug_tools.py cli \"/my repo\" approve x"
   trc  "...and the shared simulated-human command" 2 policy "$G" test "python3 .agents/lib/approvals.py simulated-human . on debug"
   trc  "naming it in a one-line tasks ask is fine" 0 policy "$G" test ".agents/bin/tasks ask bug-1 T1 'Root cause ready. Please run: .agents/commands/debug approve bug-1'"
   trc  "debug status and run aren't blocked" 0 policy "$G" test ".agents/commands/debug status"
+  trc  "...debug run"                     0 policy "$G" test ".agents/commands/debug run reproduce -- make test"
   hook "$G" turn-start claude '{"session_id":"g1"}' >/dev/null 2>&1
   edit "$G/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'
   t    "the stop gate notes a DEBUG_* change in the turn" hasl "$(hook "$G" stop-gate claude '{"session_id":"g1"}' 2>&1)" "harness.conf changed during this turn: DEBUG_SCOPE"
   edit "$G/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="**"/'
+  # An install from before a DEBUG_* key has no line for it: each key means its default.
+  cp "$G/.agents/harness.conf" "$WORK/debug.conf"
+  edit "$G/.agents/harness.conf" '/^DEBUG_/d'
+  t    "upgrade: no DEBUG_* lines, verify quiet" test "$("$G/.agents/bin/verify" 2>&1)" = "ok verify turn"
+  t    "...full tier quiet"              test "$("$G/.agents/bin/verify" --tier=full 2>&1)" = "ok verify full"
+  t    "...debug --help works"           bash -c "'$GX' --help | grep -q '^usage: debug'"
+  GP="$G/.agents/builtin/workflows/debug"
+  GC="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print('[%s]' % d.load_conf(sys.argv[2])[sys.argv[3]])"
+  t    "...a missing DEBUG_ASK means rootcause" test "$(python3 -B -c "$GC" "$GP" "$G" DEBUG_ASK 2>&1)" = "[rootcause]"
+  printf 'DEBUG_ASK=""\nDEBUG_DIR=""\n' >> "$G/.agents/harness.conf"
+  t    "DEBUG_ASK=\"\" means agent review only" test "$(python3 -B -c "$GC" "$GP" "$G" DEBUG_ASK 2>&1)" = "[]"
+  t    "DEBUG_DIR=\"\" means the default" test "$(python3 -B -c "$GC" "$GP" "$G" DEBUG_DIR 2>&1)" = "[.agents/debug]"
+  printf 'DEBUG_ASK="rootcause bogus"\n' >> "$G/.agents/harness.conf"
+  out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
+  t    "an unknown DEBUG_ASK check-in: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_ASK: unknown check-in 'bogus' (rootcause)\"" _ "$out"
+  cp "$WORK/debug.conf" "$G/.agents/harness.conf"
+  printf 'DEBUG_KINDS="bug crash"\n' >> "$G/.agents/harness.conf"
+  out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
+  t    "an unknown DEBUG_KINDS workflow: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_KINDS: unknown workflow 'crash' (bug)\"" _ "$out"
+  cp "$WORK/debug.conf" "$G/.agents/harness.conf"
   H=$(repo debug-simh)
   out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$H" 2>&1)" && rc=0 || rc=$?
   t    "--simulated-human works with debug alone" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q 'install: simulated human: on'" _ "$out"

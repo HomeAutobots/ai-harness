@@ -23,13 +23,21 @@ fi
 # The current session is the newest open one on this branch.
 git -C "$AGENTS_ROOT" symbolic-ref -q HEAD 2>/dev/null
 [ -d "$d" ] || exit 0
-find "$d" -type f ! -name '*.log' | LC_ALL=C sort | while IFS= read -r f; do
+# What the checks read: the playbook, and each session's state, approvals, *.md, and evidence/*.md
+# (never the E-<n>.log files: their E-<n>.md entries change with them).
+{
+  printf '%s\n' "$d/playbook.md"
+  for s in "$d"/sessions/*/; do
+    for f in "$s"state "$s"approvals "$s"*.md "$s"evidence/*.md; do printf '%s\n' "$f"; done
+  done
+} | LC_ALL=C sort | while IFS= read -r f; do
+  [ -f "$f" ] || continue
   printf '%s\n' "$f"
   cat "$f"
 done
 # The playbook's skill: and context: lines resolve against the libraries and the repo.
 if [ -f "$d/playbook.md" ]; then
-  sed -n 's/^[[:space:]]*[-*][[:space:]]*context:[[:space:]]*//p' "$d/playbook.md" | while IFS= read -r c; do
+  sed -n 's/^[[:space:]]*[-*][[:space:]]*context:[[:space:]]*//p' "$d/playbook.md" | sed 's/[[:space:]]*$//' | while IFS= read -r c; do
     case "$c" in /*) p="$c" ;; *) p="$AGENTS_ROOT/$c" ;; esac
     if [ -e "$p" ]; then echo "context $c: here"; else echo "context $c: missing"; fi
   done
