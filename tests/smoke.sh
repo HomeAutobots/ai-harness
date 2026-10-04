@@ -59,6 +59,9 @@ handmade() {  # handmade <project>: a pack and its skill someone made by hand in
   edit "$p/.agents/harness.conf" 's/^WORKFLOWS=.*/WORKFLOWS="handmade"/'
 }
 mkagent(){ mkdir -p "$1/agents"; printf -- '---\ndescription: %s\n%s---\nYou review diffs.\n' "${3:-An agent.}" "${4:-}" > "$1/agents/$2.md"; }
+rcdoc() {  # rcdoc <file> <confidence>: a debug root-cause.md in the fixed format, citing E-1 and H-1
+  printf '# Root cause\n\n## Summary\nadd() subtracts.\n\n## Cause\nsrc/calc.c:1 returns a - b.\n\n## Evidence\nE-1 shows it (H-1).\n\n## Reproduction\nE-1.\nConfidence: %s\n\n## Ruled out\nNothing else fit.\n\n## Fix direction\nReturn the sum.\n' "$2" > "$1"
+}
 
 # --- groups: sections run in parallel -----------------------------------------------------------
 # A group is a function holding one or more whole sections. `group <fn>` right after it starts it
@@ -2913,6 +2916,57 @@ except d.ConfError as e:
   t    "on a detached HEAD, status says here" bash -c "'$CX' status | grep -qxF 'no open session here (detached HEAD); open elsewhere: bug-12 ($CB)'"
   git -C "$C" checkout -q "$CB"
   trc  "status of no such session: exit 1" 1 "$CX" status bug-99
+  cn="$("$CX" run isolate --attempt=confirm -- true | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
+  "$CX" outcome "E-$cn" reproduced >/dev/null
+  t    "a reproduced confirm attempt: confirmed" bash -c "'$CX' status | grep -qxF 'confidence: confirmed'"
+  trc  "approve with no root cause: exit 1" 1 "$CX" approve bug-12
+  rcdoc "$CS/bug-12/root-cause.md" reproduced
+  for v in CLAUDECODE GEMINI_CLI CURSOR_AGENT; do
+    trc "approve refuses with $v set" 2 env "$v=1" "$CX" approve bug-12
+  done
+  out="$(CLAUDECODE=1 "$CX" reject bug-12 nope 2>&1)" && rc=0 || rc=$?
+  t    "...so does reject"              bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qF \"debug: rejecting a root cause is the human's step, and this shell was started by Claude Code (CLAUDECODE is set)\"" _ "$out"
+  tnot "...recording nothing"           test -e "$CS/bug-12/approvals"
+  trc  "reject needs a reason"          2 "$CX" reject bug-12
+  out="$("$CX" reject bug-12 'the caller passes the wrong operands' 2>&1)"
+  t    "reject sends the root cause back" hasl "$out" "rejected bug-12: root-cause.md is now root-cause.rejected-1.md"
+  t    "...the reason goes in hypotheses.md" grep -qxF -- '- why: the caller passes the wrong operands' "$CS/bug-12/hypotheses.md"
+  t    "...the session is open again"   bash -c "'$CX' status | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
+  t    "...and it's recorded in the git dir" grep -q '^reject	bug-12	' "$C/.git/ai-harness/debug-approvals"
+  t    "...the confirm attempt for the rejected cause no longer confirms" bash -c "'$CX' status | grep -qxF 'confidence: reproduced' && grep -qx 'confirm_after: $cn' '$CS/bug-12/state'"
+  t    "...its check-in task is back in progress" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*doing'"
+  rcdoc "$CS/bug-12/root-cause.md" reproduced
+  (cd "$C" && .agents/bin/tasks ask bug-12 T1 --gate=impl 'Root cause ready. Please run: .agents/commands/debug approve bug-12' >/dev/null)
+  t    "approve from a person's terminal" test "$("$CX" approve bug-12)" = "approved bug-12"
+  t    "...the line goes in approvals and the record" bash -c "grep -q '^rootcause	bug-12	' '$CS/bug-12/approvals' && grep -qxF \"\$(tail -1 '$CS/bug-12/approvals')\" '$C/.git/ai-harness/debug-approvals'"
+  t    "...the session is approved"     bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), approved'"
+  t    "...its check-in question answered, its task done" bash -c "'$C/.agents/bin/tasks' list bug-12 | grep -q 'T1.*done' && ! '$C/.agents/bin/tasks' questions --open | grep -q 'bug-12'"
+  t    "...and no session is current"   hasl "$("$CX" status)" "no open session on $CB"
+  tnot "...with no dates in what it printed" bash -c "'$CX' status bug-12 | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'"
+  trc  "approving it again: exit 1"     1 "$CX" approve bug-12
+  cp "$CS/bug-12/approvals" "$WORK/debugcli.approvals"
+  grep '^reject	' "$WORK/debugcli.approvals" > "$CS/bug-12/approvals"
+  printf 'rootcause\tbug-12\tsomeone\t2026-10-03\t%s\n' "$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$CS/bug-12/root-cause.md")" >> "$CS/bug-12/approvals"
+  t    "a forged approvals line doesn't approve" bash -c "'$CX' status bug-12 | grep -qxF 'session: bug-12 (bug, #12), open, root cause rejected'"
+  cp "$WORK/debugcli.approvals" "$CS/bug-12/approvals"
+  # The simulated human (install.sh --simulated-human) approves debug check-ins too.
+  SM=$(repo debugsim); mkdir -p "$SM/src"; printf 'int a;\n' > "$SM/src/a.c"; commit "$SM" base
+  out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$SM" 2>&1)"
+  TOKS="$(printf '%s\n' "$out" | sed -n 's/.*AGENTS_SIMULATED_HUMAN=\([0-9a-f]*\) on.*/\1/p')"
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$SM/.agents/checks/$tier.sh"; done
+  commit "$SM" harness
+  SMX="$SM/.agents/commands/debug"; SMS="$SM/.agents/debug/sessions/bug-1"
+  "$SMX" start bug '#1' >/dev/null
+  t    "verify notes the simulated human while a session is open" bash -c "'$SM/.agents/bin/verify' | sed -n 2p | grep -q '^note: simulated human is on in this clone (install.sh --simulated-human, run from a Claude Code shell): a shell with its token can approve debug check-ins'"
+  "$SMX" run reproduce --attempt=reproduce -- true >/dev/null; "$SMX" outcome E-1 not-reproduced >/dev/null
+  printf '## H-1: a is never set\n- status: confirmed (E-1)\n' >> "$SMS/hypotheses.md"
+  rcdoc "$SMS/root-cause.md" evidence-only
+  trc  "simulated human: an agent shell without the token is refused" 2 env CLAUDECODE=1 "$SMX" approve bug-1
+  t    "...the token approves, marked simulated" test "$(CLAUDECODE=1 AGENTS_SIMULATED_HUMAN="$TOKS" "$SMX" approve bug-1 2>&1)" = "approved bug-1 (simulated human)"
+  t    "...in the line itself"         grep -q '^rootcause	bug-1	[^	]* (simulated human)	' "$SMS/approvals"
+  mv "$SM/.git/ai-harness/simulated-human" "$WORK/debugsim.switch"
+  t    "...and it counts only while the switch is on" bash -c "'$SMX' status bug-1 | grep -qxF 'session: bug-1 (bug, #1), open'"
+  cp "$WORK/debugsim.switch" "$SM/.git/ai-harness/simulated-human"
 fi
 }
 group grp_debug_cli

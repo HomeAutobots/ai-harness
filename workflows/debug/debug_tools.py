@@ -855,7 +855,9 @@ def confirm_after(st):
 def confidence(ev, st):
     """What the recorded attempts support: confirmed when a confirmation attempt after the state's
     confirm_after triggered the bug through the stated cause, reproduced when any attempt
-    reproduced it (a confirmation attempt is a reproduction too), else evidence-only."""
+    reproduced it (a confirmation attempt is a reproduction too), else evidence-only. debug reject
+    writes confirm_after; it sits in the state file an agent can edit, which is accepted, since the
+    outcomes it judges are agent-recorded too."""
     after = confirm_after(st)
     hits = [(n, e.get("attempt")) for n, e in ev.items() if e.get("outcome") == "reproduced"]
     if any(a == "confirm" and n > after for n, a in hits):
@@ -1046,6 +1048,110 @@ def cmd_status(root, words, opts, after):
                                         " (start one: %s start <kind> <ref>)" % debug_cmd(root)))
         return 0
     print_status(root, conf, switch, session)
+    return 0
+
+
+# ------------------------------------------------------------------ the check-in
+
+def checkin(root, session, prog):
+    """The check-in set debug approve (and close reviewed) runs on a session's root cause: True when
+    it passes; otherwise the findings go to stderr."""
+    found, blocked = run_checks(Ctx(root, "checkin", [], session))
+    if not found and not blocked:
+        return True
+    for f in blocked + found:
+        print(f, file=sys.stderr)
+    print("debug: fix these before %s %s" % (prog, session[0]), file=sys.stderr)
+    return False
+
+
+def finish_plan(root, slug, answer, done):
+    """The session's plan: answer its open questions (the check-in request), and set T1 done when the
+    session is over, or back in progress when it isn't. Quiet: a missing plan changes nothing."""
+    tasks_cli(root, "answer", slug, "T1", answer)
+    tasks_cli(root, "set", slug, "T1", "done" if done else "doing")
+
+
+def judged_session(root, conf, switch, slug, verb):
+    """(slug, dir, state) of an open session with a root cause, or None after saying why."""
+    session = find_session(root, conf, slug)
+    if not session:
+        print("debug: no session %s (%s status lists the open one)" % (slug[:64], debug_cmd(root)), file=sys.stderr)
+        return None
+    why = not_open(root, session[0], session[1], session[2], switch)
+    if why:
+        print("debug: %s is %s" % (slug, why), file=sys.stderr)
+        return None
+    if not os.path.isfile(os.path.join(session[1], "root-cause.md")):
+        print("debug: %s has no root-cause.md yet, so there's nothing to %s" % (slug, verb), file=sys.stderr)
+        return None
+    return session
+
+
+def last_entry(sdir):
+    """The highest E-number in the session's evidence/, counting a run still in progress (its .log
+    is there before its .md); 0 when there's none."""
+    try:
+        names = os.listdir(os.path.join(sdir, "evidence"))
+    except OSError:
+        return 0
+    return max([int(m.group(1)) for m in (re.fullmatch(r"E-([0-9]+)\.(?:md|log)", x) for x in names) if m] + [0])
+
+
+@command("approve", "debug approve <slug>")
+def cmd_approve(root, words, opts, after):
+    if len(words) != 1 or after is not None:
+        return bad("approve")
+    switch = ap.Switch(root)
+    if ap.refused("debug", "approving a root cause", switch):
+        return 2
+    conf = load_conf(root)
+    session = judged_session(root, conf, switch, words[0], "approve")
+    if not session:
+        return 1
+    if not checkin(root, session, "approving"):
+        return 1
+    slug, sdir, st = session
+    line, sim = ap.new_line(root, "rootcause", slug, sha(os.path.join(sdir, "root-cause.md")), switch)
+    ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
+    append_line(approvals_path(sdir), line)
+    st.update(status="approved", step="check-in")
+    write_state(sdir, st)
+    finish_plan(root, slug, "approved", True)
+    print("approved %s%s" % (slug, ap.SIMULATED if sim else ""))
+    return 0
+
+
+@command("reject", "debug reject <slug> <why...>")
+def cmd_reject(root, words, opts, after):
+    why = one_line(" ".join(words[1:] + (after or [])))
+    if not words or not why:
+        return bad("reject")
+    switch = ap.Switch(root)
+    if ap.refused("debug", "rejecting a root cause", switch):
+        return 2
+    conf = load_conf(root)
+    session = judged_session(root, conf, switch, words[0], "reject")
+    if not session:
+        return 1
+    slug, sdir, st = session
+    rc = os.path.join(sdir, "root-cause.md")
+    line, sim = ap.new_line(root, "reject", slug, sha(rc), switch)
+    ap.record(root, KEY, [line])   # first, so a line in approvals is never left without its record
+    append_line(approvals_path(sdir), line)
+    k = 1
+    while os.path.exists(os.path.join(sdir, "root-cause.rejected-%d.md" % k)):
+        k += 1
+    os.rename(rc, os.path.join(sdir, "root-cause.rejected-%d.md" % k))   # experiments are allowed again
+    with open(os.path.join(sdir, "hypotheses.md"), "a", encoding="utf-8") as fh:
+        fh.write("\n## Check-in: root cause rejected (root-cause.rejected-%d.md)\n- why: %s\n"
+                 "- next: look again: more evidence, new or revised hypotheses, then a new root-cause.md\n" % (k, why))
+    # Confirmation attempts made so far were for the rejected cause: they no longer confirm.
+    st.update(status="open", step="hypothesize", confirm_after=str(max(last_entry(sdir), confirm_after(st))))
+    write_state(sdir, st)
+    finish_plan(root, slug, "rejected: " + why, False)
+    print("rejected %s%s: root-cause.md is now root-cause.rejected-%d.md, and the reason is in hypotheses.md"
+          % (slug, ap.SIMULATED if sim else "", k))
     return 0
 
 
