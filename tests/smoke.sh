@@ -2665,7 +2665,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$G/.agents/checks/$tier.sh"; done
   commit "$G" harness
   GX="$G/.agents/commands/debug"; GD="$G/.agents/debug"
-  t    "debug settings appended, with their defaults" bash -c "grep -qx 'DEBUG_DIR=\".agents/debug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_KINDS=\"bug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_SCOPE=\"\*\*\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_ASK=\"rootcause\"' '$G/.agents/harness.conf'"
+  t    "debug settings appended, with their defaults" bash -c "grep -qx 'DEBUG_DIR=\".agents/debug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_KINDS=\"bug test crash field\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_SCOPE=\"\*\*\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_ASK=\"rootcause\"' '$G/.agents/harness.conf'"
   t    "approve and reject denied in policy" bash -c "grep -q '^deny-cmd .agents/commands/debug approve' '$G/.agents/policy.conf' && grep -q '^deny-cmd .agents/commands/debug reject' '$G/.agents/policy.conf'"
   t    "playbook seeded"                 test -f "$GD/playbook.md"
   t    "...and shared in team mode"      git -C "$G" ls-files --error-unmatch .agents/debug/playbook.md
@@ -3909,6 +3909,18 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "field: the steps' old-version recipe runs the old version from a worktree" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | grep -qxF 'int add(int a, int b) { return a - b; }'" _ "$out" "$recipe"
   (cd "$Q" && git worktree remove --force ../repro-v1)
   t    "...and the worktree is gone after"  bash -c "test ! -e '$WORK/repro-v1' && ! git -C '$Q' worktree list | grep -q repro-v1"
+  echo "debug: which workflows are on"
+  Z=$(repo debugkinds-new); "$HARNESS/install.sh" --team --workflow debug "$Z" >/dev/null 2>&1
+  t    "a new install turns all four on" grep -qx 'DEBUG_KINDS="bug test crash field"' "$Z/.agents/harness.conf"
+  tnot "...and the comment no longer says the others come later" grep -q 'come later' "$Z/.agents/harness.conf"
+  edit "$Q/.agents/harness.conf" '/^DEBUG_KINDS=/d'
+  t    "upgrade: no DEBUG_KINDS line, all four are on" bash -c "for k in bug test crash field; do printf 'Missing key %s\n' \$k | '$QX' start \$k - | grep -q \"^started \$k-missing-key-\$k \" || exit 1; done"
+  printf 'DEBUG_KINDS="bug"\n' >> "$Q/.agents/harness.conf"
+  "$HARNESS/install.sh" --team "$Q" >/dev/null 2>&1
+  t    "upgrade: a re-install keeps the project's DEBUG_KINDS=\"bug\" line" bash -c "test \$(grep -c '^DEBUG_KINDS=' '$Q/.agents/harness.conf') = 1 && grep -qx 'DEBUG_KINDS=\"bug\"' '$Q/.agents/harness.conf'"
+  out="$(printf 'Old install\n' | "$QX" start test - 2>&1)" && rc=0 || rc=$?
+  t    "...which refuses debug start test with the usual message (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF \"debug: the test workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: bug)\"" _ "$out"
+  t    "...and starts bug as before"     bash -c "printf 'Old install bug\n' | '$QX' start bug - | grep -q '^started bug-old-install-bug '"
 fi
 }
 group grp_debug_kinds

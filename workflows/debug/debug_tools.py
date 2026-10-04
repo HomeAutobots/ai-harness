@@ -13,7 +13,7 @@ stop gate read just the file); a missing key means its default, and a value this
 is a tooling problem (exit 3):
 
   DEBUG_DIR     the playbook and sessions/, repo-relative or absolute (default .agents/debug)
-  DEBUG_KINDS   the workflows that are on (default bug)
+  DEBUG_KINDS   the workflows that are on (default bug test crash field)
   DEBUG_SCOPE   globs where experiments must be gone before the check-in (default **)
   DEBUG_ASK     check-ins that need the human: rootcause (default); empty means agent review only
   DEBUG_RUN_TIMEOUT  seconds debug run gives its command before it stops it (default 600; 0 means
@@ -49,8 +49,8 @@ import sys
 import time
 
 PACK = os.path.dirname(os.path.abspath(__file__))
-DEFAULTS = {"DEBUG_DIR": ".agents/debug", "DEBUG_KINDS": "bug", "DEBUG_SCOPE": "**", "DEBUG_ASK": "rootcause",
-            "DEBUG_RUN_TIMEOUT": "600"}
+DEFAULTS = {"DEBUG_DIR": ".agents/debug", "DEBUG_KINDS": "bug test crash field", "DEBUG_SCOPE": "**",
+            "DEBUG_ASK": "rootcause", "DEBUG_RUN_TIMEOUT": "600"}
 DEFAULT_TICKET = r"[A-Z][A-Z0-9]+-[0-9]+"
 HEADINGS = ("Summary", "Cause", "Evidence", "Reproduction", "Ruled out", "Fix direction")
 ATTEMPTS = ("reproduce", "confirm")

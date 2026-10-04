@@ -4,8 +4,9 @@
 # absolute. Sessions stay local (the seeded .gitignore); the playbook is shared in team mode.
 # Another directory doesn't get that .gitignore: keep its sessions/ out of git yourself.
 DEBUG_DIR=".agents/debug"
-# Debugging workflows that are on: bug (test, crash, and field come later).
-DEBUG_KINDS="bug"
+# Debugging workflows that are on: bug (bug reports), test (failing tests and CI), crash (crashes
+# and hangs), field (field and production issues).
+DEBUG_KINDS="bug test crash field"
 # Where experiments must be gone before the root-cause check-in (space-separated globs).
 # Empty turns off the experiments check and debug-committed.
 DEBUG_SCOPE="**"
