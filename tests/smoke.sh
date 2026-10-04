@@ -3885,6 +3885,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "test: the steps' run-it-N-times recipe counts passes and fails" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'passed 15, failed 5'" _ "$out" "$recipe"
   t    "test: a flaky failure is partial, a pass here a finding" bash -c "grep -qF 'some is \`partial\`' '$QK/test.md' && grep -qF 'A pass here is a finding in itself' '$QK/test.md'"
   t    "test: the test, flakiness, and the environment are causes too" bash -c "grep -qF 'the test is wrong' '$QK/test.md' && grep -qF 'not the code' '$QK/test.md'"
+  echo "debug: the crash and hang workflow"
+  kindchk crash "intake reproduce gather-evidence hypothesize isolate root-cause check-in" "intake, reproduce, gather-evidence, isolate"
+  t    "crash: a hang is reproduced with a time limit" grep -qF 'debug run reproduce --attempt=reproduce --timeout=60 -- <command>' "$QK/crash.md"
+  t    "crash: a core file is read in batch mode" bash -c "grep -qF 'gdb -batch -ex bt <binary> <core>' '$QK/crash.md' && grep -qF \"lldb --batch -c <core> -o 'bt all' <binary>\" '$QK/crash.md'"
+  recipe="$(sed -n "s/.*debug run gather-evidence --timeout=120 -- bash -c '\(.*\)'\`,\$/\1/p" "$QK/crash.md")"
+  "$QX" start crash - <<< 'the server hangs' >/dev/null
+  recipe="${recipe//<command>/sleep 30}"; recipe="${recipe//sleep 20/sleep 1}"
+  out="$("$QX" run gather-evidence --timeout=20 -- bash -c "${recipe//<dump>/ps -o pid= -p}" 2>&1)" && rc=0 || rc=$?
+  t    "crash: the steps' thread-dump recipe dumps the running process, then stops it" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qE '^ *[0-9]+\$'" _ "$out" "$recipe"
+  t    "crash: the root cause names the faulting path:line and the bad state" grep -qF 'names the faulting `path:line` and the bad state that reached it' "$QK/crash.md"
 fi
 }
 group grp_debug_kinds
