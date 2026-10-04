@@ -22,6 +22,8 @@ if [ -n "$gd" ]; then
 fi
 # The current session is the newest open one on this branch.
 git -C "$AGENTS_ROOT" symbolic-ref -q HEAD 2>/dev/null
+# debug-committed (verify --since) judges what local branches have that the remotes don't.
+git -C "$AGENTS_ROOT" for-each-ref --format='%(objectname) %(refname)' refs/heads refs/remotes 2>/dev/null
 # debug-experiments-left counts a change only in the index, and judges untracked files by path:
 # verify's own key sees the working tree, and given files, leaves the other untracked paths out.
 # Both print nothing outside git; with no commits, --cached compares against the empty tree.

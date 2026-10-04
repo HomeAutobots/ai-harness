@@ -7,9 +7,10 @@ root cause the human approves; the fix goes through the project's own process. E
 in DEBUG_DIR/sessions/<slug>/, local and never committed: report.md, evidence/E-<n>.md and .log
 (written by debug run), hypotheses.md, root-cause.md, state, and approvals (written only by debug
 approve, reject, and close; each line is also recorded in the git dir, .git/ai-harness/debug-approvals,
-through the harness's .agents/lib/approvals.py). Settings come from .agents/harness.conf only,
-never the environment (checks/state.sh and the stop gate read just the file); a missing key means
-its default, and a value this pack doesn't know is a tooling problem (exit 3):
+through the harness's .agents/lib/approvals.py; debug start records where each session started there
+too). Settings come from .agents/harness.conf only, never the environment (checks/state.sh and the
+stop gate read just the file); a missing key means its default, and a value this pack doesn't know
+is a tooling problem (exit 3):
 
   DEBUG_DIR     the playbook and sessions/, repo-relative or absolute (default .agents/debug)
   DEBUG_KINDS   the workflows that are on (default bug)
@@ -361,12 +362,55 @@ def not_open(root, conf, slug, sdir, st, switch):
     return "approved" if v == "approved" else ""
 
 
+# debug start records where a session started in the git-dir record, beside the approvals, since
+# the state file is the agent's to edit: a line "start <TAB> <slug> <space> <session dir, resolved>
+# <TAB> who <TAB> date <TAB> <branch, or - when detached> <HEAD, or - with no commits> <each local
+# branch tip>...", shas in full and space-separated (the tips like the stop gate's turn snapshot).
+# The session dir in the id keeps two worktrees' sessions of the same name apart (they share the
+# record). A start line never counts as an approval or a close: those are read from the session's
+# approvals file by kind (last_line), and start is none of them.
+SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def start_id(slug, sdir):
+    return "%s %s" % (slug, os.path.realpath(sdir))
+
+
+def start_value(root):
+    """What a start line records: '<branch|-> <HEAD|-> <tip>...'."""
+    head = git(root, "rev-parse", "-q", "--verify", "HEAD").strip()
+    tips = sorted(set(git(root, "for-each-ref", "--format=%(objectname)", "refs/heads").split()) - {head})
+    return " ".join([current_branch(root) or "-", head or "-"] + tips)
+
+
+def start_records(root):
+    """{start id: (branch, HEAD or '', [HEAD and tips])} from the last start line debug start
+    recorded for each session; {} outside git or before any."""
+    path = ap.record_file(root, KEY)
+    out = {}
+    for line in read_lines(path) if path else []:
+        parts = line.split("\t")
+        words = parts[4].split(" ") if len(parts) == 5 and parts[0] == "start" else []
+        if len(words) >= 2:
+            head = words[1] if SHA.fullmatch(words[1]) else ""
+            out[parts[1]] = ("" if words[0] == "-" else words[0], head,
+                             [w for w in words[1:] if SHA.fullmatch(w)])
+    return out
+
+
+def session_branch(starts, slug, sdir, st):
+    """The branch the session started on: the recorded one, else (a session from before debug
+    recorded starts) its state's."""
+    got = starts.get(start_id(slug, sdir))
+    return got[0] if got else st.get("branch", "")
+
+
 def current_session(root, conf, switch):
     """(slug, dir, state) of the agent's current session: the newest open one started on this branch
     (on a detached HEAD, the newest started detached); None when there's none."""
-    br, found = current_branch(root), None
+    br, found, starts = current_branch(root), None, start_records(root)
     for slug, sdir, st in all_sessions(root, conf):
-        if st.get("branch", "") == br and not not_open(root, conf, slug, sdir, st, switch):
+        if session_branch(starts, slug, sdir, st) == br and not not_open(root, conf, slug, sdir, st, switch):
             found = (slug, sdir, st)
     return found
 
@@ -677,12 +721,12 @@ def since_commits(root, also_not=()):
     its turn started from): what HEAD or a local branch has now that none of those had, leaving out
     merges, anything a remote has (a pull), and copies with the same patch as a commit they had (a
     rebase). The same rule as the feature-driven pack's; packs don't import each other. also_not:
-    more commits whose history doesn't count (the session's start). Newest first; empty without
-    AGENTS_SINCE."""
+    more commits whose history doesn't count (where a session started). Newest first, parents after
+    their children (--topo-order); empty without AGENTS_SINCE."""
     since = os.environ.get("AGENTS_SINCE", "").split()
     if not since:
         return []
-    new = git(root, "rev-list", "--no-merges", "HEAD", "--branches", "--not", *since, *also_not,
+    new = git(root, "rev-list", "--topo-order", "--no-merges", "HEAD", "--branches", "--not", *since, *also_not,
               "--remotes", "--").split()
     gone = git(root, "rev-list", "--no-merges", *since, "--not", "HEAD", "--branches", "--").split() if new else []
     if gone:
@@ -704,55 +748,121 @@ def patch_ids(root, commits):
     return {c: p for p, c in (l.split()[:2] for l in out.splitlines() if len(l.split()) >= 2)}
 
 
+def empty_tree(root):
+    """The empty tree's id in this repo (sha1 or sha256), for diffing a commit with no parent."""
+    try:
+        return subprocess.run(["git", "-C", root, "hash-object", "-t", "tree", "--stdin"], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True).stdout.strip()
+    except OSError as e:
+        raise ConfError("can't run git: %s" % (e.strerror or e))
+
+
 def commit_lines(root, c):
     """{path: first changed line} for one commit, relative to root (files outside it left out)."""
-    parent = git(root, "rev-parse", "-q", "--verify", c + "^").strip()
-    if parent:
-        return {p: n for p, (n, _) in diff_first_lines(root, parent, c).items()}
-    names = git_raw(root, "show", "--format=", "--name-only", "-z", "--root", *(DIFF_OPTS + (c,)))
-    return {p: 1 for p in names.split("\0") if p}   # a first commit: no diff to place a line in
+    parent = git(root, "rev-parse", "-q", "--verify", c + "^").strip() or empty_tree(root)
+    return {p: n for p, (n, _) in diff_first_lines(root, parent, c).items()}
 
 
-def session_start(root, st):
-    """The commit HEAD was at when the session started (its state's start), or '' when there's none."""
-    s = st.get("start", "")
-    return git(root, "rev-parse", "-q", "--verify", s + "^{commit}").strip() \
-        if re.fullmatch(r"[0-9a-f]{7,64}", s) else ""
+def verified(root, shas):
+    """The ones that name a commit here (a start line may name one that's gone)."""
+    if not shas:
+        return []
+    try:
+        p = subprocess.run(["git", "-C", root, "cat-file", "--batch-check"], input="\n".join(shas) + "\n",
+                           capture_output=True, text=True)
+    except OSError:
+        return []
+    ok = {l.split()[0] for l in p.stdout.splitlines() if l.split()[1:2] == ["commit"]}
+    return [s for s in shas if s in ok]
+
+
+def session_start(root, starts, slug, sdir):
+    """(HEAD when the session started or '', [that and every local branch tip then]), from the start
+    line debug start recorded, never the state file (the agent's to edit); ('', []) when the session
+    has none (it started before debug recorded starts)."""
+    _, head, shas = starts.get(start_id(slug, sdir), ("", "", []))
+    shas = verified(root, shas)
+    return (head if head in shas else ""), shas
+
+
+def is_ancestor(root, a, b):
+    """True when commit a is in b's history (or is b)."""
+    return subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", a, b],
+                          capture_output=True).returncode == 0
+
+
+SCAN = 13   # commits with project code judged before debug-committed stops looking
 
 
 @check
 def committed(ctx):
-    """debug-committed (turn and full, with verify --since): a commit since then, made while the
-    session was open (not in its start's history), that changes project code: files in DEBUG_SCOPE
-    outside .agents/ and DEBUG_DIR that sync didn't write (in_scope, harness_made). One finding per
-    commit, oldest first, at its first file's first changed line; past 5, the fifth names the rest."""
-    if not ctx.slug or ctx.tier not in ("turn", "full") or not ctx.conf["DEBUG_SCOPE"].split():
+    """debug-committed (turn and full, with verify --since): a commit since then that changes project
+    code (files in DEBUG_SCOPE outside .agents/ and DEBUG_DIR that sync didn't write: in_scope,
+    harness_made) while a session is open. With a current session, every such commit not in the
+    history of where it started; without one (the agent switched branches), each commit that
+    descends from where an open session started, naming that session. One finding per commit,
+    oldest first, at its first file's first changed line; past 5, the fifth names the rest."""
+    if ctx.tier not in ("turn", "full") or not ctx.conf["DEBUG_SCOPE"].split() or \
+            not os.environ.get("AGENTS_SINCE", "").split():
         return []
-    start = session_start(ctx.root, ctx.state)
-    hits = []   # (commit, {path: line}, [paths]), oldest first
-    for c in reversed(since_commits(ctx.root, [start] if start else [])):
+    starts = start_records(ctx.root)
+    if ctx.slug:
+        head, shas = session_start(ctx.root, starts, ctx.slug, ctx.sdir)
+        watch = [(ctx.slug, head, shas)]
+        commits = since_commits(ctx.root, shas)
+    else:   # open sessions that recorded where they started, newest first
+        watch = [(slug,) + session_start(ctx.root, starts, slug, sdir) for slug, sdir, st in
+                 reversed(all_sessions(ctx.root, ctx.conf)) if not not_open(ctx.root, ctx.conf, slug, sdir, st, ctx.switch)]
+        watch = [w for w in watch if w[1]]
+        commits = since_commits(ctx.root) if watch else []
+        # each session's commits: made after it started (not in the history of HEAD or a branch then)
+        after = {s: set(git(ctx.root, "rev-list", *commits, "--not", *shas, "--").split()) if commits else set()
+                 for s, _, shas in watch}
+    hits, more = [], False   # (commit, session, {path: line}, [paths]), oldest first
+    for c in reversed(commits):
+        if ctx.slug:
+            slug = ctx.slug
+        else:
+            slug = next((s for s, head, _ in watch if c in after[s] and is_ancestor(ctx.root, head, c)), None)
+            if slug is None:
+                continue
         lines = commit_lines(ctx.root, c)
         files = sorted(p for p in lines if in_scope(ctx.root, ctx.conf, p))
         made = harness_made(ctx.root, files, (c + "^", c))
         files = [p for p in files if p not in made]
         if files:
-            hits.append((c, lines, files))
+            if len(hits) == SCAN:
+                more = True
+                break
+            hits.append((c, slug, lines, files))
     kind, scope = "debug-committed", ctx.conf["DEBUG_SCOPE"]
-    fix = ("the debug workflow investigates; the fix goes through the project's own process once the root "
-           "cause is approved. Undo %s and keep the work as uncommitted changes (git reset --soft %s~1 undoes "
-           "it and any later commit), or ask the human") % (
-        "the commit" if len(hits) == 1 else "these commits", hits[0][0][:7] if hits else "")
     out = [finding(fs[0], ls[fs[0]], kind, "commit %s changes %s while debug session %s is open"
-                   % (c[:7], ", ".join(fs[:3]) + (" and %d more" % (len(fs) - 3) if len(fs) > 3 else ""),
-                      ctx.slug), fix)
-           for c, ls, fs in (hits[:4] if len(hits) > 5 else hits)]
+                   % (c[:7], ", ".join(fs[:3]) + (" and %d more" % (len(fs) - 3) if len(fs) > 3 else ""), slug),
+                   committed_fix(ctx.root, c))
+           for c, slug, ls, fs in (hits[:4] if len(hits) > 5 else hits)]
     if len(hits) > 5:
-        c, ls, fs = hits[4]
-        out.append(finding(fs[0], ls[fs[0]], kind, "%d more commits change files in DEBUG_SCOPE (%s) while debug "
-                           "session %s is open: %s%s" % (len(hits) - 4, scope, ctx.slug,
-                                                         ", ".join(h[0][:7] for h in hits[4:12]),
-                                                         ", ..." if len(hits) > 12 else ""), fix))
+        c, _, ls, fs = hits[4]
+        rest = hits[4:]
+        names = sorted({h[1] for h in rest})
+        out.append(finding(fs[0], ls[fs[0]], kind, "%s%d more commits change files in DEBUG_SCOPE (%s) while debug "
+                           "session%s %s %s open: %s%s"
+                           % ("at least " if more else "", len(rest), scope, "s" if len(names) > 1 else "",
+                              ", ".join(names), "are" if len(names) > 1 else "is",
+                              ", ".join(h[0][:7] for h in rest[:8]), ", and more" if more or len(rest) > 8 else ""),
+                           committed_fix(ctx.root, c)))
     return out
+
+
+def committed_fix(root, c):
+    """How to undo a commit debug-committed found: reset it on HEAD's branch, or say which branch has it."""
+    why = ("the debug workflow investigates; the fix goes through the project's own process once the root cause "
+           "is approved. ")
+    if is_ancestor(root, c, "HEAD"):
+        return why + ("Undo it and keep the work as uncommitted changes (git reset --soft %s~1 undoes it and any "
+                      "later commit), or ask the human" % c[:7])
+    on = git(root, "branch", "--format=%(refname:short)", "--contains", c).split()
+    return why + ("It's on %s, not here: undo it there (git reset --soft %s~1 on that branch undoes it and any "
+                  "later commit), or ask the human" % (", ".join(on[:3]) or "no local branch", c[:7]))
 
 
 # ------------------------------------------------------------------ the debug command
@@ -1007,6 +1117,8 @@ def cmd_start(root, words, opts, after):
         os.mkdir(os.path.join(sdir, "evidence"))
         write_text(os.path.join(sdir, "report.md"), REPORT % ("pasted" if ref == "-" else ref, kind, got))
         write_text(os.path.join(sdir, "hypotheses.md"), HYPOTHESES)
+        line, _ = ap.new_line(root, "start", start_id(slug, sdir), start_value(root), OFF)
+        ap.record(root, KEY, [line])   # where it started, out of the state file's reach (session_start)
         write_state(sdir, state)
     except Exception as e:   # not only OSError: a report that can't be encoded must not leave a half-made dir
         shutil.rmtree(sdir, ignore_errors=True)
@@ -1412,8 +1524,8 @@ HARNESS_WHOLE = (".github/hooks/harness.json", ".codex/rules/harness.rules")   #
 RENDER_DIR = re.compile(r"\.(?:claude|github|cursor|codex|gemini)/(?:agents|skills)/")
 RENDER = re.compile(r"\.(?:claude|github|cursor|codex|gemini)/(?:agents|skills)/[^/]+")   # one render
 MIRROR = re.compile(r"\.claude/skills/([^/]+)")   # a link mirror points at ../../.agents/skills/<name>
-BLOCK = re.compile(r"[ \t]*<!-- harness:([a-z0-9-]+):(start|end) -->[ \t\r]*")
-CLAUDE_MARK = "<!-- Shared instructions live in AGENTS.md"
+BLOCK = re.compile(r"[ \t]*<!-- harness:(core|skills):(start|end) -->[ \t\r]*")   # the blocks sync renders
+CLAUDE_MARK = "<!-- Shared instructions live in AGENTS.md. Claude Code-only notes go below this line. -->"
 
 
 def side_entry(root, side, path):
@@ -1449,7 +1561,7 @@ def side_entry(root, side, path):
 
 
 def outside_blocks(text):
-    """AGENTS.md's lines outside the harness's managed blocks (sync's render_block), blank lines left
+    """AGENTS.md's lines outside the managed blocks sync renders (core, skills), blank lines left
     out; None when a block doesn't close (not a file sync rendered)."""
     out, inside = [], None
     for line in text.splitlines():
@@ -1466,8 +1578,8 @@ def outside_blocks(text):
 def claude_lines(text):
     """CLAUDE.md's lines minus what sync writes there (its strip_claude): the @AGENTS.md and
     @.agents/AGENTS.local.md imports, the marker comment, and blank lines."""
-    return [l for l in text.splitlines() if l.strip() and not l.startswith(CLAUDE_MARK)
-            and l.rstrip(" \t\r") not in ("@AGENTS.md", "@.agents/AGENTS.local.md")]
+    return [l for l in text.splitlines() if l.strip()
+            and l.rstrip(" \t\r") not in ("@AGENTS.md", "@.agents/AGENTS.local.md", CLAUDE_MARK)]
 
 
 INSTRUCTIONS = {"AGENTS.md": outside_blocks, "CLAUDE.md": claude_lines}
@@ -1483,6 +1595,8 @@ def harness_made(root, paths, sides):
     which a pack from another library can't count on. No git calls unless a path could be one."""
     cand = [p for p in paths if p in HARNESS_WHOLE or p in INSTRUCTIONS or RENDER_DIR.match(p)]
     renders, out = set(), set()
+    # A lock entry from the working tree or the index counts like a committed one, as it does for
+    # sync; RENDER keeps an entry the agent added from naming anything outside the tools' dirs.
     if any(RENDER_DIR.match(p) for p in cand):
         for s in sides:
             kind, text = side_entry(root, s, ".agents/generated.lock")
@@ -1593,8 +1707,9 @@ def cmd_status(root, words, opts, after):
     else:
         session = current_session(root, conf, switch)
     if not session:
-        elsewhere = ["%s (%s)" % (s, st.get("branch") or "detached HEAD") for s, d, st in all_sessions(root, conf)
-                     if not not_open(root, conf, s, d, st, switch)]
+        starts = start_records(root)
+        elsewhere = ["%s (%s)" % (s, session_branch(starts, s, d, st) or "detached HEAD")
+                     for s, d, st in all_sessions(root, conf) if not not_open(root, conf, s, d, st, switch)]
         print("no open session %s%s" % (where(root), "; open elsewhere: " + ", ".join(elsewhere) if elsewhere else
                                         " (start one: %s start <kind> <ref>)" % debug_cmd(root)))
         return 0

@@ -3352,11 +3352,24 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and so are a link sync didn't make, and a config it merges into the project's own" bash -c "printf '%s' \"\$1\" | grep -qF '.claude/skills/mine:1: error: [debug-experiments-left]' && printf '%s' \"\$1\" | grep -qF '.claude/settings.json:'" _ "$out"
   git -C "$K" reset -q --hard HEAD~1; rm -f "$K/.claude/skills/newer" "$K/.claude/skills/mine"
   t    "...back to link renders: passes" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf '\n@.agents/AGENTS.local.md\n' >> "$K/CLAUDE.md"
+  t    "sync's own lines in CLAUDE.md aren't experiments" test "$("$KV" 2>&1)" = "ok verify turn"
+  printf 'A project note.\n' >> "$K/CLAUDE.md"
+  t    "...a project line in it is"     bash -c "printf '%s' \"\$1\" | grep -qE '^CLAUDE\.md:[0-9]+: error: \[debug-experiments-left\]'" _ "$("$KV" 2>&1 || true)"
+  git -C "$K" checkout -q CLAUDE.md
+  printf '<!-- harness:mine:start -->\nA block sync never writes.\n<!-- harness:mine:end -->\n' >> "$K/AGENTS.md"
+  t    "a block sync doesn't render in AGENTS.md is the project's" bash -c "printf '%s' \"\$1\" | grep -qE '^AGENTS\.md:[0-9]+: error: \[debug-experiments-left\]'" _ "$("$KV" 2>&1 || true)"
+  git -C "$K" checkout -q AGENTS.md
+  python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); d["agents"] = {"src/calc.c": "0"}; json.dump(d, open(sys.argv[1], "w"))' "$K/.agents/generated.lock"
+  printf '/* probe */\n' >> "$K/src/calc.c"
+  t    "a lock entry outside the tools' render dirs hides nothing" hasl "$("$KV" 2>&1 || true)" "src/calc.c:2: error: [debug-experiments-left]"
+  git -C "$K" checkout -q .agents/generated.lock src/calc.c
   printf 'int probe;\n' > "$K/src/probe.c"
   "$KX" reject bug-7 'not it' >/dev/null
   t    "after a reject sets root-cause.md aside, experiments are fine again" test "$("$KV" 2>&1)" = "ok verify turn"
   rm -f "$K/src/probe.c"
   echo "debug: commits during a session"
+  KB=$(git -C "$K" rev-parse HEAD); KM=$(git -C "$K" symbolic-ref --short HEAD)
   fresh 8
   hook "$K" turn-start claude '{"session_id":"k1"}' >/dev/null 2>&1
   printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; (cd "$K" && git -c core.hooksPath=/dev/null commit -qam "Fix add")
@@ -3384,8 +3397,63 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "six commits: five findings"     test "$(printf '%s\n' "$out" | grep -c '\[debug-committed\]')" = 5
   t    "...the fifth names the rest"    hasl "$out" "src/c5.c:1: error: [debug-committed] 2 more commits change files in DEBUG_SCOPE (**) while debug session bug-9 is open: $(git -C "$K" rev-parse --short=7 HEAD~1), $(git -C "$K" rev-parse --short=7 HEAD)"
   t    "...and the oldest's fix keeps the work as uncommitted changes" hasl "$out" "git reset --soft $(git -C "$K" rev-parse --short=7 HEAD~5)~1"
-  git -C "$K" reset -q --hard HEAD~9
+  git -C "$K" reset -q --hard "$KB"
+  printf 'one\ntwo\nthree\n' > "$K/src/three.c"; commit "$K" "Three"
+  fresh 10
+  printf 'one\ntwo\nTHREE\n' > "$K/src/three.c"; commit "$K" "Change line 3"
+  t    "the finding is at the commit's first changed line" hasl "$("$KV" --since=HEAD~1 2>&1)" "src/three.c:3: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
+  t    "the full tier judges commits too" hasl "$("$KV" --tier=full --since=HEAD~1 2>&1)" "src/three.c:3: error: [debug-committed]"
+  edit "$K/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE=""/'
+  t    "absence: an empty DEBUG_SCOPE turns it off" test "$("$KV" --since=HEAD~1 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q .agents/harness.conf
+  edit "$KS/state" "s/^start: .*/start: $(git -C "$K" rev-parse HEAD)/"
+  t    "state's start moved past the commit: still reported (the start is recorded)" hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
+  edit "$KS/state" 's/^branch: .*/branch: elsewhere/'
+  t    "...state's branch moved: still the current session" hasl "$("$KV" --since=HEAD~1 2>&1)" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/three.c while debug session bug-10 is open"
+  t    "...and status still finds it"   hasl "$("$KX" status 2>&1)" "session: bug-10 "
+  git -C "$K" reset -q --hard "$KB"
+  echo "debug: rebases, pulls, and other branches"
+  printf 'int a;\n' > "$K/src/a.c"; commit "$K" "A"
+  git -C "$K" checkout -q -b up HEAD~1; printf 'int u;\n' > "$K/src/u.c"; commit "$K" "U"; git -C "$K" checkout -q "$KM"
+  fresh 11
+  KA=$(git -C "$K" rev-parse HEAD); KU=$(git -C "$K" rev-parse up)
+  git -C "$K" -c core.hooksPath=/dev/null rebase -q up
+  t    "a rebased copy of a commit from before isn't new work" test "$("$KV" --since="$KA" --since="$KU" 2>&1)" = "ok verify turn"
+  printf 'int r;\n' > "$K/src/r.c"; commit "$K" "R"; git -C "$K" update-ref refs/remotes/origin/main HEAD
+  t    "...nor is a commit a remote has (a pull)" test "$("$KV" --since=HEAD~1 2>&1)" = "ok verify turn"
+  git -C "$K" update-ref -d refs/remotes/origin/main
+  git -C "$K" reset -q --hard "$KB"; git -C "$K" branch -q -D up
+  fresh 12
+  git -C "$K" checkout -q -b feat
+  printf 'int add(int a, int b) { return a + b; }\n' > "$K/src/calc.c"; commit "$K" "Fix add on a branch"
+  out="$("$KV" --since="$KB" 2>&1 || true)"
+  t    "a branch off where the session started: no current session, still reported, naming it" hasl "$out" "src/calc.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/calc.c while debug session bug-12 is open"
+  t    "...and the fix undoes it here"  hasl "$out" "git reset --soft $(git -C "$K" rev-parse --short=7 HEAD)~1"
+  git -C "$K" checkout -q "$KM"
+  out="$("$KV" --since="$KB" 2>&1 || true)"
+  t    "back on the session's branch, the commit made on the other one is caught" hasl "$out" "[debug-committed] commit $(git -C "$K" rev-parse --short=7 feat) changes src/calc.c while debug session bug-12 is open"
+  t    "...and the fix names the branch that has it" hasl "$out" "It's on feat, not here: undo it there"
+  git -C "$K" branch -q -D feat
+  blob=$(printf 'int side;\n' | git -C "$K" hash-object -w --stdin)
+  GIT_INDEX_FILE="$WORK/side.idx" git -C "$K" read-tree HEAD
+  GIT_INDEX_FILE="$WORK/side.idx" git -C "$K" update-index --add --cacheinfo "100644,$blob,src/side.c"
+  side=$(git -C "$K" commit-tree "$(GIT_INDEX_FILE="$WORK/side.idx" git -C "$K" write-tree)" -p HEAD -m "Side")
+  git -C "$K" update-ref refs/heads/side "$side"
+  t    "a commit made on another branch while staying on this one is caught" hasl "$("$KV" --since="$KB" 2>&1)" "src/side.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 side) changes src/side.c while debug session bug-12 is open"
+  git -C "$K" branch -q -D side
+  printf 'int p;\n' > "$K/src/p.c"; commit "$K" "P"
+  fresh 13
+  git -C "$K" checkout -q -b old HEAD~1
+  printf 'int old;\n' > "$K/src/old.c"; commit "$K" "Old"
+  t    "a commit on a branch that doesn't descend from where the session started stays quiet" test "$("$KV" --since="$KB" 2>&1)" = "ok verify turn"
+  git -C "$K" checkout -q "$KM"; git -C "$K" branch -q -D old; git -C "$K" reset -q --hard "$KB"
+  git -C "$K" checkout -q --orphan fresh-root; git -C "$K" rm -rq --cached .
+  fresh 14
+  git -C "$K" add src/calc.c; git -C "$K" -c core.hooksPath=/dev/null commit -qm "First"
+  t    "a first commit (no parent) during a session is reported" hasl "$("$KV" --since="$KB" 2>&1)" "src/calc.c:1: error: [debug-committed] commit $(git -C "$K" rev-parse --short=7 HEAD) changes src/calc.c while debug session bug-14 is open"
+  git -C "$K" checkout -q -f "$KM"; git -C "$K" branch -q -D fresh-root
   rm -rf "$K/.agents/debug/sessions" "$K"/.agents/plans/bug-*
+  t    "cleaned up: passes"             test "$("$KV" --since="$KB" 2>&1)" = "ok verify turn"
 fi
 }
 group grp_debug_checks
