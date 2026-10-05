@@ -3183,7 +3183,8 @@ except d.ConfError as e:
   BB="$(git -C "$BI" symbolic-ref --short HEAD)"
   (cd "$BI" && .agents/commands/debug start bug '#3' >/dev/null)
   out="$(cd "$BI" && .agents/commands/debug run isolate -- bash -c 'git bisect start HEAD HEAD~2 && git bisect run grep -q "a + b" src/calc.c; rc=$?; git bisect reset; exit $rc' 2>&1)" && rc=0 || rc=$?
-  t    "a bisect inside debug run: recorded as one entry, exit 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q '^E-1 (isolate, exit 0)' && grep -q 'is the first bad commit' '$BI/.agents/debug/sessions/bug-3/evidence/E-1.log'" _ "$out"
+  # git 2.55 quotes the term: "is the first 'bad' commit"; older gits print "is the first bad commit".
+  t    "a bisect inside debug run: recorded as one entry, exit 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -q '^E-1 (isolate, exit 0)' && grep -Eq 'is the first .?bad.? commit' '$BI/.agents/debug/sessions/bug-3/evidence/E-1.log'" _ "$out"
   t    "...HEAD is back on the branch"  test "$(git -C "$BI" symbolic-ref --short HEAD 2>/dev/null)" = "$BB"
   t    "...and the session is still current" bash -c "cd '$BI' && .agents/commands/debug status | grep -qxF 'session: bug-3 (bug, #3), open'"
 fi
