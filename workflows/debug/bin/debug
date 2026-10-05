@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # debug workflow CLI. Harness-owned: replaced on upgrade. `debug --help` lists the commands.
-#   debug start <kind> <ref | -> [--file=<path>]   open a session for a bug report
-#   debug run <step> [--attempt=...] -- <cmd...>  run a command; its output becomes evidence
+#   debug start <kind> <ref | -> [--file=<path>]   open a session (bug, test, crash, field)
+#   debug run <step> [--attempt=...] [--timeout=<sec>] -- <cmd...>  run a command; its output becomes evidence
 #   debug outcome <E-n> <outcome>                 record how an attempt turned out
 #   debug status [slug]                           where a session stands
 #   debug approve <slug> | reject <slug> <why>    the root-cause check-in (people only)

@@ -10,7 +10,7 @@ trap 'on_exit' EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export AGENTS_PERSONAL_DIR="$WORK/no-personal-library"   # never read the real ~/.config/ai-harness
 unset CLAUDECODE GEMINI_CLI CURSOR_AGENT AGENTS_SIMULATED_HUMAN   # the suite plays the human: fdd approve refuses in an agent's shell
-unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK   # hygiene: the debug pack reads them from harness.conf only (tested)
+unset DEBUG_DIR DEBUG_KINDS DEBUG_SCOPE DEBUG_ASK DEBUG_RUN_TIMEOUT   # hygiene: the debug pack reads them from harness.conf only (tested)
 # shellcheck disable=SC2046  # one name per word
 unset VIRTUAL_ENV UV_PROJECT_ENVIRONMENT $(compgen -v PY_ || true)   # the python stack reads these; an activated venv mustn't decide its tests
 
@@ -2665,7 +2665,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$G/.agents/checks/$tier.sh"; done
   commit "$G" harness
   GX="$G/.agents/commands/debug"; GD="$G/.agents/debug"
-  t    "debug settings appended, with their defaults" bash -c "grep -qx 'DEBUG_DIR=\".agents/debug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_KINDS=\"bug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_SCOPE=\"\*\*\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_ASK=\"rootcause\"' '$G/.agents/harness.conf'"
+  t    "debug settings appended, with their defaults" bash -c "grep -qx 'DEBUG_DIR=\".agents/debug\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_KINDS=\"bug test crash field\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_SCOPE=\"\*\*\"' '$G/.agents/harness.conf' && grep -qx 'DEBUG_ASK=\"rootcause\"' '$G/.agents/harness.conf'"
   t    "approve and reject denied in policy" bash -c "grep -q '^deny-cmd .agents/commands/debug approve' '$G/.agents/policy.conf' && grep -q '^deny-cmd .agents/commands/debug reject' '$G/.agents/policy.conf'"
   t    "playbook seeded"                 test -f "$GD/playbook.md"
   t    "...and shared in team mode"      git -C "$G" ls-files --error-unmatch .agents/debug/playbook.md
@@ -2718,9 +2718,10 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
   t    "an unknown DEBUG_ASK check-in: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_ASK: unknown check-in 'bogus' (rootcause)\"" _ "$out"
   cp "$WORK/debug.conf" "$G/.agents/harness.conf"
-  printf 'DEBUG_KINDS="bug crash"\n' >> "$G/.agents/harness.conf"
+  shipped="$(cd "$GP/kinds" && ls -- *.md | sed 's/\.md$//' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+  printf 'DEBUG_KINDS="bug nope"\n' >> "$G/.agents/harness.conf"
   out="$(cd "$G" && python3 .agents/builtin/workflows/debug/debug_tools.py check turn . 2>&1)" && rc=0 || rc=$?
-  t    "an unknown DEBUG_KINDS workflow: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_KINDS: unknown workflow 'crash' (bug)\"" _ "$out"
+  t    "an unknown DEBUG_KINDS workflow: infra (3), naming the shipped ones" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qx \"infra: DEBUG_KINDS: unknown workflow 'nope' ($shipped)\"" _ "$out"
   cp "$WORK/debug.conf" "$G/.agents/harness.conf"
   H=$(repo debug-simh)
   out="$(CLAUDECODE=1 "$HARNESS/install.sh" --team --workflow debug --simulated-human "$H" 2>&1)" && rc=0 || rc=$?
@@ -2744,8 +2745,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "start --help: its usage, exit 0" bash -c "'$CX' start --help | grep -qxF 'usage: debug start <kind> <ref | -> [--file=<path>]'"
   trc  "start with an unknown option: exit 3" 3 "$CX" start bug '#12' --force
   tnot "...and nothing made"             test -e "$CS"
-  out="$("$CX" start crash '#12' 2>&1)" && rc=0 || rc=$?
-  t    "start needs a workflow the pack ships (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF 'debug: no such workflow: crash (shipped: bug)'" _ "$out"
+  shipped="$(cd "$C/.agents/builtin/workflows/debug/kinds" && ls -- *.md | sed 's/\.md$//' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+  out="$("$CX" start nope '#12' 2>&1)" && rc=0 || rc=$?
+  t    "start needs a workflow the pack ships (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF 'debug: no such workflow: nope (shipped: $shipped)'" _ "$out"
   out="$("$CX" start bug 'not a ref' 2>&1)" && rc=0 || rc=$?
   t    "start needs a ticket key, #<n>, or - (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -q \"^debug: not a ref isn't a ref: give a ticket key\"" _ "$out"
   trc  "start - needs a report"          2 bash -c "printf '' | '$CX' start bug -"
@@ -2936,9 +2938,9 @@ except d.ConfError as e:
   "$NC/.agents/commands/debug" start bug '#1' >/dev/null
   edit "$NC/.agents/harness.conf" 's/^DEBUG_SCOPE=.*/DEBUG_SCOPE="src\/**"/'   # else the uncommitted harness files fill status's first 8
   t    "a repo with no commits yet: status lists a staged file" bash -c "'$NC/.agents/commands/debug' status | grep -q '^experiments in the tree: src/a\.c:1$'"
-  edit "$CS/bug-12/state" 's/^kind: bug$/kind: crash/'
-  t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no crash workflow"
-  edit "$CS/bug-12/state" 's/^kind: crash$/kind: bug/'
+  edit "$CS/bug-12/state" 's/^kind: bug$/kind: nope/'
+  t    "status of a session whose kind the pack lacks" hasl "$("$CX" status)" "steps: none, the pack has no nope workflow"
+  edit "$CS/bug-12/state" 's/^kind: nope$/kind: bug/'
   printf 'rootcause\tbug-12\tsomeone\t2026-10-03\tabc\n' > "$CS/bug-12/approvals"
   out="$("$CX" status)"
   t    "status names an approval debug didn't record" bash -c "printf '%s\n' \"\$1\" | grep -qxF 'not counted, not written by debug approve, reject, or close: .agents/debug/sessions/bug-12/approvals:1 rootcause' && printf '%s\n' \"\$1\" | grep -qxF 'session: bug-12 (bug, #12), open'" _ "$out"
@@ -3169,7 +3171,7 @@ except d.ConfError as e:
   t    "the bug steps have a section per step" bash -c "for s in \$(sed -n 's/^steps: //p' '$DK'); do grep -q \"^## [0-9]\\. \$s\$\" '$DK' || exit 1; done"
   t    "the seeded playbook has a section per bindable step" bash -c "b=\$(sed -n 's/^bindable: //p' '$DK'); test -n \"\$b\" && for s in \$b; do grep -qx \"## \$s\" '$C/.agents/debug/playbook.md' || exit 1; done"
   t    "harness-tailor drafts the playbook" grep -qF '.agents/debug/playbook.md' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
-  t    "...and adds the AGENTS.md line" grep -qF 'Investigating a bug report: use the `debug` skill.' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
+  t    "...and adds the AGENTS.md line" grep -qF 'Investigating a bug report, a failing test, a crash, or a production issue: use the `debug` skill.' "$C/.agents/builtin/skills/harness-tailor/SKILL.md"
   # The skill's bisect runs whole inside one debug run: HEAD is back on the branch when it records.
   BI=$(repo debugbisect); mkdir -p "$BI/src"
   "$HARNESS/install.sh" --team --workflow debug "$BI" >/dev/null 2>&1
@@ -3691,6 +3693,402 @@ if [ "$HAVE_PY" -eq 1 ]; then
 fi
 }
 group grp_debug_checks
+grp_guard_shapes() {   # .agents/lib/guard_shapes.py: guard's secret rules for Python, shared by mcp_render and the debug pack
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "guard's secret rules for Python (.agents/lib/guard_shapes.py)"
+  GS=$(repo guardshapes); "$HARNESS/install.sh" --team "$GS" >/dev/null 2>&1
+  GL="$GS/.agents/lib"
+  GQ="import sys; sys.path.insert(0, sys.argv[1]); import guard_shapes as g; print(g.key_shape(sys.argv[2]))"
+  t    "guard_shapes is installed in .agents/lib" test -f "$GL/guard_shapes.py"
+  t    "...names a key shape guard knows" test "$(python3 -B -c "$GQ" "$GL" "token $FAKE_GH here" 2>&1)" = "GitHub token"
+  t    "...a placeholder isn't one"      test "$(python3 -B -c "$GQ" "$GL" 'password = "your-password-1234"' 2>&1)" = "None"
+  printf 'secret\tacme_[a-z0-9]{16}\tAcme key: remove it\n' > "$GS/.agents/guard.patterns"
+  t    "...the project's own rules count" test "$(python3 -B -c "$GQ" "$GL" "acme_k8hq2mzx7lp4wd9r" 2>&1)" = "Acme key"
+  rm -f "$GS/.agents/guard.patterns"
+  t    "mcp_render reads the rules through it" test "$(python3 -B -c "import sys; sys.path.insert(0, sys.argv[1]); import mcp_render, guard_shapes; print(mcp_render.key_shape is guard_shapes.key_shape)" "$GL" 2>&1)" = True
+  printf '{"command": "x", "args": ["%s"]}\n' "$FAKE_GH" > "$WORK/guardshapes.json"
+  t    "...and still refuses a key shape in a server file" hasl "$(python3 "$GL/mcp_render.py" check "$WORK/guardshapes.json" 2>&1 || true)" "args[0] holds a literal secret (GitHub token)"
+  tnot "...leaving no bytecode in .agents/lib" test -e "$GL/__pycache__"
+fi
+}
+group grp_guard_shapes
+grp_debug_run() {   # debug run: secrets masked in what it captures, and its time limit
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug run: secrets masked"
+  R=$(repo debugrun)
+  "$HARNESS/install.sh" --team --workflow debug "$R" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$R/.agents/checks/$tier.sh"; done
+  commit "$R" harness
+  RX="$R/.agents/commands/debug"; RE="$R/.agents/debug/sessions/bug-1/evidence"
+  "$RX" start bug '#1' >/dev/null
+  printf 'key %s here\nexport API_TOKEN=9f8e7d6c5b4a39281706\nplain line\n' "$FAKE_GH" > "$WORK/debugrun-secrets.txt"
+  out="$("$RX" run gather-evidence -- cat "$WORK/debugrun-secrets.txt" 2>&1)" && rc=0 || rc=$?
+  t    "a secret guard knows is masked in the log" bash -c "grep -qx 'key \[masked\] here' '$RE/E-1.log' && grep -qx 'export API_TOKEN=\[masked\]' '$RE/E-1.log' && grep -qx 'plain line' '$RE/E-1.log'"
+  t    "...and in the entry's tail"      bash -c "grep -qx 'key \[masked\] here' '$RE/E-1.md' && grep -qx 'export API_TOKEN=\[masked\]' '$RE/E-1.md'"
+  tnot "...none of it left in either file" grep -qF -e "$FAKE_GH" -e 9f8e7d6c5b4a39281706 "$RE/E-1.log" "$RE/E-1.md"
+  t    "...the entry counts them"        grep -qx 'masked: 2 possible secrets' "$RE/E-1.md"
+  t    "...and run says so, right after the entry line" bash -c "test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qx 'masked: 2 possible secrets'" _ "$out"
+  tnot "...printing none of it"         hasl "$out" "$FAKE_GH"
+  out="$("$RX" run gather-evidence -- echo "id $FAKE_AWS" 2>&1)"
+  t    "a secret in the command line is masked in the entry too" bash -c "grep -qxF \"command: echo 'id [masked]'\" '$RE/E-2.md' && grep -qx 'id \[masked\]' '$RE/E-2.log' && grep -qx 'masked: 2 possible secrets' '$RE/E-2.md'"
+  tnot "...and nowhere in either file"  grep -qF "$FAKE_AWS" "$RE/E-2.log" "$RE/E-2.md"
+  printf '%s\nMIIEowIBAAKCAQEA\nqL0w9Zx+/AbC==\n\n-----END RSA PRI''VATE KEY-----\nafter the key\n' "$FAKE_PEM" > "$WORK/debugrun-pem.txt"
+  printf '[masked]\n[masked]\n[masked]\n\n[masked]\nafter the key\n' > "$WORK/debugrun-pem.want"
+  "$RX" run gather-evidence -- cat "$WORK/debugrun-pem.txt" >/dev/null
+  t    "a private key: BEGIN to END masked as one secret ('possible secret')" bash -c "grep -qx 'masked: 1 possible secret' '$RE/E-3.md' && cmp -s '$WORK/debugrun-pem.want' '$RE/E-3.log'"
+  tnot "...its body gone from both files" grep -qF -e MIIEowIBAAKCAQEA -e qL0w9Zx "$RE/E-3.log" "$RE/E-3.md"
+  printf 'id %s\r\nnext\n' "$FAKE_AWS" > "$WORK/debugrun-crlf.txt"; printf 'id [masked]\r\nnext\n' > "$WORK/debugrun-crlf.want"
+  "$RX" run gather-evidence -- cat "$WORK/debugrun-crlf.txt" >/dev/null
+  t    "a key at the end of a CRLF line: the line ending stays" cmp -s "$WORK/debugrun-crlf.want" "$RE/E-4.log"
+  printf 'password = "your-password-1234"\nnothing\377here\r\nno newline at the end' > "$WORK/debugrun-plain.txt"
+  out="$("$RX" run gather-evidence -- cat "$WORK/debugrun-plain.txt" 2>&1)"
+  t    "absence: no secret, the log is byte for byte what the command wrote" cmp -s "$WORK/debugrun-plain.txt" "$RE/E-5.log"
+  tnot "...no masked: line in the entry" grep -q '^masked:' "$RE/E-5.md"
+  tnot "...nor in what run printed"     hasl "$out" "masked:"
+  { seq 1 200000; printf 'id %s\n' "$FAKE_AWS"; seq 1 3; } > "$WORK/debugrun-big.txt"
+  out="$("$RX" run gather-evidence -- cat "$WORK/debugrun-big.txt" 2>&1)"
+  n="$(printf '%s\n' "$out" | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
+  t    "a log past 1 MiB: a secret near its end is masked, the rest kept" bash -c "test \$(wc -l < '$RE/E-$n.log') -eq 200004 && grep -qx 'id \[masked\]' '$RE/E-$n.log' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  printf 'secret\tacme_[a-z0-9]{16}\tAcme key: remove it\n' > "$R/.agents/guard.patterns"
+  "$RX" run gather-evidence -- echo acme_k8hq2mzx7lp4wd9r >/dev/null
+  t    "the project's own secret rules count too" grep -qx '\[masked\]' "$RE/E-7.log"
+  rm -f "$R/.agents/guard.patterns"
+  mv "$R/.agents/lib/guard_shapes.py" "$WORK/debugrun.guard_shapes.py"
+  out="$("$RX" run gather-evidence -- true 2>&1)" && rc=0 || rc=$?
+  t    "no .agents/lib/guard_shapes.py: infra (3), re-run install.sh" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qxF \"infra: this project's harness has no .agents/lib/guard_shapes.py, so debug run can't mask secrets; re-run install.sh\"" _ "$out"
+  tnot "...and nothing run or recorded" test -e "$RE/E-8.log"
+  t    "...while status still works"    bash -c "'$RX' status | grep -qxF 'session: bug-1 (bug, #1), open'"
+  mv "$WORK/debugrun.guard_shapes.py" "$R/.agents/lib/guard_shapes.py"
+  out="$("$RX" run gather-evidence -- sh -c 'echo key; rm -f .agents/debug/sessions/bug-1/evidence/E-*.log' 2>&1)" && rc=0 || rc=$?
+  t    "a log that can't be masked: deleted, nothing recorded, infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -q \"^infra: couldn't mask secrets in E-8.log, so it's deleted and nothing was recorded\" && test ! -e '$RE/E-8.log' && test ! -e '$RE/E-8.md'" _ "$out"
+  rn(){ "$RX" run gather-evidence -- "$@" 2>&1 | sed -n '1s/^E-\([0-9]*\) .*/\1/p'; }   # rn <cmd...>: its entry's number
+  printf '{"key": "%s\\nMIIEowIBAAKCAQEA\\n-----END RSA PRI''VATE KEY-----\\n", "n": 1}\n' "$FAKE_PEM" > "$WORK/debugrun-pemjson.txt"
+  n="$(rn cat "$WORK/debugrun-pemjson.txt")"
+  t    "a private key on one line (JSON): BEGIN to END masked" bash -c "grep -qxF '{\"key\": \"[masked]\\n\", \"n\": 1}' '$RE/E-$n.log' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  printf 'before\n%s\nMIIEowIBAAKCAQEA\nafter, still masked\n' "$FAKE_PEM" > "$WORK/debugrun-pemopen.txt"
+  n="$(rn cat "$WORK/debugrun-pemopen.txt")"
+  t    "a private key with no END line: the rest of the log is masked" bash -c "test \"\$(tr '\n' '|' < '$RE/E-$n.log')\" = 'before|[masked]|[masked]|[masked]|'"
+  n="$(rn printf '%s\n' "$FAKE_PEM" MIIEowIBAAKCAQEA "-----END RSA PRI""VATE KEY-----")"
+  t    "a private key spread over arguments: masked in the command line too" bash -c "test -n '$n' && ! grep -q MIIEowIBAAKCAQEA '$RE/E-$n.md' && ! grep -q MIIEowIBAAKCAQEA '$RE/E-$n.log'"
+  printf 'secret\tzz[[:punct:]]q[0-9]{8}\tOdd rule: remove it\n' > "$R/.agents/guard.patterns"
+  out="$("$RX" run gather-evidence -- true 2>&1)"; n="$(printf '%s\n' "$out" | sed -n '1s/^E-\([0-9]*\) .*/\1/p')"
+  t    "a secret rule debug run can't use is named, in the entry and in what run printed" bash -c "grep -qxF 'not masked: 1 secret rule debug run can'\''t use (Odd rule)' '$RE/E-$n.md' && printf '%s\n' \"\$1\" | grep -qxF 'not masked: 1 secret rule debug run can'\''t use (Odd rule)'" _ "$out"
+  printf 'secret\tq{99999999999}\tHuge rule: remove it\nsecret\tzz[[:punct:]]q\n' > "$R/.agents/guard.patterns"
+  out="$("$RX" run gather-evidence -- true 2>&1)" && rc=0 || rc=$?
+  t    "...a repeat count Python can't compile too, each name once" bash -c "test $rc = 0 && printf '%s\n' \"\$1\" | grep -qxF 'not masked: 2 secret rules debug run can'\''t use (Huge rule, secret)'" _ "$out"
+  rm -f "$R/.agents/guard.patterns"
+  n="$(rn env DB_PASSWORD=s3cr3tValue99xyz true)"
+  t    "a VAR=value secret in the command line is masked" bash -c "grep -qxF \"command: env 'DB_PASSWORD=[masked]' true\" '$RE/E-$n.md' && grep -qx 'masked: 1 possible secret' '$RE/E-$n.md'"
+  n="$(rn sh -c 'true
+export API_TOKEN=9f8e7d6c5b4a39281706')"
+  t    "...and so is one on its own line inside an argument" bash -c "test -n '$n' && grep -q '^command: .*API_TOKEN=\[masked\]' '$RE/E-$n.md' && ! grep -qF 9f8e7d6c5b4a39281706 '$RE/E-$n.md'"
+  printf 'id %s\n' "$FAKE_AWS" > "$RE/E-90.log"; printf 'id %s\n' "$FAKE_AWS" > "$RE/E-91.log.masking"
+  n="$(rn true)"
+  t    "a raw log a killed run left (no .md), and a stale .masking file, are deleted by the next run" bash -c "test -n '$n' && test ! -e '$RE/E-90.log' && test ! -e '$RE/E-91.log.masking'"
+  t    "...and its number isn't used again (E-91)" test "$n" = 91
+  rm -f "$WORK/debugrun.held"
+  "$RX" run gather-evidence -- sh -c 'echo held; : > "$1"; sleep 3' _ "$WORK/debugrun.held" > "$WORK/debugrun.held.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -e "$WORK/debugrun.held" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  n="$(rn true)"; rc=0; ran=0; kill -0 "$bgrun" 2>/dev/null && ran=1; wait "$bgrun" || rc=$?
+  t    "...but not the log of a run still going" bash -c "test $ran = 1 && test $rc = 0 && test -n '$n' && n2=\$(sed -n '1s/^E-\([0-9]*\) .*/\1/p' '$WORK/debugrun.held.out') && test -n \"\$n2\" && grep -qx held '$RE/E-'\$n2.log && grep -qx held '$RE/E-'\$n2.md"
+  printf 'DB_Password = "s3cr3tValue99xyz"\n' > "$WORK/debugrun-case.txt"
+  n="$(rn cat "$WORK/debugrun-case.txt")"
+  t    "a rule that ignores case masks any case" grep -qx 'DB_Password = "\[masked\]"' "$RE/E-$n.log"
+  keys=""; i=0; while [ "$i" -lt 60 ]; do keys="$keys $FAKE_AWS"; i=$((i + 1)); done
+  printf 'ids:%s\n' "$keys" > "$WORK/debugrun-many.txt"
+  n="$(rn cat "$WORK/debugrun-many.txt")"
+  t    "60 secrets on one line: every one masked" bash -c "grep -qx 'masked: 60 possible secrets' '$RE/E-$n.md' && ! grep -qF '$FAKE_AWS' '$RE/E-$n.log'"
+  s0=$SECONDS
+  n="$(rn python3 -c 'import sys; sys.stdout.write("\n" * 1000000 + "x\n")')"
+  t    "a million blank lines mask in seconds" bash -c "test -n '$n' && test $((SECONDS - s0)) -lt 20 && test \$(wc -l < '$RE/E-$n.log') -eq 1000001"
+  n="$(rn sh -c '(sleep 1; echo late) & echo now')"
+  sleep 2
+  t    "what a process left running writes later isn't in the log" bash -c "grep -qx now '$RE/E-$n.log' && ! grep -q late '$RE/E-$n.log'"
+  echo "debug run: time limit"
+  gone(){ test -s "$1" && ! kill -0 "$(cat "$1")" 2>/dev/null; }   # gone <pid file>: it names a process, and that's gone
+  enum(){ printf '%s\n' "$1" | sed -n '1s/^E-\([0-9]*\) .*/\1/p'; }   # enum <run output>: its entry's number
+  t    "a new install sets DEBUG_RUN_TIMEOUT=600" grep -qx 'DEBUG_RUN_TIMEOUT="600"' "$R/.agents/harness.conf"
+  s0=$SECONDS
+  out="$("$RX" run reproduce --attempt=reproduce --timeout=1 -- sh -c 'echo started; sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child" 2>&1)" && rc=0 || rc=$?
+  n="$(enum "$out")"
+  t    "past --timeout: exit 124, within a few seconds" bash -c "test $rc = 124 && test $((SECONDS - s0)) -lt 10"
+  t    "...the entry is still recorded: exit 124 and a timed-out line" bash -c "grep -qx 'exit: 124' '$RE/E-$n.md' && grep -qx 'timed out: after 1s' '$RE/E-$n.md'"
+  t    "...with the output so far in the log and the tail" bash -c "grep -qx started '$RE/E-$n.log' && grep -qx started '$RE/E-$n.md'"
+  t    "...run prints the entry line, then the timed-out note" bash -c "printf '%s\n' \"\$1\" | sed -n 1p | grep -qF 'E-$n (reproduce, reproduce attempt, exit 124): ' && printf '%s\n' \"\$1\" | sed -n 2p | grep -qx 'timed out: after 1s'" _ "$out"
+  t    "...and still asks for the outcome" hasl "$out" "record the outcome: .agents/commands/debug outcome E-$n reproduced|partial|not-reproduced"
+  t    "...a child it started doesn't survive" gone "$WORK/debugrun.child"
+  "$RX" outcome "E-$n" reproduced >/dev/null
+  t    "a hang reproduced this way is a reproduction" bash -c "'$RX' status | grep -qxF 'confidence: reproduced'"
+  s0=$SECONDS
+  out="$("$RX" run reproduce --timeout=1 -- sh -c 'trap "" TERM; echo $$ > "$1"; sleep 30' _ "$WORK/debugrun.stubborn" 2>&1)" && rc=0 || rc=$?
+  t    "a command that ignores SIGTERM is killed after the grace period (124)" bash -c "test $rc = 124 && test $((SECONDS - s0)) -lt 15"
+  t    "...and doesn't survive"          gone "$WORK/debugrun.stubborn"
+  edit "$R/.agents/harness.conf" 's/^DEBUG_RUN_TIMEOUT=.*/DEBUG_RUN_TIMEOUT="1"/'
+  trc  "DEBUG_RUN_TIMEOUT applies without --timeout (124)" 124 "$RX" run reproduce -- sleep 3
+  trc  "...--timeout wins over it"       0 "$RX" run reproduce --timeout=10 -- sleep 3
+  trc  "...--timeout=0 means no limit"   0 "$RX" run reproduce --timeout=0 -- sleep 3
+  edit "$R/.agents/harness.conf" 's/^DEBUG_RUN_TIMEOUT=.*/DEBUG_RUN_TIMEOUT="0"/'
+  trc  "DEBUG_RUN_TIMEOUT=0 means no limit" 0 "$RX" run reproduce -- sleep 3
+  GP="$R/.agents/builtin/workflows/debug"
+  GC="import sys; sys.path.insert(0, sys.argv[1]); import debug_tools as d; print('[%s]' % d.load_conf(sys.argv[2])[sys.argv[3]])"
+  edit "$R/.agents/harness.conf" '/^DEBUG_RUN_TIMEOUT=/d'
+  t    "upgrade: no DEBUG_RUN_TIMEOUT line means 600" test "$(python3 -B -c "$GC" "$GP" "$R" DEBUG_RUN_TIMEOUT 2>&1)" = "[600]"
+  printf 'DEBUG_RUN_TIMEOUT=""\n' >> "$R/.agents/harness.conf"
+  t    "...and so does an empty one"     test "$(python3 -B -c "$GC" "$GP" "$R" DEBUG_RUN_TIMEOUT 2>&1)" = "[600]"
+  nmd=$(find "$RE" -name 'E-*.md' | wc -l | tr -d ' ')
+  for v in abc -1 1.5 '' 1234567890; do
+    out="$("$RX" run reproduce --timeout="$v" -- true 2>&1)" && rc=0 || rc=$?
+    t  "--timeout='$v': exit 2, saying why" bash -c "test $rc = 2 && printf '%s\n' \"\$1\" | grep -qxF \"debug: run: --timeout takes a whole number of seconds (0 means no limit), not '$v'\"" _ "$out"
+  done
+  trc  "--timeout with no value: an unknown option (3)" 3 "$RX" run reproduce --timeout -- true
+  printf 'DEBUG_RUN_TIMEOUT="soon"\n' >> "$R/.agents/harness.conf"
+  out="$("$RX" run reproduce -- true 2>&1)" && rc=0 || rc=$?
+  t    "a DEBUG_RUN_TIMEOUT that isn't a number: infra (3)" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qxF \"infra: DEBUG_RUN_TIMEOUT: 'soon' isn't a whole number of seconds (0 means no limit)\"" _ "$out"
+  t    "...and nothing ran for any of these" test "$(find "$RE" -name 'E-*.md' | wc -l | tr -d ' ')" = "$nmd"
+  out="$("$R/.agents/bin/verify" --no-cache 2>&1)" && rc=0 || rc=$?
+  t    "...and verify says so too (3)"   bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qF \"DEBUG_RUN_TIMEOUT: 'soon' isn't a whole number of seconds\"" _ "$out"
+  edit "$R/.agents/harness.conf" '/^DEBUG_RUN_TIMEOUT=/d'
+  rm -f "$WORK/debugrun.child2"
+  "$RX" run gather-evidence -- sh -c 'echo before; sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child2" > "$WORK/debugrun.term.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.child2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  kill -TERM "$bgrun"; rc=0; wait "$bgrun" || rc=$?
+  n="$(enum "$(cat "$WORK/debugrun.term.out")")"
+  t    "debug run stopped with SIGTERM: stops its command, records the entry (143)" bash -c "test $rc = 143 && test -n '$n' && grep -qx 'exit: 143' '$RE/E-$n.md' && grep -qx before '$RE/E-$n.log'"
+  t    "...and the command's child doesn't survive" gone "$WORK/debugrun.child2"
+  rm -f "$WORK/debugrun.stubborn2"
+  "$RX" run reproduce --timeout=1 -- sh -c 'trap "" TERM; echo $$ > "$1"; sleep 30' _ "$WORK/debugrun.stubborn2" > "$WORK/debugrun.grace.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.stubborn2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 2   # past the limit, inside the grace period
+  kill -TERM "$bgrun" 2>/dev/null || true; rc=0; wait "$bgrun" || rc=$?
+  n="$(enum "$(cat "$WORK/debugrun.grace.out")")"
+  t    "SIGTERM during the grace period: still 124, and the entry is written" bash -c "test $rc = 124 && test -n '$n' && grep -qx 'exit: 124' '$RE/E-$n.md'"
+  t    "...and the command is still killed" gone "$WORK/debugrun.stubborn2"
+  rm -f "$WORK/debugrun.child3"
+  "$RX" run gather-evidence -- sh -c 'sleep 30 & echo $! > "$1"; wait' _ "$WORK/debugrun.child3" > "$WORK/debugrun.hup.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.child3" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  kill -HUP "$bgrun"; rc=0; wait "$bgrun" || rc=$?
+  t    "SIGHUP too: the command stopped, the entry recorded (129)" bash -c "test $rc = 129 && test -s '$WORK/debugrun.child3' && ! kill -0 \$(cat '$WORK/debugrun.child3') 2>/dev/null && grep -qx 'exit: 129' '$RE/E-$(enum "$(cat "$WORK/debugrun.hup.out")").md'"
+  rm -f "$WORK/debugrun.int"
+  # A background job starts with SIGINT ignored; the helper puts it back, as in a terminal.
+  python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "$RX" run gather-evidence -- sh -c 'trap "echo got INT first; exit 7" INT; trap "echo got TERM first; exit 8" TERM; echo $$ > "$1"; while :; do sleep 0.1; done' _ "$WORK/debugrun.int" > "$WORK/debugrun.int.out" 2>&1 & bgrun=$!
+  i=0; while [ ! -s "$WORK/debugrun.int" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
+  kill -INT "$bgrun"; rc=0; wait "$bgrun" || rc=$?
+  n="$(enum "$(cat "$WORK/debugrun.int.out")")"
+  t    "debug run stopped with SIGINT: SIGINT goes to the command first, the entry is recorded (130)" bash -c "test $rc = 130 && test -n '$n' && grep -qx 'exit: 130' '$RE/E-$n.md' && grep -qx 'got INT first' '$RE/E-$n.log'"
+  t    "...and the command doesn't survive" gone "$WORK/debugrun.int"
+  GW='import os, signal, subprocess, sys
+signal.signal(signal.SIGINT, signal.default_int_handler)   # as in a terminal, not a background job
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+real, kids = subprocess.Popen, []
+def popen(*a, **k):   # the signal lands as the command starts, before run_captured holds it
+    p = real(*a, **k); kids.append(p.pid); os.kill(os.getpid(), getattr(signal, sys.argv[2])); return p
+subprocess.Popen = popen
+old = d.catch_signals()
+with open(os.devnull, "wb") as fh:
+    rc = d.run_captured(["sleep", "30"], ".", fh, 0)[0]
+d.restore_signals(old)
+try:
+    os.kill(kids[0], 0); print(rc, "running", kids[0])
+except OSError:
+    print(rc, "stopped")'
+  for sig in TERM INT; do
+    out="$(python3 -B -c "$GW" "$GP" "SIG$sig" 2>&1)" || true
+    t  "a SIG$sig while the command starts: it's still stopped ($((128 + $(kill -l $sig))))" test "$out" = "$((128 + $(kill -l $sig))) stopped"
+    case "$out" in *" running "*) kill "${out##* }" 2>/dev/null || true ;; esac
+  done
+  GE='import os, signal, subprocess, sys
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+kids, real_hold, real = [], d.hold_signals, subprocess.Popen
+def popen(*a, **k):
+    p = real(*a, **k); kids.append(p.pid); return p
+subprocess.Popen = popen
+def hold():   # the signal lands in the time-out handler, before it holds signals
+    d.hold_signals = real_hold; os.kill(os.getpid(), signal.SIGTERM); real_hold()
+d.hold_signals = hold
+old = d.catch_signals()
+with open(os.devnull, "wb") as fh:
+    rc = d.run_captured(["sleep", "30"], ".", fh, 1)[0]
+d.restore_signals(old)
+try:
+    os.kill(kids[0], 0); print(rc, "running", kids[0])
+except OSError:
+    print(rc, "stopped")'
+  out="$(python3 -B -c "$GE" "$GP" 2>&1)" || true
+  t    "a SIGTERM as the time limit hits: the command is still stopped (143)" test "$out" = "143 stopped"
+  case "$out" in *" running "*) kill "${out##* }" 2>/dev/null || true ;; esac
+  GB='import os, signal, subprocess, sys
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+def popen(*a, **k): raise SystemExit("started")
+subprocess.Popen = popen
+old = d.catch_signals()
+os.kill(os.getpid(), signal.SIGHUP)   # before the command starts
+with open(os.devnull, "wb") as fh:
+    print(d.run_captured(["true"], ".", fh, 0)[0])
+d.restore_signals(old)'
+  t    "a signal before the command starts: it isn't started (129)" test "$(python3 -B -c "$GB" "$GP" 2>&1)" = 129
+  GN='import signal, sys
+sys.modules["fcntl"] = None; del signal.SIGHUP   # as on a Python without them (Windows)
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+print(len(d.STOP_SIGNALS), d.run_lock(sys.argv[2]))'
+  t    "the pack still loads without fcntl or SIGHUP (the checks need it)" test "$(python3 -B -c "$GN" "$GP" "$WORK" 2>&1)" = "2 None"
+  GX='import os, sys
+del os.killpg   # as on a Python without process groups (Windows)
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+sys.exit(d.main(["debug_tools.py", "cli", sys.argv[2], "run", "gather-evidence", "--", "true"]))'
+  nlog=$(find "$RE" -name 'E-*.log' | wc -l | tr -d ' ')
+  out="$(python3 -B -c "$GX" "$GP" "$R" 2>&1)" && rc=0 || rc=$?
+  t    "no process groups (Windows): debug run refuses (3) and runs nothing" bash -c "test $rc = 3 && printf '%s\n' \"\$1\" | grep -qxF 'infra: debug run needs a POSIX system (process groups) to stop what it starts' && test \$(find '$RE' -name 'E-*.log' | wc -l | tr -d ' ') = $nlog" _ "$out"
+  GK='import signal, subprocess, sys, time
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+signal.alarm(20)   # the old code waited forever
+class Proc:   # a command that never ends: the group is gone, but it never gets reaped
+    pid = 2 ** 22 + 12345
+    def poll(self): return None
+    def wait(self, timeout=None):
+        if timeout is None: time.sleep(3600)
+        raise subprocess.TimeoutExpired("x", timeout)
+d.GRACE = 1
+print(d.stop_group(Proc()))'
+  t    "a command that won't be reaped: stopping it gives up after the grace period" test "$(python3 -B -c "$GK" "$GP" 2>&1)" = "False"
+  GM='import os, sys
+sys.path.insert(0, sys.argv[1]); import debug_tools as d
+d.use_shapes(sys.argv[2])
+def boom(text): raise ValueError("boom")
+d.gs.mask_lines = boom
+log = sys.argv[3]
+with open(log, "w") as fh: fh.write("x\n")
+try:
+    d.mask_log(log)
+except d.ConfError:
+    print("ConfError", os.path.exists(log), os.path.exists(log + ".masking"))'
+  t    "masking that fails in any way: ConfError, no raw log or .masking file left" test "$(python3 -B -c "$GM" "$GP" "$R" "$WORK/debugrun-boom.log" 2>&1)" = "ConfError False False"
+  mv "$R/.agents/core/guard.patterns" "$WORK/debugrun.guard.patterns"
+  out="$("$RX" run gather-evidence -- true 2>&1)" && rc=0 || rc=$?
+  t    "no .agents/core/guard.patterns: infra (3), nothing captured unmasked" bash -c "test $rc = 3 && printf '%s' \"\$1\" | grep -qxF \"infra: this project's harness has no secret rules in .agents/core/guard.patterns, so debug run can't mask secrets; re-run install.sh\"" _ "$out"
+  printf '# no secret rules\n' > "$R/.agents/core/guard.patterns"
+  trc  "...nor any secret rule in it (3)" 3 "$RX" run gather-evidence -- true
+  mv "$WORK/debugrun.guard.patterns" "$R/.agents/core/guard.patterns"
+  out="$("$RX" run reproduce --timeout=1 -- sh -c "echo id $FAKE_AWS; sleep 30" 2>&1)" && rc=0 || rc=$?
+  t    "timed out and masked: both notes, in that order" bash -c "test $rc = 124 && test \"\$(printf '%s\n' \"\$1\" | sed -n 2,3p | tr '\n' '|')\" = 'timed out: after 1s|masked: 2 possible secrets|'" _ "$out"
+  DK="$R/.agents/builtin/workflows/debug/kinds/bug.md"; DS="$R/.agents/skills/debug/SKILL.md"
+  t    "the bug steps bisect with no time limit, so git bisect reset always runs" grep -qF "debug run isolate --timeout=0 -- bash -c 'git bisect start" "$DK"
+  t    "...and give a test that can hang a limit of its own" grep -qF '`debug run` stops it before `git bisect reset`' "$DK"
+  t    "the skill names the time limit"  grep -qF -- '--timeout=<sec>' "$DS"
+  t    "no .masking file is left after any of these runs" test -z "$(find "$R/.agents/debug" -name '*.masking')"
+fi
+}
+group grp_debug_run
+grp_debug_kinds() {   # the failing-test, crash, and field workflows (docs/specs/2026-10-04-debug-kinds-design.md)
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "debug workflows: failing test, crash, field"
+  Q=$(repo debugkinds)
+  mkdir -p "$Q/src"; printf 'int add(int a, int b) { return a - b; }\n' > "$Q/src/calc.c"; commit "$Q" base
+  "$HARNESS/install.sh" --team --workflow debug "$Q" >/dev/null 2>&1
+  for tier in edit turn full; do printf '#!/usr/bin/env bash\nexit 0\n' > "$Q/.agents/checks/$tier.sh"; done
+  commit "$Q" harness
+  QX="$Q/.agents/commands/debug"; QK="$Q/.agents/builtin/workflows/debug/kinds"; QS="$Q/.agents/debug/sessions"
+  QP="$Q/.agents/debug/playbook.md"
+  kindchk() {  # kindchk <kind> <its steps> <its bindable steps, comma-separated>: what every workflow must do
+    local k="$1" steps="$2" unbound="$3" f="$QK/$1.md" out slug b
+    edit "$Q/.agents/harness.conf" "s/^DEBUG_KINDS=.*/DEBUG_KINDS=\"bug $k\"/"
+    t    "$k: the kind file's steps, in order" test "$(sed -n 's/^steps: //p' "$f")" = "$steps"
+    t    "$k: a section per step"        bash -c "for s in $steps; do grep -q \"^## [0-9]\\. \$s\$\" '$f' || exit 1; done"
+    out="$(printf 'Report for %s\n' "$k" | "$QX" start "$k" - 2>&1)"
+    slug="$k-report-for-$k"
+    t    "$k: debug start $k - works"   hasl "$out" "started $slug ($k, pasted report): .agents/debug/sessions/$slug"
+    t    "$k: steps: names its kind file" hasl "$out" "steps: .agents/builtin/workflows/debug/kinds/$k.md"
+    t    "$k: the session starts at intake" grep -qx 'step: intake' "$QS/$slug/state"
+    t    "$k: status lists its unbound steps" hasl "$("$QX" status)" "steps with no playbook bindings: $unbound (.agents/debug/playbook.md)"
+    t    "$k: debug run takes each of its steps" bash -c "for s in $steps; do '$QX' run \$s -- true >/dev/null || exit 1; done"
+    b="$(sed -n 's/^bindable: //p' "$f")"
+    for s in $b; do printf '## %s\n- run: echo %s\n\n' "$s" "$s"; done > "$QP"
+    t    "$k: a binding for each bindable step passes the playbook check" test "$("$Q/.agents/bin/verify" --tier=full --no-cache 2>&1)" = "ok verify full"
+    out="$("$QX" status 2>&1)"
+    t    "$k: ...and status, still on the session," hasl "$out" "session: $slug ($k, "
+    tnot "$k: ...lists none" hasl "$out" "steps with no playbook bindings"
+    git -C "$Q" checkout -q .agents/debug/playbook.md
+    "$QX" close "$slug" abandoned >/dev/null
+  }
+  echo "debug: the failing-test workflow"
+  kindchk test "intake reproduce gather-evidence hypothesize isolate root-cause check-in" "intake, reproduce, gather-evidence, isolate"
+  t    "test: intake fetches the failed CI log" grep -qF 'gh run view <run-id> --log-failed' "$QK/test.md"
+  recipe="$(sed -n "s/.*-- bash -c '\(p=0; f=0; .*\)'\`\.\$/\1/p" "$QK/test.md")"
+  "$QX" start test - <<< 'add test flakes' >/dev/null
+  fake='[ $((i % 4)) -ne 0 ]'   # fails every 4th run
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/$fake}" 2>&1)" && rc=0 || rc=$?
+  t    "test: the steps' run-it-N-times recipe counts passes and fails" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'passed 15, failed 5'" _ "$out" "$recipe"
+  t    "test: a flaky failure is partial, a pass here a finding" bash -c "grep -qF 'some is \`partial\`' '$QK/test.md' && grep -qF 'A pass here is a finding in itself' '$QK/test.md'"
+  t    "test: the CI log comes in as evidence, not in report.md" bash -c "grep -qF 'the failed job'\''s log as evidence (\`debug run intake\`)' '$QK/test.md' && ! grep -qF 'CI job or run, and its log' '$QK/test.md'"
+  t    "test: a long count asks the agent's tool for a longer timeout" grep -qF 'ask your tool for a' "$QK/test.md"
+  t    "test: the test, flakiness, and the environment are causes too" bash -c "grep -qF 'the test is wrong' '$QK/test.md' && grep -qF 'not the code' '$QK/test.md'"
+  echo "debug: the crash and hang workflow"
+  kindchk crash "intake reproduce gather-evidence hypothesize isolate root-cause check-in" "intake, reproduce, gather-evidence, isolate"
+  t    "crash: a hang is reproduced with a time limit" grep -qF 'debug run reproduce --attempt=reproduce --timeout=60 -- <command>' "$QK/crash.md"
+  t    "crash: a core file is read in batch mode" bash -c "grep -qF 'gdb -batch -ex bt <binary> <core>' '$QK/crash.md' && grep -qF \"lldb --batch -c <core> -o 'bt all' <binary>\" '$QK/crash.md'"
+  recipe="$(sed -n "s/.*debug run reproduce --attempt=reproduce -- bash -c '\(f=0; .*\)'\`\.\$/\1/p" "$QK/crash.md")"
+  "$QX" start crash - <<< 'the server hangs' >/dev/null
+  fake='[ $((i % 5)) -ne 0 ]'   # fails every 5th run
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/$fake}" 2>&1)" && rc=0 || rc=$?
+  t    "crash: the steps' repeat-and-count recipe counts the runs that fail" bash -c "test -n \"\$2\" && test $rc = 1 && printf '%s\n' \"\$1\" | grep -qx 'failed 4 of 20'" _ "$out" "$recipe"
+  recipe="$(sed -n "s/.*debug run gather-evidence --timeout=90 -- bash -c '\(<command> .*\)'\`,\$/\1/p" "$QK/crash.md")"
+  recipe="${recipe//<command>/sleep 30}"; recipe="${recipe//sleep 20/sleep 1}"
+  dump='ps -o pid= -p $pid'
+  out="$("$QX" run gather-evidence --timeout=20 -- bash -c "${recipe//<dump>/$dump}" 2>&1)" && rc=0 || rc=$?
+  t    "crash: the steps' thread-dump recipe dumps the running process, exits with the dump's code" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | sed -n 2p | grep -qE '^ *[0-9]+\$'" _ "$out" "$recipe"
+  hung="$(printf '%s\n' "$out" | sed -n 2p | tr -d ' ')"
+  t    "...and stops it after"            bash -c "test -n '$hung' && ! kill -0 '$hung' 2>/dev/null"
+  t    "crash: when attaching is refused, the tool launches the program" bash -c "grep -qF 'ptrace scope 1' '$QK/crash.md' && grep -qF 'pkill -INT -P \$!' '$QK/crash.md'"
+  t    "crash: unbuffered through env (debug run runs argv as is)" grep -qF '`env PYTHONUNBUFFERED=1 <command>`' "$QK/crash.md"
+  t    "every bisect turns a crash into a plain failure, with its own limit" bash -c "for k in bug test crash field; do grep -qF 'timeout -k 5 60 <command>; rc=\$?; [ \"\$rc\" -lt 125 ] || [ \"\$rc\" -gt 127 ] || exit 255; [ \"\$rc\" -eq 0 ] || exit 1' '$QK/'\$k.md || exit 1; done"
+  t    "every workflow uses the shared playbook's bindings that fit it" bash -c "for k in bug test crash field; do grep -qF 'the bindings that fit this one' '$QK/'\$k.md || exit 1; done"
+  t    "crash: the root cause names the faulting path:line and the bad state" grep -qF 'names the faulting `path:line` and the bad state that reached it' "$QK/crash.md"
+  echo "debug: the field issue workflow"
+  kindchk field "intake gather-evidence reproduce hypothesize isolate root-cause check-in" "intake, gather-evidence, reproduce, isolate"
+  t    "field: scrubbing lives in the gather-evidence binding, errors and exit code included" bash -c "grep -qF 'run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub' '$QK/field.md' && grep -qF \"bash -c 'set -o pipefail; <line>'\" '$QK/field.md'"
+  t    "field: evidence-only is acceptable, with what would confirm it" bash -c "grep -qF 'Confidence will often be \`evidence-only\`' '$QK/field.md' && grep -qF 'what logging or telemetry' '$QK/field.md'"
+  t    "field: raw customer data stays out of the root cause" grep -qF 'Raw customer data never goes in `root-cause.md` or the ticket' "$QK/field.md"
+  printf 'int add(int a, int b) { return a + b; }\n' > "$Q/src/calc.c"; commit "$Q" "add adds"
+  "$QX" start field - <<< 'totals are wrong on v1' >/dev/null
+  recipe="$(sed -n "s/.*debug run reproduce --attempt=reproduce -- bash -c '\(cd .*\)'\`\$/\1/p" "$QK/field.md")"
+  recipe="${recipe//<ver>/v1}"
+  (cd "$Q" && git worktree add -q --detach ../repro-v1 HEAD~1)
+  out="$("$QX" run reproduce --attempt=reproduce -- bash -c "${recipe//<command>/cat src/calc.c}" 2>&1)" && rc=0 || rc=$?
+  t    "field: the steps' old-version recipe runs the old version from a worktree" bash -c "test -n \"\$2\" && test $rc = 0 && printf '%s\n' \"\$1\" | grep -qxF 'int add(int a, int b) { return a - b; }'" _ "$out" "$recipe"
+  (cd "$Q" && git worktree remove --force ../repro-v1)
+  t    "...and the worktree is gone after"  bash -c "test ! -e '$WORK/repro-v1' && ! git -C '$Q' worktree list | grep -q repro-v1"
+  echo "debug: which workflows are on"
+  Z=$(repo debugkinds-new); "$HARNESS/install.sh" --team --workflow debug "$Z" >/dev/null 2>&1
+  t    "a new install turns all four on" grep -qx 'DEBUG_KINDS="bug test crash field"' "$Z/.agents/harness.conf"
+  t    "...and starts a crash session"   bash -c "printf 'New install crash\n' | '$Z/.agents/commands/debug' start crash - | grep -q '^started crash-new-install-crash '"
+  tnot "...and the comment no longer says the others come later" grep -q 'come later' "$Z/.agents/harness.conf"
+  edit "$Q/.agents/harness.conf" '/^DEBUG_KINDS=/d'
+  t    "upgrade: no DEBUG_KINDS line, all four are on" bash -c "for k in bug test crash field; do printf 'Missing key %s\n' \$k | '$QX' start \$k - | grep -q \"^started \$k-missing-key-\$k \" || exit 1; done"
+  printf 'DEBUG_KINDS="bug"\n' >> "$Q/.agents/harness.conf"
+  "$HARNESS/install.sh" --team "$Q" >/dev/null 2>&1
+  t    "upgrade: a re-install keeps the project's DEBUG_KINDS=\"bug\" line" bash -c "test \$(grep -c '^DEBUG_KINDS=' '$Q/.agents/harness.conf') = 1 && grep -qx 'DEBUG_KINDS=\"bug\"' '$Q/.agents/harness.conf'"
+  out="$(printf 'Old install\n' | "$QX" start test - 2>&1)" && rc=0 || rc=$?
+  t    "...which refuses debug start test with the usual message (2)" bash -c "test $rc = 2 && printf '%s' \"\$1\" | grep -qxF \"debug: the test workflow isn't on here (DEBUG_KINDS in .agents/harness.conf: bug)\"" _ "$out"
+  t    "...and starts bug as before"     bash -c "printf 'Old install bug\n' | '$QX' start bug - | grep -q '^started bug-old-install-bug '"
+  echo "debug: the skill and harness-tailor know all four"
+  DS="$Q/.agents/skills/debug/SKILL.md"; HT="$Q/.agents/builtin/skills/harness-tailor/SKILL.md"
+  t    "the skill's description names each kind" grep -q '^description: Investigates a bug report, a failing test or CI run, a crash or hang, or a field or production issue' "$DS"
+  t    "...and so does AGENTS.md's skills index" grep -q '^- `debug`: Investigates a bug report, a failing test or CI run, a crash or hang' "$Q/AGENTS.md"
+  t    "the skill says which kind to start" bash -c "grep -qF '.agents/commands/debug start <kind> <ref>' '$DS' && for k in bug test crash field; do grep -qF \"\\\`\$k\\\` (\" '$DS' || exit 1; done"
+  t    "the skill explains masked output" grep -qF '`[masked]`' "$DS"
+  t    "harness-tailor looks for the CI CLI" grep -qF 'gh run view <run-id> --log-failed' "$HT"
+  t    "...debuggers, thread dumps, and sanitizer builds" bash -c "grep -qF 'lldb --batch' '$HT' && grep -qF 'py-spy dump --pid <pid>' '$HT' && grep -qF 'ASan+UBSan' '$HT'"
+  t    "...log pulls through the repo's scrubber" grep -qF 'run: scripts/pull-logs.sh <id> 2>&1 | scripts/scrub' "$HT"
+  t    "...replacing an older debug line in AGENTS.md" grep -qF 'replace an older `debug` line if there is one' "$HT"
+  t    "...never runs a binding that pulls field data to prove it" grep -qF '(unverified: pulls field data; first run in a session)' "$HT"
+  t    "...and marks bindings for one workflow with a plain line" grep -qF '`For field issues:`' "$HT"
+  t    "the skill runs a binding's pipe with pipefail" grep -qF "bash -c 'set -o pipefail; <line>'" "$DS"
+fi
+}
+group grp_debug_kinds
 
 grp_packmech() {
 echo "workflow pack mechanisms (policy snippet, seed files, commit-msg check)"
