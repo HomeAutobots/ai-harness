@@ -7300,6 +7300,8 @@ W3=$(repo work-local)
 "$HARNESS/install.sh" --local "$W3" >/dev/null 2>&1
 mkdir -p "$W3/.agents/work/scratch/y"; echo hi > "$W3/.agents/work/scratch/y/out.log"
 t    "local mode: git doesn't see it"  bash -c "cd '$W3' && test -z \"\$(git status --porcelain --untracked-files=all -- .agents/work)\""
+t    "AGENTS.md has the workspace rule" grep -qF 'Throwaway files (scripts, logs, notes, drafts) go in `.agents/work/scratch/<slug>/`' "$W/AGENTS.md"
+t    "plan-task points at the plan's scratch folder" grep -qF '.agents/work/scratch/<slug>/' "$W/.agents/builtin/skills/plan-task/SKILL.md"
 }
 group grp_work
 

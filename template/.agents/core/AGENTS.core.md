@@ -17,3 +17,4 @@ Quiet on success. Exit 0 ok, 1 findings, 2 policy block, 3 tooling problem.
 ### Work that spans sessions
 - More than a few steps, or likely to outlive this session: use the `plan-task` skill. Its gates use the `validate` skill.
 - Resuming: `.agents/bin/tasks list`, then `.agents/bin/tasks next <slug>` and `git log --oneline -10`.
+- Throwaway files (scripts, logs, notes, drafts) go in `.agents/work/scratch/<slug>/` (the plan's slug, or a short name), never in the repo tree; scripts worth reusing go in `.agents/work/scripts/`. See `.agents/work/README.md`.

@@ -21,7 +21,7 @@ The ledger (plan.md, tasks.json, questions.json, progress.log) is how work survi
 ## Work the ledger
 One task at a time:
 1. `tasks set <slug> <id> doing`
-2. Make the change. Run `.agents/bin/check` on touched files as you go.
+2. Make the change. Run `.agents/bin/check` on touched files as you go. Working files for the plan (repro scripts, logs, notes) go in `.agents/work/scratch/<slug>/`; `tasks` archives that folder when the last task is done.
 3. `.agents/bin/verify` must pass. Where the workflow has a test or implementation gate, run `validate` for it before moving on.
 4. Commit only if plan.md says `Commits: auto` and the repo's git workflow lets you (`commit` in `GIT_AGENT_MAY`), with `gitflow commit` (see `git-workflow`). With `Commits: ask` (the default), leave it for the human's commit gate.
 5. `tasks set <slug> <id> done [commit-sha]`
