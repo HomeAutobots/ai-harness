@@ -30,7 +30,7 @@ In local mode (`HARNESS_MODE=local` in `harness.conf`, the default), everything 
 | `policy.conf` | project | Commands and paths agents may not touch |
 | `guard.allow`, `baselines/` | project | Approved exceptions; pre-existing findings |
 | `skills.lock` | project | Third-party skills pinned by content hash (`sync --lock-skill`) |
-| `context/`, `plans/`, `evals/` | project | On-demand docs, plan ledgers (gitignored), eval tasks |
+| `context/`, `plans/`, `evals/`, `work/` | project | On-demand docs, plan ledgers (gitignored), eval tasks, agents' working files (gitignored: scratch, scripts, references, reports, requirements) |
 | `generated.lock` | sync | Tracks what sync added to shared config files, and hashes of agent renders and skill copies |
 | `cache/` | local | Logs, verify cache, hook state (gitignored) |
 

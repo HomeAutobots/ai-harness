@@ -263,6 +263,10 @@ seed .agents/context
 seed .agents/plans
 seed .agents/evals
 seed .agents/library
+seed .agents/work
+for d in scratch scripts references reports requirements; do
+  mkdir -p "$DEST/.agents/work/$d"
+done
 for tier in edit turn full; do
   seed ".agents/checks/$tier.sh"
 done

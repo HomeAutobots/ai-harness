@@ -7277,6 +7277,32 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and writes nothing"           bash -c "test ! -e '$MA/.cursor/mcp.json' && cmp -s '$MA/.mcp.json' '$WORK/abs.mcp' && cmp -s '$MA/.codex/config.toml' '$WORK/abs.toml' && ! grep -q '\"mcp\"' '$MA/.agents/generated.lock'"
 fi
 
+grp_work() {   # .agents/work, the AI workspace (docs/specs/2026-10-06-ai-workspace-design.md)
+echo "work: the workspace"
+W=$(repo work)
+"$HARNESS/install.sh" --team "$W" >/dev/null 2>&1
+t    "install seeds .agents/work"     bash -c "test -f '$W/.agents/work/README.md' && test -f '$W/.agents/work/.gitignore'"
+t    "...with its five folders"       bash -c "cd '$W/.agents/work' && test -d scratch && test -d scripts && test -d references && test -d reports && test -d requirements"
+mkdir -p "$W/.agents/work/scratch/x"; echo hi > "$W/.agents/work/scratch/x/notes.md"; echo hi > "$W/.agents/work/scripts/tool.sh"
+t    "team mode: what's in it stays out of git" bash -c "cd '$W' && test -z \"\$(git status --porcelain --untracked-files=all -- .agents/work/scratch .agents/work/scripts)\""
+t    "...its README and .gitignore can be committed" bash -c "cd '$W' && git add .agents/work && test \"\$(git ls-files .agents/work | tr '\n' ' ')\" = '.agents/work/.gitignore .agents/work/README.md '"
+printf '# ours\n' > "$W/.agents/work/README.md"; rm -rf "$W/.agents/work/reports"
+"$HARNESS/install.sh" --team "$W" >/dev/null 2>&1
+t    "upgrade: an existing README is kept" grep -qx '# ours' "$W/.agents/work/README.md"
+t    "...a missing folder comes back"  test -d "$W/.agents/work/reports"
+t    "...and scratch is untouched"     test -f "$W/.agents/work/scratch/x/notes.md"
+W2=$(repo work-old)
+"$HARNESS/install.sh" --team "$W2" >/dev/null 2>&1
+rm -rf "$W2/.agents/work"
+"$HARNESS/install.sh" --team "$W2" >/dev/null 2>&1
+t    "upgrade of an install without it seeds it" test -f "$W2/.agents/work/.gitignore"
+W3=$(repo work-local)
+"$HARNESS/install.sh" --local "$W3" >/dev/null 2>&1
+mkdir -p "$W3/.agents/work/scratch/y"; echo hi > "$W3/.agents/work/scratch/y/out.log"
+t    "local mode: git doesn't see it"  bash -c "cd '$W3' && test -z \"\$(git status --porcelain --untracked-files=all -- .agents/work)\""
+}
+group grp_work
+
 echo "guards"
 wait_group grp_tasks; P="$WORK/fresh"   # the fresh install, once the last group using it is done
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
