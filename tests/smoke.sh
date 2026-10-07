@@ -1759,6 +1759,10 @@ if [ "$HAVE_PY" -eq 1 ] && command -v ruff >/dev/null 2>&1 && command -v pytest 
   printf 'EDIT_BUDGET=120\n' >> "$PR/.agents/harness.conf"
   t    "clean tree: turn and full ok" bash -c "cd '$PR' && .agents/bin/verify --no-cache | grep -qx 'ok verify turn' && .agents/bin/verify --tier=full --no-cache | grep -qx 'ok verify full'"
   t    "...and git status stays clean" test -z "$(git -C "$PR" status --porcelain)"
+  mkdir -p "$PR/.agents/work/scratch/try"
+  printf 'import os\n\n\ndef test_scratch():\n    assert False\n' > "$PR/.agents/work/scratch/try/test_scratch.py"
+  t    "a test file in .agents/work: no lint finding, not collected" bash -c "cd '$PR' && .agents/bin/verify --no-cache | grep -qx 'ok verify turn' && .agents/bin/verify --tier=full --no-cache | grep -qx 'ok verify full'"
+  rm -rf "$PR/.agents/work/scratch/try"
   printf 'import os\ndef add(a: int, b: int) -> int:\n    return  a + b\n' > "$PR/src/calc/ops.py"
   out="$("$PR/.agents/bin/check" src/calc/ops.py 2>&1 || true)"
   t    "edit: ruff's unused import"   hasl "$out" 'src/calc/ops.py:1:8: error: `os` imported but unused [F401]'
