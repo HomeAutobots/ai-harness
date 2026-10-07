@@ -7416,6 +7416,46 @@ fi
 }
 group grp_work_remind
 
+grp_work_tasks() {   # tasks archives a plan's scratch folder on close and restores it on reopen
+echo "work: archive and restore"
+TK=$(repo worktasks)
+"$HARNESS/install.sh" --team "$TK" >/dev/null 2>&1
+X="$TK/.agents/bin/tasks"; WS="$TK/.agents/work/scratch"
+(cd "$TK" && "$X" new fix "Fix" >/dev/null && "$X" add fix a >/dev/null && "$X" add fix b >/dev/null)
+mkdir -p "$WS/fix" "$WS/notaplan"; echo n > "$WS/fix/notes.md"
+(cd "$TK" && "$X" set fix T1 "done" >/dev/null)
+t    "a task still open: the folder stays" test -f "$WS/fix/notes.md"
+out="$(cd "$TK" && "$X" set fix T2 "done")"
+t    "the last done archives it"     bash -c "test -f '$WS/_done/fix/notes.md' && test ! -e '$WS/fix'"
+t    "...and says so"                bash -c "printf '%s\n' \"\$1\" | grep -qxF 'archived .agents/work/scratch/fix to .agents/work/scratch/_done/fix'" _ "$out"
+t    "a folder with no plan never moves" test -d "$WS/notaplan"
+out="$(cd "$TK" && "$X" set fix T2 doing)"
+t    "set back to doing restores it" bash -c "test -f '$WS/fix/notes.md' && test ! -e '$WS/_done/fix'"
+t    "...and says so"                bash -c "printf '%s\n' \"\$1\" | grep -qxF 'restored .agents/work/scratch/_done/fix to .agents/work/scratch/fix'" _ "$out"
+(cd "$TK" && "$X" set fix T2 "done" >/dev/null && "$X" add fix c >/dev/null)
+t    "tasks add restores it too"     test -f "$WS/fix/notes.md"
+mkdir -p "$WS/_done/fix"; echo old > "$WS/_done/fix/old.md"
+(cd "$TK" && "$X" set fix T3 "done" >/dev/null)
+t    "a second archive gets .2, never overwriting" bash -c "test -f '$WS/_done/fix.2/notes.md' && test -f '$WS/_done/fix/old.md'"
+(cd "$TK" && "$X" set fix T3 todo >/dev/null)
+t    "reopening restores the newest" bash -c "test -f '$WS/fix/notes.md' && test -f '$WS/_done/fix/old.md' && test ! -e '$WS/_done/fix.2'"
+(cd "$TK" && "$X" set fix T3 "done" >/dev/null)
+mkdir -p "$WS/fix"; echo fresh > "$WS/fix/fresh.md"
+(cd "$TK" && "$X" set fix T3 doing >/dev/null)
+t    "an existing scratch folder blocks the restore" bash -c "test -f '$WS/fix/fresh.md' && test -f '$WS/_done/fix.2/notes.md'"
+if [ "$(id -u)" != 0 ]; then
+  chmod 555 "$WS/_done"
+  out="$(cd "$TK" && "$X" set fix T3 "done" 2>&1)" && rc=0 || rc=$?
+  chmod 755 "$WS/_done"
+  t  "a move that fails warns and still exits 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'tasks: warning: couldn'\''t move .agents/work/scratch/fix' && test -f '$WS/fix/fresh.md'" _ "$out"
+fi
+rm -rf "$TK/.agents/work"
+(cd "$TK" && "$X" set fix T3 doing >/dev/null)
+out="$(cd "$TK" && "$X" set fix T3 "done" 2>&1)"
+t    "no .agents/work: tasks says only what it always did" test "$out" = "T3 -> done"
+}
+group grp_work_tasks
+
 echo "guards"
 wait_group grp_tasks; P="$WORK/fresh"   # the fresh install, once the last group using it is done
 tnot "refuses harness repo as target"  "$HARNESS/install.sh" --team "$HARNESS"
