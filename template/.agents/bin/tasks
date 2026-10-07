@@ -63,39 +63,47 @@ clean() { printf '%s' "$1" | tr '\t\n\r' '   '; }
 SCRATCH="$ROOT/.agents/work/scratch"
 # all_done <tasks.json>: there's a task, and every task is done
 all_done() { parse "$1" | awk -F '\t' '{ n++; if ($2 != "done") o++ } END { exit (n > 0 && o == 0) ? 0 : 1 }'; }
-# work_last <slug>: the newest archive's suffix in scratch/_done/: 0 none, 1 the bare <slug>, n <slug>.<n>.
-# A dot, because a slug can't have one: fix.2 is fix's second archive, never plan fix-2's.
+# work_last <slug>: the newest archive in scratch/_done/ as "<n> <name>": "0 " none, "1 <slug>" the
+# bare folder, "<n> <slug>.<n>" a numbered one. A dot, because a slug can't have one: fix.2 is fix's
+# second archive, never plan fix-2's. A suffix with a leading zero isn't one of ours (and isn't octal).
 work_last() {
-  local m=0 f n
-  [ -e "$SCRATCH/_done/$1" ] && m=1
+  local m=0 name="" f n
+  [ -d "$SCRATCH/_done/$1" ] && { m=1; name="$1"; }
   for f in "$SCRATCH/_done/$1".*; do
     [ -e "$f" ] || continue
     n="${f##*.}"
-    case "$n" in ''|*[!0-9]*) continue ;; esac
-    [ "$n" -gt "$m" ] && m="$n"
+    case "$n" in ''|*[!0-9]*|0*) continue ;; esac
+    [ "$n" -gt "$m" ] && { m="$n"; name="$1.$n"; }
   done
-  echo "$m"
+  echo "$m $name"
 }
+# work_slug <slug>: only a plan named the way tasks new names them has its folder moved; a dotted
+# plan made by hand could otherwise take another plan's archive.
+work_slug() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'; }
+# work_taken <path>: something is there already (mv into an existing folder would nest inside it)
+work_taken() { [ -e "$1" ] || [ -L "$1" ]; }
 # work_archive <slug>: the plan is closed; its scratch folder moves to scratch/_done/, never over another
 work_archive() {
   local m name
+  work_slug "$1" || return 0
   [ -d "$SCRATCH/$1" ] || return 0
-  m="$(work_last "$1")"
+  m="$(work_last "$1")"; m="${m%% *}"
   if [ "$m" -eq 0 ]; then name="$1"; else name="$1.$((m + 1))"; fi
-  if mkdir -p "$SCRATCH/_done" 2>/dev/null && mv "$SCRATCH/$1" "$SCRATCH/_done/$name" 2>/dev/null; then
+  if ! work_taken "$SCRATCH/_done/$name" && mkdir -p "$SCRATCH/_done" 2>/dev/null &&
+     mv "$SCRATCH/$1" "$SCRATCH/_done/$name" 2>/dev/null; then
     echo "archived .agents/work/scratch/$1 to .agents/work/scratch/_done/$name"
   else
-    echo "tasks: warning: couldn't move .agents/work/scratch/$1 to .agents/work/scratch/_done/; it stays where it is" >&2
+    echo "tasks: warning: couldn't move .agents/work/scratch/$1 to .agents/work/scratch/_done/$name; it stays where it is" >&2
   fi
 }
 # work_restore <slug>: the plan reopened; its newest archive comes back, unless a new folder started
 work_restore() {
   local m name
+  work_slug "$1" || return 0
   [ -e "$SCRATCH/$1" ] && return 0
-  m="$(work_last "$1")"
-  [ "$m" -eq 0 ] && return 0
-  if [ "$m" -eq 1 ]; then name="$1"; else name="$1.$m"; fi
-  if mv "$SCRATCH/_done/$name" "$SCRATCH/$1" 2>/dev/null; then
+  m="$(work_last "$1")"; name="${m#* }"
+  [ -n "$name" ] || return 0
+  if ! work_taken "$SCRATCH/$1" && mv "$SCRATCH/_done/$name" "$SCRATCH/$1" 2>/dev/null; then
     echo "restored .agents/work/scratch/_done/$name to .agents/work/scratch/$1"
   else
     echo "tasks: warning: couldn't move .agents/work/scratch/_done/$name back to .agents/work/scratch/$1; it stays where it is" >&2
@@ -322,7 +330,7 @@ PLAN
     id="T$((last + 1))"
     { parse "$d/tasks.json"; printf '%s\ttodo\t\t%s\t%s\n' "$id" "$desc" "$acc"; } | write_tasks "$d/tasks.json"
     echo "$id"
-    work_restore "$(basename "$d")"
+    work_restore "$(basename "$d")" >&2   # stdout stays just the id, for id=$(tasks add ...)
     true   # this command's result and exit code are "$id", not work_restore's
     ;;
   list)

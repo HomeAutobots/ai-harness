@@ -7504,8 +7504,10 @@ t    "a folder with no plan never moves" test -d "$WS/notaplan"
 out="$(cd "$TK" && "$X" set fix T2 doing)"
 t    "set back to doing restores it" bash -c "test -f '$WS/fix/notes.md' && test ! -e '$WS/_done/fix'"
 t    "...and says so"                bash -c "printf '%s\n' \"\$1\" | grep -qxF 'restored .agents/work/scratch/_done/fix to .agents/work/scratch/fix'" _ "$out"
-(cd "$TK" && "$X" set fix T2 "done" >/dev/null && "$X" add fix c >/dev/null)
+(cd "$TK" && "$X" set fix T2 "done" >/dev/null)
+out="$(cd "$TK" && "$X" add fix c 2>"$WORK/worktasks.err")"
 t    "tasks add restores it too"     test -f "$WS/fix/notes.md"
+t    "...saying so on stderr, so its stdout is still just the id" bash -c "test '$out' = T3 && grep -qxF 'restored .agents/work/scratch/_done/fix to .agents/work/scratch/fix' '$WORK/worktasks.err'"
 mkdir -p "$WS/_done/fix"; echo old > "$WS/_done/fix/old.md"
 (cd "$TK" && "$X" set fix T3 "done" >/dev/null)
 t    "a second archive gets .2, never overwriting" bash -c "test -f '$WS/_done/fix.2/notes.md' && test -f '$WS/_done/fix/old.md'"
@@ -7521,6 +7523,25 @@ if [ "$(id -u)" != 0 ]; then
   chmod 755 "$WS/_done"
   t  "a move that fails warns and still exits 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'tasks: warning: couldn'\''t move .agents/work/scratch/fix' && test -f '$WS/fix/fresh.md'" _ "$out"
 fi
+(cd "$TK" && "$X" new solo "Solo" >/dev/null && "$X" add solo a >/dev/null && "$X" set solo T1 "done" >/dev/null)
+mkdir -p "$WS/_done/solo.1"; echo s > "$WS/_done/solo.1/s.md"
+out="$(cd "$TK" && "$X" set solo T1 todo 2>&1)"
+t    "only an archive named <slug>.1: reopening restores it" bash -c "test -f '$WS/solo/s.md' && printf '%s\n' \"\$1\" | grep -qxF 'restored .agents/work/scratch/_done/solo.1 to .agents/work/scratch/solo'" _ "$out"
+(cd "$TK" && "$X" new zero "Zero" >/dev/null && "$X" add zero a >/dev/null)
+mkdir -p "$WS/zero" "$WS/_done/zero.08"
+out="$(cd "$TK" && "$X" set zero T1 "done" 2>&1)" && rc=0 || rc=$?
+t    "a suffix with a leading zero is skipped, not read as octal" bash -c "test $rc = 0 && test -d '$WS/_done/zero' && test ! -e '$WS/zero' && ! printf '%s' \"\$1\" | grep -q 'base'" _ "$out"
+mkdir -p "$WS/_done/zero.2"; rm -rf "$WS/_done/zero"; ln -s "$WORK/nowhere" "$WS/zero"
+out="$(cd "$TK" && "$X" set zero T1 todo 2>&1)" && rc=0 || rc=$?
+t    "a symlink where the folder would come back: warns, moves nothing" bash -c "test $rc = 0 && test -L '$WS/zero' && test -d '$WS/_done/zero.2' && printf '%s' \"\$1\" | grep -qF 'tasks: warning:'" _ "$out"
+rm -rf "$WS/zero"
+cp -R "$TK/.agents/plans/fix" "$TK/.agents/plans/fix.2"   # made by hand: tasks new refuses the dot
+(cd "$TK" && "$X" set fix.2 T3 doing >/dev/null 2>&1)
+t    "a dotted plan dir doesn't restore another plan's archive" bash -c "test -f '$WS/_done/fix.2/notes.md' && test ! -e '$WS/fix.2'"
+mkdir -p "$WS/fix.2"
+(cd "$TK" && "$X" set fix.2 T3 "done" >/dev/null 2>&1)
+t    "...nor archive its own folder"  bash -c "test -d '$WS/fix.2' && test ! -e '$WS/_done/fix.2.3'"
+rm -rf "$TK/.agents/plans/fix.2" "$WS/fix.2"
 rm -rf "$TK/.agents/work"
 (cd "$TK" && "$X" set fix T3 doing >/dev/null)
 out="$(cd "$TK" && "$X" set fix T3 "done" 2>&1)"
