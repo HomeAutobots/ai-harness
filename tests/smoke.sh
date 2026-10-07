@@ -7441,7 +7441,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   rm -f "$WR/cursor.py"
 
   edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="off"/'
+  rm -f "$WR"/.agents/cache/turn-untracked-*
   hook "$WR" turn-start claude '{"session_id":"w6"}' >/dev/null 2>&1
+  t    "WORK_REMIND=off: turn-start doesn't list untracked files" bash -c "! ls '$WR'/.agents/cache/turn-untracked-* >/dev/null 2>&1"
   echo x > "$WR/off.py"
   trc  "WORK_REMIND=off: no reminder"  0 hook "$WR" stop-gate claude '{"session_id":"w6"}'
   rm -f "$WR/off.py"

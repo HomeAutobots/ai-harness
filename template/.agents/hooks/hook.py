@@ -637,7 +637,7 @@ def turn_start(tool, data, conf):
         return allow(tool, "turn-start")
     remove_file(nudged)
     write_file(os.path.join(CACHE, "turn-" + key), tree_state())
-    files = untracked_files()
+    files = None if conf.get("WORK_REMIND", "on") == "off" else untracked_files()
     if files is None:
         remove_file(os.path.join(CACHE, "turn-untracked-" + key))
     else:
