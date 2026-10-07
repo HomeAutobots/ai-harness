@@ -6227,7 +6227,8 @@ EOF
   t    "codex: turn start is quiet"       test "$rc:$out" = "0:"
   out="$(run turn-start gemini '{"session_id":"gx","hook_event_name":"BeforeAgent","prompt":"go"}')"
   t    "gemini: turn start answers {}"    test "$out" = "{}"
-  t    "...and both took a snapshot"      test "$(ls "$CG"/.agents/cache/turn-* | wc -l | tr -d ' ')" = 2
+  t    "...and both took a snapshot"      test "$(find "$CG/.agents/cache" -name 'turn-*' ! -name 'turn-untracked-*' | wc -l | tr -d ' ')" = 2
+  t    "...and a list of untracked files" test "$(ls "$CG"/.agents/cache/turn-untracked-* | wc -l | tr -d ' ')" = 2
   out="$(run stop-gate codex '{"session_id":"cx","hook_event_name":"Stop","stop_hook_active":false}')" && rc=0 || rc=$?
   t    "codex: a no-change turn isn't gated" test "$rc:$out" = "0:"
   out="$(run stop-gate gemini '{"session_id":"gx","hook_event_name":"AfterAgent","stop_hook_active":false}')"
@@ -7309,6 +7310,111 @@ edit "$W/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="on"/'
 t    "...and is quiet about on"        bash -c "cd '$W' && ! .agents/bin/sync 2>&1 | grep -q WORK_REMIND"
 }
 group grp_work
+
+grp_work_remind() {   # the stop gate's reminder about new untracked files outside .agents/work/
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "work: the stop gate's reminder"
+  WR=$(repo workremind)
+  "$HARNESS/install.sh" --team "$WR" >/dev/null 2>&1
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$WR/.agents/checks/edit.sh"
+  printf '#!/usr/bin/env bash\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  printf '*.tmp\n' > "$WR/.gitignore"
+  commit "$WR" harness
+  S='{"session_id":"w1"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/debug_parse.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "a new untracked file: one continuation (claude, 2)" test "$rc" = 2
+  t    "...naming it, with where scratch goes" bash -c "printf '%s' \"\$1\" | grep -qxF 'New untracked files this turn: debug_parse.py. Scratch goes in .agents/work/scratch/<slug>/; move these there, or say in one line why each belongs in the repo.'" _ "$out"
+  t    "...logged as work-reminder"    grep -q 'stop-gate	work-reminder	debug_parse.py' "$WR/.agents/cache/hook-events.log"
+  echo more >> "$WR/README.md"
+  trc  "...named once: a later stop that runs verify passes" 0 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/debug_parse.py"; git -C "$WR" checkout -q README.md
+
+  echo old > "$WR/old.txt"
+  S='{"session_id":"w2"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  mkdir -p "$WR/.agents/work/scratch/fix"; echo x > "$WR/.agents/work/scratch/fix/try.py"
+  echo x > "$WR/cache.tmp"
+  echo x > "$WR/staged.py"; git -C "$WR" add staged.py
+  echo x > "$WR/made.py"; commit "$WR" made
+  trc  "not named: .agents/work, gitignored, staged, committed, or there before the turn" 0 hook "$WR" stop-gate claude "$S"
+  git -C "$WR" rm -q --cached staged.py; rm -f "$WR/staged.py" "$WR/cache.tmp" "$WR/old.txt"
+
+  S='{"session_id":"w3"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  for i in 01 02 03 04 05 06 07 08 09 10 11 12; do echo x > "$WR/n$i.py"; done
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "12 files: 10 names, then and 2 more" bash -c "printf '%s' \"\$1\" | grep -qF 'n09.py, n10.py and 2 more. Scratch goes'" _ "$out"
+  rm -f "$WR"/n*.py
+
+  S='{"session_id":"w4"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/FAIL"; echo x > "$WR/new.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "verify's findings come first"  bash -c "printf '%s' \"\$1\" | grep -q 'failing on purpose' && ! printf '%s' \"\$1\" | grep -q 'New untracked'" _ "$out"
+  rm -f "$WR/FAIL"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "...then the reminder, once verify passes" bash -c "printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: new.py.'" _ "$out"
+  rm -f "$WR/new.py"
+
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=1/'
+  S='{"session_id":"w5"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/one.py"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  echo x > "$WR/FAIL"
+  trc  "the reminder isn't one of the stop gate's tries" 2 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/FAIL" "$WR/one.py"
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=3/'
+
+  S='{"session_id":"w10"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  printf 'FDD_REMIND_T="1"\n' >> "$WR/.agents/harness.conf"; echo x > "$WR/conf.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "a settings change and a new file: the reminder goes first" bash -c "[ '$rc' = 2 ] && printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: conf.py.' && ! printf '%s' \"\$1\" | grep -q 'harness.conf changed'" _ "$out"
+  out="$(hook "$WR" stop-gate claude "$S" 2>/dev/null)" && rc=0 || rc=$?
+  t    "...and the settings note still reaches the human at the next stop" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'harness.conf changed during this turn: FDD_REMIND_T'" _ "$out"
+  edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf.py"
+
+  for tool in copilot codex gemini; do
+    hook "$WR" turn-start "$tool" "{\"session_id\":\"t-$tool\"}" >/dev/null 2>&1
+    echo x > "$WR/$tool.py"
+    t  "$tool: the reminder is a decision block with the names" bash -c "printf '%s' '{\"session_id\":\"t-$tool\"}' | (cd '$WR' && .agents/hooks/run stop-gate --tool=$tool) | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"decision\"]==\"block\" and \"$tool.py\" in d[\"reason\"]'"
+    rm -f "$WR/$tool.py"
+  done
+  hook "$WR" turn-start cursor '{"conversation_id":"t-cursor"}' >/dev/null 2>&1
+  echo x > "$WR/cursor.py"
+  t    "cursor: the reminder is a followup_message" bash -c "printf '%s' '{\"conversation_id\":\"t-cursor\",\"loop_count\":0}' | (cd '$WR' && .agents/hooks/run stop-gate --tool=cursor) | python3 -c 'import json,sys; assert \"cursor.py\" in json.load(sys.stdin)[\"followup_message\"]'"
+  rm -f "$WR/cursor.py"
+
+  edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="off"/'
+  hook "$WR" turn-start claude '{"session_id":"w6"}' >/dev/null 2>&1
+  echo x > "$WR/off.py"
+  trc  "WORK_REMIND=off: no reminder"  0 hook "$WR" stop-gate claude '{"session_id":"w6"}'
+  rm -f "$WR/off.py"
+  edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="maybe"/'
+  hook "$WR" turn-start claude '{"session_id":"w7"}' >/dev/null 2>&1
+  echo x > "$WR/maybe.py"
+  trc  "WORK_REMIND=maybe counts as on" 2 hook "$WR" stop-gate claude '{"session_id":"w7"}'
+  rm -f "$WR/maybe.py"
+  edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="on"/'
+  hook "$WR" turn-start claude '{"session_id":"w8"}' >/dev/null 2>&1
+  rm -f "$WR"/.agents/cache/turn-untracked-*
+  echo x > "$WR/nolist.py"
+  trc  "no turn-start list: no reminder" 0 hook "$WR" stop-gate claude '{"session_id":"w8"}'
+  rm -f "$WR/nolist.py"
+  hook "$WR" turn-start claude '{"session_id":"w9"}' >/dev/null 2>&1
+  echo x > "$WR/hooksoff.py"
+  t    "AGENTS_HOOKS=off: no reminder" bash -c "printf '%s' '{\"session_id\":\"w9\"}' | (cd '$WR' && AGENTS_HOOKS=off .agents/hooks/run stop-gate --tool=claude)"
+  edit "$WR/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy edit questions"/'
+  trc  "stop gate off in HOOKS: no reminder" 0 hook "$WR" stop-gate claude '{"session_id":"w9"}'
+  rm -f "$WR/hooksoff.py"
+else
+  echo "work: the stop gate's reminder (skipped: needs python3)"; SKIP=$((SKIP + 1))
+fi
+}
+group grp_work_remind
 
 echo "guards"
 wait_group grp_tasks; P="$WORK/fresh"   # the fresh install, once the last group using it is done
