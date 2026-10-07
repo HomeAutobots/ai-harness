@@ -251,6 +251,12 @@ printf 'x \363\240\201\201 tag chars\n' > "$P/.agents/context/sneaky.md"
 tnot "tag chars fail --check"          "$P/.agents/bin/sync" --check
 rm "$P/.agents/context/sneaky.md"
 t    "clean again"                     "$P/.agents/bin/sync" --check
+mkdir -p "$P/.agents/work/references"; printf '\357\273\277{"doc": "vendor\342\200\213dump"}\n' > "$P/.agents/work/references/x.json"
+t    "...not counting .agents/work's folders (vendor dumps aren't instructions)" "$P/.agents/bin/sync" --check
+rm "$P/.agents/work/references/x.json"
+cp "$P/.agents/work/README.md" "$WORK/work-readme"; printf '\342\200\213 x\n' >> "$P/.agents/work/README.md"
+tnot "...but .agents/work/README.md counts" "$P/.agents/bin/sync" --check
+cp "$WORK/work-readme" "$P/.agents/work/README.md"
 }
 group grp_fresh
 
@@ -1759,6 +1765,10 @@ if [ "$HAVE_PY" -eq 1 ] && command -v ruff >/dev/null 2>&1 && command -v pytest 
   printf 'EDIT_BUDGET=120\n' >> "$PR/.agents/harness.conf"
   t    "clean tree: turn and full ok" bash -c "cd '$PR' && .agents/bin/verify --no-cache | grep -qx 'ok verify turn' && .agents/bin/verify --tier=full --no-cache | grep -qx 'ok verify full'"
   t    "...and git status stays clean" test -z "$(git -C "$PR" status --porcelain)"
+  mkdir -p "$PR/.agents/work/scratch/try"
+  printf 'import os\n\n\ndef test_scratch():\n    assert False\n' > "$PR/.agents/work/scratch/try/test_scratch.py"
+  t    "a test file in .agents/work: no lint finding, not collected" bash -c "cd '$PR' && .agents/bin/verify --no-cache | grep -qx 'ok verify turn' && .agents/bin/verify --tier=full --no-cache | grep -qx 'ok verify full'"
+  rm -rf "$PR/.agents/work/scratch/try"
   printf 'import os\ndef add(a: int, b: int) -> int:\n    return  a + b\n' > "$PR/src/calc/ops.py"
   out="$("$PR/.agents/bin/check" src/calc/ops.py 2>&1 || true)"
   t    "edit: ruff's unused import"   hasl "$out" 'src/calc/ops.py:1:8: error: `os` imported but unused [F401]'
@@ -4481,6 +4491,16 @@ EOF
   R=$(ls -d "$EL"/.agents/evals/results/*/ | tail -1)
   t  "eval copies CLAUDE.local.md into its worktrees" grep -q '^add-fix,C,1,1,' "$R/results.csv"
   t  "...git status still clean"      test -z "$(git -C "$EL" status --porcelain)"
+  mkdir -p "$EL/.agents/work/scratch/add-fix"; echo 'the fix is in calc.sh' > "$EL/.agents/work/scratch/add-fix/notes.md"
+  cat > "$WORK/agent-work.sh" <<EOF
+#!/usr/bin/env bash
+[ -d .agents/bin ] && : > "$WORK/eval-saw-bin"
+[ -e .agents/work ] && : > "$WORK/eval-saw-work"
+printf '{"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+EOF
+  chmod +x "$WORK/agent-work.sh"
+  (cd "$EL" && EVAL_AGENT_CMD="$WORK/agent-work.sh" .agents/bin/eval run --arms=C --runs=1 >/dev/null 2>&1) || true
+  t  "eval's worktree copy leaves out .agents/work" bash -c "test -e '$WORK/eval-saw-bin' && test ! -e '$WORK/eval-saw-work'"
 fi
 }
 group grp_local6
@@ -4776,7 +4796,11 @@ printf 'deny-cmd make deploy   # humans deploy\n' >> "$BK/.agents/policy.conf"
 printf '\nThe parser is safety critical.\n' >> "$BK/AGENTS.md"
 mkdir -p "$BK/.agents/cache" "$BK/.agents/evals/results" "$BKD.new.123"
 echo junk > "$BK/.agents/cache/junk.log"; echo '{}' > "$BK/.agents/evals/results/run.json"
+mkdir -p "$BK/.agents/work/scratch/x" "$BK/.agents/work/references"
+echo n > "$BK/.agents/work/scratch/x/notes.md"; echo '{}' > "$BK/.agents/work/references/api.json"
 t    "local sync exits 0"              "$BK/.agents/bin/sync"
+t    "backup skips .agents/work/scratch" test ! -e "$BKD/.agents/work/scratch"
+t    "...and keeps the rest of .agents/work" test -f "$BKD/.agents/work/references/api.json"
 t    "backup kept in the git dir"      test -f "$BKD/.agents/context/parser.md"
 t    "backup skips the cache"          test ! -e "$BKD/.agents/cache"
 t    "backup skips eval results"       test ! -e "$BKD/.agents/evals/results"
@@ -6227,7 +6251,8 @@ EOF
   t    "codex: turn start is quiet"       test "$rc:$out" = "0:"
   out="$(run turn-start gemini '{"session_id":"gx","hook_event_name":"BeforeAgent","prompt":"go"}')"
   t    "gemini: turn start answers {}"    test "$out" = "{}"
-  t    "...and both took a snapshot"      test "$(ls "$CG"/.agents/cache/turn-* | wc -l | tr -d ' ')" = 2
+  t    "...and both took a snapshot"      test "$(find "$CG/.agents/cache" -name 'turn-*' ! -name 'turn-untracked-*' | wc -l | tr -d ' ')" = 2
+  t    "...and a list of untracked files" test "$(ls "$CG"/.agents/cache/turn-untracked-* | wc -l | tr -d ' ')" = 2
   out="$(run stop-gate codex '{"session_id":"cx","hook_event_name":"Stop","stop_hook_active":false}')" && rc=0 || rc=$?
   t    "codex: a no-change turn isn't gated" test "$rc:$out" = "0:"
   out="$(run stop-gate gemini '{"session_id":"gx","hook_event_name":"AfterAgent","stop_hook_active":false}')"
@@ -7276,6 +7301,327 @@ if [ "$HAVE_PY" -eq 1 ]; then
   trc  "a new server: --check fails"     1 "$MA/.agents/bin/sync" --check
   t    "...and writes nothing"           bash -c "test ! -e '$MA/.cursor/mcp.json' && cmp -s '$MA/.mcp.json' '$WORK/abs.mcp' && cmp -s '$MA/.codex/config.toml' '$WORK/abs.toml' && ! grep -q '\"mcp\"' '$MA/.agents/generated.lock'"
 fi
+
+grp_work() {   # .agents/work, the AI workspace (docs/specs/2026-10-06-ai-workspace-design.md)
+echo "work: the workspace"
+W=$(repo work)
+"$HARNESS/install.sh" --team "$W" >/dev/null 2>&1
+t    "install seeds .agents/work"     bash -c "test -f '$W/.agents/work/README.md' && test -f '$W/.agents/work/.gitignore'"
+t    "...with its five folders"       bash -c "cd '$W/.agents/work' && test -d scratch && test -d scripts && test -d references && test -d reports && test -d requirements"
+mkdir -p "$W/.agents/work/scratch/x"; echo hi > "$W/.agents/work/scratch/x/notes.md"; echo hi > "$W/.agents/work/scripts/tool.sh"
+t    "team mode: what's in it stays out of git" bash -c "cd '$W' && test -z \"\$(git status --porcelain --untracked-files=all -- .agents/work/scratch .agents/work/scripts)\""
+t    "...its README and .gitignore can be committed" bash -c "cd '$W' && git add .agents/work && test \"\$(git ls-files .agents/work | tr '\n' ' ')\" = '.agents/work/.gitignore .agents/work/README.md '"
+printf '# ours\n' > "$W/.agents/work/README.md"; rm -rf "$W/.agents/work/reports"
+"$HARNESS/install.sh" --team "$W" >/dev/null 2>&1
+t    "upgrade: an existing README is kept" grep -qx '# ours' "$W/.agents/work/README.md"
+t    "...a missing folder comes back"  test -d "$W/.agents/work/reports"
+t    "...and scratch is untouched"     test -f "$W/.agents/work/scratch/x/notes.md"
+rm -rf "$W/.agents/work/scripts"; echo mine > "$W/.agents/work/scripts"
+out="$("$HARNESS/install.sh" --team "$W" 2>&1)" && rc=0 || rc=$?
+t    "a file where a folder goes: install warns and carries on" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'install: warning: ' && grep -qx mine '$W/.agents/work/scripts' && test -d '$W/.agents/work/reports'" _ "$out"
+rm -f "$W/.agents/work/scripts"; mkdir "$W/.agents/work/scripts"; echo hi > "$W/.agents/work/scripts/tool.sh"
+W2=$(repo work-old)
+"$HARNESS/install.sh" --team "$W2" >/dev/null 2>&1
+rm -rf "$W2/.agents/work"
+"$HARNESS/install.sh" --team "$W2" >/dev/null 2>&1
+t    "upgrade of an install without it seeds it" test -f "$W2/.agents/work/.gitignore"
+W3=$(repo work-local)
+"$HARNESS/install.sh" --local "$W3" >/dev/null 2>&1
+mkdir -p "$W3/.agents/work/scratch/y"; echo hi > "$W3/.agents/work/scratch/y/out.log"
+t    "local mode: git doesn't see it"  bash -c "cd '$W3' && test -z \"\$(git status --porcelain --untracked-files=all -- .agents/work)\""
+t    "AGENTS.md has the workspace rule" grep -qF 'Throwaway files (scripts, logs, notes, drafts) go in `.agents/work/scratch/<slug>/`' "$W/AGENTS.md"
+t    "plan-task points at the plan's scratch folder" grep -qF '.agents/work/scratch/<slug>/' "$W/.agents/builtin/skills/plan-task/SKILL.md"
+t    "harness.conf seeds WORK_REMIND=\"on\"" grep -qx 'WORK_REMIND="on"' "$W/.agents/harness.conf"
+edit "$W/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="maybe"/'
+t    "sync warns about a WORK_REMIND that isn't on or off" bash -c "cd '$W' && .agents/bin/sync 2>&1 | grep -qF 'warning: WORK_REMIND=\"maybe\" isn'\''t on or off; the stop gate treats it as on'"
+edit "$W/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="on"/'
+t    "...and is quiet about on"        bash -c "cd '$W' && ! .agents/bin/sync 2>&1 | grep -q WORK_REMIND"
+}
+group grp_work
+
+grp_work_remind() {   # the stop gate's reminder about new untracked files outside .agents/work/
+if [ "$HAVE_PY" -eq 1 ]; then
+  echo "work: the stop gate's reminder"
+  WR=$(repo workremind)
+  "$HARNESS/install.sh" --team "$WR" >/dev/null 2>&1
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$WR/.agents/checks/edit.sh"
+  printf '#!/usr/bin/env bash\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  printf '*.tmp\n' > "$WR/.gitignore"
+  commit "$WR" harness
+  S='{"session_id":"w1"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/debug_parse.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "a new untracked file: one continuation (claude, 2)" test "$rc" = 2
+  t    "...naming it, with where scratch goes" bash -c "printf '%s' \"\$1\" | grep -qxF 'New untracked files this turn: debug_parse.py. If any are scratch, move them to .agents/work/scratch/<slug>/; say in one line why the rest belong in the repo.'" _ "$out"
+  t    "...logged as work-reminder"    grep -q 'stop-gate	work-reminder	debug_parse.py' "$WR/.agents/cache/hook-events.log"
+  echo more >> "$WR/README.md"
+  trc  "...named once: a later stop that runs verify passes" 0 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/debug_parse.py"; git -C "$WR" checkout -q README.md
+
+  echo old > "$WR/old.txt"
+  S='{"session_id":"w2"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  mkdir -p "$WR/.agents/work/scratch/fix"; echo x > "$WR/.agents/work/scratch/fix/try.py"
+  echo x > "$WR/cache.tmp"
+  echo x > "$WR/made.py"; git -C "$WR" add made.py && git -C "$WR" -c core.hooksPath=/dev/null commit -qm made
+  echo x > "$WR/staged.py"; git -C "$WR" add staged.py
+  t    "...(the setup: old.txt untracked, staged.py only staged)" bash -c "cd '$WR' && test \"\$(git status --porcelain -- old.txt staged.py made.py | tr '\n' ' ')\" = 'A  staged.py ?? old.txt '"
+  trc  "not named: .agents/work, gitignored, staged, committed, or there before the turn" 0 hook "$WR" stop-gate claude "$S"
+  git -C "$WR" rm -q --cached staged.py; rm -f "$WR/staged.py" "$WR/cache.tmp" "$WR/old.txt"
+
+  S='{"session_id":"w3"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  for i in 01 02 03 04 05 06 07 08 09 10 11 12; do echo x > "$WR/n$i.py"; done
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "12 files: 10 names, then and 2 more" bash -c "printf '%s' \"\$1\" | grep -qF 'n09.py, n10.py and 2 more. If any are scratch'" _ "$out"
+  rm -f "$WR"/n*.py
+
+  S='{"session_id":"w11"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  long="$(printf 'l%.0s' $(seq 1 196)).txt"
+  echo x > "$WR/$long"; echo x > "$WR/"$'zw\xe2\x80\x8bsp.py'; echo x > "$WR/"$'\xe2\x80\xaereversed.py'; echo x > "$WR/"$'a-tab\there.py'
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "odd names: shown in printable ASCII" bash -c "printf '%s' \"\$1\" | grep -qF 'this turn: a-tab?here.py, l' && printf '%s' \"\$1\" | grep -qF '..., zw?sp.py, ?reversed.py. If any' && ! printf '%s' \"\$1\" | LC_ALL=C grep -q '[^ -~]'" _ "$out"
+  t    "...a long one cut at 80 characters" bash -c "printf '%s' \"\$1\" | grep -qF 'here.py, '\"\$(printf 'l%.0s' \$(seq 1 77))\"'..., zw'" _ "$out"
+  t    "...and hook-events.log keeps its five fields" bash -c "grep 'work-reminder' '$WR/.agents/cache/hook-events.log' | tail -1 | awk -F '\t' '{ exit NF == 5 ? 0 : 1 }'"
+  rm -f "$WR/$long" "$WR/"$'zw\xe2\x80\x8bsp.py' "$WR/"$'\xe2\x80\xaereversed.py' "$WR/"$'a-tab\there.py'
+
+  S='{"session_id":"w4"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/FAIL"; echo x > "$WR/new.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "verify's findings come first"  bash -c "printf '%s' \"\$1\" | grep -q 'failing on purpose' && ! printf '%s' \"\$1\" | grep -q 'New untracked'" _ "$out"
+  rm -f "$WR/FAIL"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "...then the reminder, once verify passes" bash -c "printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: new.py.'" _ "$out"
+  rm -f "$WR/new.py"
+
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=1/'
+  S='{"session_id":"w5"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/one.py"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  echo x > "$WR/FAIL"
+  trc  "the reminder isn't one of the stop gate's tries" 2 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/FAIL" "$WR/one.py"
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=3/'
+
+  S='{"session_id":"w10"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  printf 'FDD_REMIND_T="1"\n' >> "$WR/.agents/harness.conf"; echo x > "$WR/conf.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "a settings change and a new file: the reminder goes first" bash -c "[ '$rc' = 2 ] && printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: conf.py.' && ! printf '%s' \"\$1\" | grep -q 'harness.conf changed'" _ "$out"
+  out="$(hook "$WR" stop-gate claude "$S" 2>/dev/null)" && rc=0 || rc=$?
+  t    "...and the settings note still reaches the human at the next stop" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'harness.conf changed during this turn: FDD_REMIND_T'" _ "$out"
+  edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf.py"
+
+  for tool in codex gemini; do   # their continuation is a new prompt, which runs turn-start again
+    S="{\"session_id\":\"n-$tool\"}"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    printf 'FDD_REMIND_T="1"\n' >> "$WR/.agents/harness.conf"; echo x > "$WR/conf-$tool.py"
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>/dev/null)" || true
+    t  "$tool: a settings change and a new file: the reminder" bash -c "printf '%s' \"\$1\" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"decision\"]==\"block\" and \"conf-$tool.py\" in d[\"reason\"]'" _ "$out"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>/dev/null)" || true
+    t  "...$tool: after the continuation's turn-start, the settings note reaches the human" bash -c "printf '%s' \"\$1\" | python3 -c 'import json,sys; assert \"harness.conf changed\" in json.load(sys.stdin)[\"systemMessage\"]'" _ "$out"
+    edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf-$tool.py"
+  done
+  for tool in copilot cursor; do   # whether theirs runs turn-start again isn't documented: assume it may
+    S="{\"session_id\":\"n-$tool\",\"loop_count\":0}"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    printf 'FDD_REMIND_T="1"\n' >> "$WR/.agents/harness.conf"; echo x > "$WR/conf-$tool.py"
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>&1)" || true
+    t  "$tool: a settings change and a new file: the reminder" bash -c "printf '%s' \"\$1\" | grep -qF 'conf-$tool.py' && ! printf '%s' \"\$1\" | grep -q 'harness.conf changed'" _ "$out"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>&1)" || true
+    t  "...$tool: a turn-start before the next stop keeps the settings note" bash -c "printf '%s' \"\$1\" | grep -qF 'harness.conf changed'" _ "$out"
+    edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf-$tool.py"
+  done
+
+  S='{"session_id":"w14"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/again.py"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  mkdir -p "$WR/.agents/work/scratch/a"; mv "$WR/again.py" "$WR/.agents/work/scratch/a/"
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  mv "$WR/.agents/work/scratch/a/again.py" "$WR/"
+  trc  "a file named once this session isn't named again in a later turn" 0 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/again.py"
+
+  rm "$WR/.agents/work/.gitignore"
+  S='{"session_id":"w15"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/.agents/work/scratch/fix/later.md"
+  trc  "a file in .agents/work isn't named even without its .gitignore" 0 hook "$WR" stop-gate claude "$S"
+  git -C "$WR" checkout -q .agents/work/.gitignore
+
+  S='{"session_id":"w12"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/first.py"
+  trc  "one reminder per turn: the first" 2 hook "$WR" stop-gate claude "$S"
+  echo x > "$WR/second.py"
+  trc  "...another new file at a later stop of the turn passes" 0 hook "$WR" stop-gate claude "$S"
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/third.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "...a new turn can remind again" bash -c "printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: third.py.'" _ "$out"
+  rm -f "$WR/first.py" "$WR/second.py" "$WR/third.py"
+
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=1/'
+  printf '#!/usr/bin/env bash\n[ -e CANT ] && { echo "no tool"; exit 3; }\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  S='{"session_id":"w16"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/CANT"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  rm -f "$WR/CANT"; echo x > "$WR/FAIL"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "verify couldn't run, then it ran and failed: the give-up doesn't say it couldn't" bash -c "printf '%s' \"\$1\" | grep -q 'verify still failing' && ! printf '%s' \"\$1\" | grep -q 'could not verify'" _ "$out"
+  rm -f "$WR/FAIL"
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=3/'
+
+  printf '#!/usr/bin/env bash\necho x > "out-$$.junit"\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  S='{"session_id":"w13"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo more >> "$WR/README.md"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "a file verify writes is never named" bash -c "[ '$rc' = 0 ] && ! printf '%s' \"\$1\" | grep -q junit && ls '$WR' | grep -q '^out-.*junit\$'" _ "$out"
+  echo x > "$WR/FAIL"
+  trc  "...(verify fails, writing another)" 2 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/FAIL"
+  trc  "...nor at a later stop of the same turn" 0 hook "$WR" stop-gate claude "$S"
+  printf '#!/usr/bin/env bash\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  rm -f "$WR"/out-*.junit; git -C "$WR" checkout -q README.md
+
+  for tool in copilot codex gemini; do
+    hook "$WR" turn-start "$tool" "{\"session_id\":\"t-$tool\"}" >/dev/null 2>&1
+    echo x > "$WR/$tool.py"
+    t  "$tool: the reminder is a decision block with the names" bash -c "printf '%s' '{\"session_id\":\"t-$tool\"}' | (cd '$WR' && .agents/hooks/run stop-gate --tool=$tool) | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"decision\"]==\"block\" and \"$tool.py\" in d[\"reason\"]'"
+    rm -f "$WR/$tool.py"
+  done
+  hook "$WR" turn-start cursor '{"conversation_id":"t-cursor"}' >/dev/null 2>&1
+  echo x > "$WR/cursor.py"
+  t    "cursor: the reminder is a followup_message" bash -c "printf '%s' '{\"conversation_id\":\"t-cursor\",\"loop_count\":0}' | (cd '$WR' && .agents/hooks/run stop-gate --tool=cursor) | python3 -c 'import json,sys; assert \"cursor.py\" in json.load(sys.stdin)[\"followup_message\"]'"
+  rm -f "$WR/cursor.py"
+
+  edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="off"/'
+  rm -f "$WR"/.agents/cache/turn-untracked-*
+  hook "$WR" turn-start claude '{"session_id":"w6"}' >/dev/null 2>&1
+  t    "WORK_REMIND=off: turn-start doesn't list untracked files" bash -c "! ls '$WR'/.agents/cache/turn-untracked-* >/dev/null 2>&1"
+  echo x > "$WR/off.py"
+  trc  "WORK_REMIND=off: no reminder"  0 hook "$WR" stop-gate claude '{"session_id":"w6"}'
+  rm -f "$WR/off.py"
+  edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="maybe"/'
+  hook "$WR" turn-start claude '{"session_id":"w7"}' >/dev/null 2>&1
+  echo x > "$WR/maybe.py"
+  trc  "WORK_REMIND=maybe counts as on" 2 hook "$WR" stop-gate claude '{"session_id":"w7"}'
+  rm -f "$WR/maybe.py"
+  edit "$WR/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="on"/'
+  hook "$WR" turn-start claude '{"session_id":"w8"}' >/dev/null 2>&1
+  rm -f "$WR"/.agents/cache/turn-untracked-*
+  echo x > "$WR/nolist.py"
+  trc  "no turn-start list: no reminder" 0 hook "$WR" stop-gate claude '{"session_id":"w8"}'
+  rm -f "$WR/nolist.py"
+  hook "$WR" turn-start claude '{"session_id":"w9"}' >/dev/null 2>&1
+  echo x > "$WR/hooksoff.py"
+  t    "AGENTS_HOOKS=off: no reminder" bash -c "printf '%s' '{\"session_id\":\"w9\"}' | (cd '$WR' && AGENTS_HOOKS=off .agents/hooks/run stop-gate --tool=claude)"
+  edit "$WR/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy edit questions"/'
+  trc  "stop gate off in HOOKS: no reminder" 0 hook "$WR" stop-gate claude '{"session_id":"w9"}'
+  rm -f "$WR/hooksoff.py"
+
+  W3=$(repo workremind-fresh)   # turn.sh left as installed: verify can't run (exit 3)
+  "$HARNESS/install.sh" --team "$W3" >/dev/null 2>&1
+  commit "$W3" harness
+  S='{"session_id":"f1"}'
+  hook "$W3" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$W3/try.py"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "verify can't run (exit 3): a new file still gets the reminder" bash -c "[ '$rc' = 2 ] && printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: try.py.' && ! printf '%s' \"\$1\" | grep -q 'could not verify'" _ "$out"
+  mkdir -p "$W3/.agents/work/scratch/t"; mv "$W3/try.py" "$W3/.agents/work/scratch/t/"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "...and the human hears verify couldn't run at the next stop, after the agent moves it" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)'" _ "$out"
+  t    "...once, not twice"             bash -c "[ \"\$(printf '%s\n' \"\$1\" | grep -o 'could not verify' | wc -l | tr -d ' ')\" = 1 ]" _ "$out"
+  S='{"session_id":"f3"}'
+  hook "$W3" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$W3/again3.py"
+  hook "$W3" stop-gate claude "$S" >/dev/null 2>&1 || true
+  n1="$(grep -c 'stop-gate	3' "$W3/.agents/cache/hook-events.log")"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "...a stop with nothing changed since gets the note without running verify again" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)' && [ \"\$(grep -c 'stop-gate	3' '$W3/.agents/cache/hook-events.log')\" = '$n1' ]" _ "$out"
+  rm -f "$W3/again3.py"
+  S='{"session_id":"f2"}'
+  hook "$W3" turn-start claude "$S" >/dev/null 2>&1
+  echo more >> "$W3/README.md"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "...with no new file, at this stop" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)'" _ "$out"
+else
+  echo "work: the stop gate's reminder (skipped: needs python3)"; SKIP=$((SKIP + 1))
+fi
+}
+group grp_work_remind
+
+grp_work_tasks() {   # tasks archives a plan's scratch folder on close and restores it on reopen
+echo "work: archive and restore"
+TK=$(repo worktasks)
+"$HARNESS/install.sh" --team "$TK" >/dev/null 2>&1
+X="$TK/.agents/bin/tasks"; WS="$TK/.agents/work/scratch"
+(cd "$TK" && "$X" new fix "Fix" >/dev/null && "$X" add fix a >/dev/null && "$X" add fix b >/dev/null)
+mkdir -p "$WS/fix" "$WS/notaplan"; echo n > "$WS/fix/notes.md"
+(cd "$TK" && "$X" set fix T1 "done" >/dev/null)
+t    "a task still open: the folder stays" test -f "$WS/fix/notes.md"
+out="$(cd "$TK" && "$X" set fix T2 "done")"
+t    "the last done archives it"     bash -c "test -f '$WS/_done/fix/notes.md' && test ! -e '$WS/fix'"
+t    "...and says so"                bash -c "printf '%s\n' \"\$1\" | grep -qxF 'archived .agents/work/scratch/fix to .agents/work/scratch/_done/fix'" _ "$out"
+t    "a folder with no plan never moves" test -d "$WS/notaplan"
+out="$(cd "$TK" && "$X" set fix T2 doing)"
+t    "set back to doing restores it" bash -c "test -f '$WS/fix/notes.md' && test ! -e '$WS/_done/fix'"
+t    "...and says so"                bash -c "printf '%s\n' \"\$1\" | grep -qxF 'restored .agents/work/scratch/_done/fix to .agents/work/scratch/fix'" _ "$out"
+(cd "$TK" && "$X" set fix T2 "done" >/dev/null)
+out="$(cd "$TK" && "$X" add fix c 2>"$WORK/worktasks.err")"
+t    "tasks add restores it too"     test -f "$WS/fix/notes.md"
+t    "...saying so on stderr, so its stdout is still just the id" bash -c "test '$out' = T3 && grep -qxF 'restored .agents/work/scratch/_done/fix to .agents/work/scratch/fix' '$WORK/worktasks.err'"
+mkdir -p "$WS/_done/fix"; echo old > "$WS/_done/fix/old.md"
+(cd "$TK" && "$X" set fix T3 "done" >/dev/null)
+t    "a second archive gets .2, never overwriting" bash -c "test -f '$WS/_done/fix.2/notes.md' && test -f '$WS/_done/fix/old.md'"
+(cd "$TK" && "$X" set fix T3 todo >/dev/null)
+t    "reopening restores the newest" bash -c "test -f '$WS/fix/notes.md' && test -f '$WS/_done/fix/old.md' && test ! -e '$WS/_done/fix.2'"
+(cd "$TK" && "$X" set fix T3 "done" >/dev/null)
+mkdir -p "$WS/fix"; echo fresh > "$WS/fix/fresh.md"
+(cd "$TK" && "$X" set fix T3 doing >/dev/null)
+t    "an existing scratch folder blocks the restore" bash -c "test -f '$WS/fix/fresh.md' && test -f '$WS/_done/fix.2/notes.md'"
+if [ "$(id -u)" != 0 ]; then
+  chmod 555 "$WS/_done"
+  out="$(cd "$TK" && "$X" set fix T3 "done" 2>&1)" && rc=0 || rc=$?
+  chmod 755 "$WS/_done"
+  t  "a move that fails warns and still exits 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'tasks: warning: couldn'\''t move .agents/work/scratch/fix' && test -f '$WS/fix/fresh.md'" _ "$out"
+fi
+(cd "$TK" && "$X" new solo "Solo" >/dev/null && "$X" add solo a >/dev/null && "$X" set solo T1 "done" >/dev/null)
+mkdir -p "$WS/_done/solo.1" "$WS/_done/solo.1.5"; echo s > "$WS/_done/solo.1/s.md"   # solo.1.5: made by hand, not ours
+out="$(cd "$TK" && "$X" set solo T1 todo 2>&1)"
+t    "only an archive named <slug>.1: reopening restores it" bash -c "test -f '$WS/solo/s.md' && printf '%s\n' \"\$1\" | grep -qxF 'restored .agents/work/scratch/_done/solo.1 to .agents/work/scratch/solo'" _ "$out"
+(cd "$TK" && "$X" new zero "Zero" >/dev/null && "$X" add zero a >/dev/null)
+mkdir -p "$WS/zero" "$WS/_done/zero.08"
+out="$(cd "$TK" && "$X" set zero T1 "done" 2>&1)" && rc=0 || rc=$?
+t    "a suffix with a leading zero is skipped, not read as octal" bash -c "test $rc = 0 && test -d '$WS/_done/zero' && test ! -e '$WS/zero' && ! printf '%s' \"\$1\" | grep -q 'base'" _ "$out"
+mkdir -p "$WS/_done/zero.2"; rm -rf "$WS/_done/zero"; ln -s "$WORK/nowhere" "$WS/zero"
+out="$(cd "$TK" && "$X" set zero T1 todo 2>&1)" && rc=0 || rc=$?
+t    "a symlink where the folder would come back: warns, moves nothing" bash -c "test $rc = 0 && test -L '$WS/zero' && test -d '$WS/_done/zero.2' && printf '%s' \"\$1\" | grep -qF 'tasks: warning:'" _ "$out"
+rm -rf "$WS/zero"
+cp -R "$TK/.agents/plans/fix" "$TK/.agents/plans/fix.2"   # made by hand: tasks new refuses the dot
+(cd "$TK" && "$X" set fix.2 T3 doing >/dev/null 2>&1)
+t    "a dotted plan dir doesn't restore another plan's archive" bash -c "test -f '$WS/_done/fix.2/notes.md' && test ! -e '$WS/fix.2'"
+mkdir -p "$WS/fix.2"
+(cd "$TK" && "$X" set fix.2 T3 "done" >/dev/null 2>&1)
+t    "...nor archive its own folder"  bash -c "test -d '$WS/fix.2' && test ! -e '$WS/_done/fix.2.3'"
+rm -rf "$TK/.agents/plans/fix.2" "$WS/fix.2"
+rm -rf "$TK/.agents/work"
+(cd "$TK" && "$X" set fix T3 doing >/dev/null)
+out="$(cd "$TK" && "$X" set fix T3 "done" 2>&1)"
+t    "no .agents/work: tasks says only what it always did" test "$out" = "T3 -> done"
+}
+group grp_work_tasks
 
 echo "guards"
 wait_group grp_tasks; P="$WORK/fresh"   # the fresh install, once the last group using it is done

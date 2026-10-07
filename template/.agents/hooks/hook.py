@@ -9,12 +9,13 @@ Translates each tool's hook protocol into the harness's tool-agnostic checks:
                 after a question to the human, record the question and answer in the ledger
   session-start remind the agent of questions still waiting on the human; tell Codex when the
                 AGENTS.override.md sync wrote in local mode is out of date
-  turn-start    snapshot the working tree (and the simulated-human switch, and WORKFLOWS, STACKS,
-                FDD_* and DEBUG_* in harness.conf) when a prompt arrives
+  turn-start    snapshot the working tree and its untracked files (and the simulated-human switch,
+                and WORKFLOWS, STACKS, FDD_* and DEBUG_* in harness.conf) when a prompt arrives
   stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
-                anything; block with the findings until it passes (bounded retries). A
-                simulated-human switch that appeared or changed during the turn is marked flagged;
-                a change to those settings gets a note for the human
+                anything; block with the findings until it passes (bounded retries). Once it
+                passes or can't run, name new untracked files outside .agents/work/, once a turn
+                (WORK_REMIND). A simulated-human switch that appeared or changed during the turn
+                is marked flagged; a change to those settings gets a note for the human
 
 Usage: hook.py <event> --tool=<claude|copilot|cursor|codex|gemini>   (JSON payload on stdin)
 
@@ -101,7 +102,7 @@ def log_event(tool, event, decision, detail=""):
     try:
         os.makedirs(CACHE, exist_ok=True)
         with open(os.path.join(CACHE, "hook-events.log"), "a", encoding="utf-8") as fh:
-            fh.write("%d\t%s\t%s\t%s\t%s\n" % (time.time(), tool, event, decision, detail[:200].replace("\n", " ")))
+            fh.write("%d\t%s\t%s\t%s\t%s\n" % (time.time(), tool, event, decision, re.sub(r"[\x00-\x1f\x7f]", " ", detail[:200])))
         return True
     except OSError:
         return False
@@ -184,6 +185,37 @@ def tree_state():
         except (OSError, subprocess.SubprocessError):
             pass
     return h.hexdigest()
+
+
+def untracked_files():
+    """Untracked files git would show (not ignored), or None when git can't say."""
+    try:
+        p = subprocess.run(["git", "ls-files", "-o", "--exclude-standard", "-z"], cwd=ROOT,
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return [f for f in p.stdout.decode("utf-8", "replace").split("\0") if f]
+
+
+def read_names(path):
+    """The NUL-separated names in path, or None when it isn't there."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    return [f for f in raw.decode("utf-8", "replace").split("\0") if f]
+
+
+def write_names(path, names):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write("".join(n + "\0" for n in names).encode("utf-8", "replace"))
+    except OSError:
+        pass
 
 
 def read_file(path, default=""):
@@ -597,10 +629,23 @@ def turn_start(tool, data, conf):
     key = session_key(data)
     # Codex and Gemini continue a blocked stop as a new prompt, which may fire this hook again; a fresh
     # snapshot then would let the next stop through with verify still failing. The counter goes back
-    # to 0 on a pass, a pause, or giving up, so the next real prompt snapshots as usual.
+    # to 0 on a pass, a pause, or giving up, so the next real prompt snapshots as usual. The same goes
+    # for the workspace reminder's continuation (the nudged- marker, gone once a stop is allowed) in
+    # every tool but Claude Code, whose stop hook continues without a new prompt: a snapshot then
+    # would lose the settings note the turn's last stop owes the human. Cursor's followup_message and
+    # Copilot's block reason may well arrive as a prompt; their docs don't say.
+    nudged = os.path.join(CACHE, "nudged-" + key)
     if tool in ("codex", "gemini") and int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0:
         return allow(tool, "turn-start")
+    if tool != "claude" and os.path.exists(nudged):
+        return allow(tool, "turn-start")
+    remove_file(nudged)
     write_file(os.path.join(CACHE, "turn-" + key), tree_state())
+    files = None if conf.get("WORK_REMIND", "on") == "off" else untracked_files()
+    if files is None:
+        remove_file(os.path.join(CACHE, "turn-untracked-" + key))
+    else:
+        write_names(os.path.join(CACHE, "turn-untracked-" + key), files)
     write_file(os.path.join(CACHE, "head-" + key), refs_state())
     token_in_session(tool, "turn-start")
     write_file(os.path.join(CACHE, "human-" + key), switch_state()[1])
@@ -730,6 +775,56 @@ def remove_file(path):
         pass
 
 
+WORK_NAMES_SHOWN = 10
+
+
+def work_name(f):
+    """A file name as the reminder shows it: printable ASCII only (no bidi overrides or zero-width
+    characters in what the agent reads), cut at 80 characters."""
+    f = re.sub(r"[^\x20-\x7e]", "?", f)
+    return f if len(f) <= 80 else f[:77] + "..."
+
+
+def work_reminder(tool, key, now):
+    """The reminder about untracked files this turn made outside .agents/work/ (gitignored, so git
+    never lists what's in it), each named once per session and at most one reminder per turn; ''
+    when there's nothing to say. now is the untracked list from before verify ran (None: no
+    reminder). Never counts as one of the stop gate's tries."""
+    before = read_names(os.path.join(CACHE, "turn-untracked-" + key))
+    if before is None or now is None:
+        return ""
+    seen_path = os.path.join(CACHE, "work-reminded-" + key)
+    seen = set(read_names(seen_path) or [])
+    old = set(before)
+    # .agents/work/'s own .gitignore keeps it out of git's list; this covers a clone without one.
+    new = [f for f in now if f not in old and f not in seen and not f.startswith(".agents/work/")]
+    if not new:
+        return ""
+    write_names(seen_path, sorted(seen | set(new)))
+    write_file(os.path.join(CACHE, "nudged-" + key), "1")
+    log_event(tool, "stop-gate", "work-reminder", " ".join(new))
+    shown = ", ".join(work_name(f) for f in new[:WORK_NAMES_SHOWN])
+    if len(new) > WORK_NAMES_SHOWN:
+        shown += " and %d more" % (len(new) - WORK_NAMES_SHOWN)
+    return ("New untracked files this turn: %s. If any are scratch, move them to .agents/work/scratch/<slug>/; "
+            "say in one line why the rest belong in the repo." % shown)
+
+
+def send_back(tool, reason):
+    """Keep the agent working, with reason as what it reads next, in each tool's stop answer."""
+    if tool == "claude":
+        sys.stderr.write(reason + "\n")
+        return 2
+    if tool == "cursor":
+        print(json.dumps({"followup_message": reason}))
+        return 0
+    if tool in ("copilot", "codex", "gemini"):   # Codex Stop / Gemini AfterAgent: the reason is the next prompt
+        print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
+    sys.stderr.write(reason + "\n")
+    return 2
+
+
 def stop_gate(tool, data, conf):
     key = session_key(data)
     counter = os.path.join(CACHE, "stop-" + key)
@@ -755,7 +850,17 @@ def stop_gate(tool, data, conf):
     # changed.
     conf_note, conf_keys, conf_now = gate_conf_changed(key)
 
-    def allow_noted(note=""):
+    nudged = os.path.join(CACHE, "nudged-" + key)
+    CANT_VERIFY = "Stop gate could not verify"
+
+    def allow_noted(note="", passed=False):
+        # The turn is over: the next one may remind again. A reminder sent where verify couldn't run
+        # left that note in the marker; it goes to the human now, unless verify since passed or this
+        # stop has its own.
+        held = read_file(nudged)
+        remove_file(nudged)
+        if held.startswith(CANT_VERIFY) and not passed and not note.startswith(CANT_VERIFY):
+            note = "\n".join(x for x in (held, note) if x)
         if conf_note:
             write_file(os.path.join(CACHE, "conf-" + key), conf_now)
             log_event(tool, "stop-gate", "conf-changed", conf_keys)
@@ -791,21 +896,47 @@ def stop_gate(tool, data, conf):
                            "run .agents/bin/verify%s to see what is left."
                            % (blocks, " --since=" + since[0][:12] if since else ""))
 
+    # The workspace reminder's list of untracked files is taken before verify runs, and what verify
+    # itself writes (caches, test reports) joins the turn's starting list, so it's never named.
+    listed = os.path.join(CACHE, "turn-untracked-" + key)
+    untracked = None
+    if conf.get("WORK_REMIND", "on") != "off" and not os.path.exists(nudged) and os.path.exists(listed):
+        untracked = untracked_files()
     budget = int(conf.get("TURN_BUDGET", "300") or 300) + 30
     rc, out = run_tool(harness_cmd("verify", "--tier=turn", *["--since=" + s for s in since]), budget)
     log_event(tool, "stop-gate", str(rc))
+    if untracked is not None:
+        had = set(untracked)
+        made = [f for f in (untracked_files() or []) if f not in had]
+        if made:
+            write_names(listed, (read_names(listed) or []) + made)
     if rc == 0:
         write_file(counter, "0")
         remove_file(pending_file)
         write_file(os.path.join(CACHE, "turn-" + key), tree_state())
         write_file(os.path.join(CACHE, "head-" + key), refs_state())
-        return allow_noted()
+        # The reminder goes to the agent; a settings note waits for the next stop, which runs
+        # verify again (the settings still differ from the turn's start) and tells the human.
+        nudge = work_reminder(tool, key, untracked)
+        if nudge:
+            return send_back(tool, nudge)
+        return allow_noted(passed=True)
     if rc not in (1, 2):
         write_file(counter, "0")
         keep_range()
-        return allow_noted("Stop gate could not verify (exit %d): %s" % (rc, out.splitlines()[-1] if out else ""))
+        # A fresh install's unconfigured checks exit 3, where agents leave the most files about. The
+        # human's note waits in the marker for the stop that ends the turn.
+        note = "%s (exit %d): %s" % (CANT_VERIFY, rc, out.splitlines()[-1] if out else "")
+        nudge = work_reminder(tool, key, untracked)
+        if nudge:
+            write_file(nudged, note)
+            write_file(os.path.join(CACHE, "turn-" + key), tree_state())   # nothing more done: no rerun
+            return send_back(tool, nudge)
+        return allow_noted(note)
 
     write_file(counter, str(blocks + 1))
+    if read_file(nudged).startswith(CANT_VERIFY):
+        write_file(nudged, "1")   # verify ran this time: the held "could not verify" no longer holds
     reason = ("The stop gate ran .agents/bin/verify and it failed. Fix these, then finish:\n\n%s\n\n"
               "(Attempt %d of %d. If a finding is wrong or out of scope, say so plainly instead of "
               "suppressing it.)" % (out, blocks + 1, max_blocks))
@@ -816,20 +947,7 @@ def stop_gate(tool, data, conf):
     if rc == 1 and glob.glob(os.path.join(ROOT, ".agents", "plans", "*", "tasks.json")):
         reason += ("\nIf the red state is deliberate (tests first, waiting on the human), pause instead: "
                    ".agents/bin/tasks ask <slug> <T-id> --gate=tests '<question>'.")
-    if tool == "claude":
-        sys.stderr.write(reason + "\n")
-        return 2
-    if tool == "copilot":
-        print(json.dumps({"decision": "block", "reason": reason}))
-        return 0
-    if tool == "cursor":
-        print(json.dumps({"followup_message": reason}))
-        return 0
-    if tool in ("codex", "gemini"):   # Stop / AfterAgent: keep working, with the reason as the next prompt
-        print(json.dumps({"decision": "block", "reason": reason}))
-        return 0
-    sys.stderr.write(reason + "\n")
-    return 2
+    return send_back(tool, reason)
 
 
 # ---------------------------------------------------------------- question ledger

@@ -71,11 +71,12 @@ harness_paths() {  # the harness's files, plus libraries in LIBRARIES that live 
   done < <(agents_libraries)
 }
 
-copy_harness() {  # copy_harness <dest>: this repo's harness files into a worktree
+copy_harness() {  # copy_harness <dest>: this repo's harness files into a worktree (not .agents/work:
+                  # scratch notes there could describe the fix being evaluated)
   local paths=() p
   for p in $(harness_paths); do [ -e "$ROOT/$p" ] && paths+=("$p"); done
   [ ${#paths[@]} -gt 0 ] || return 0
-  (cd "$ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/plans "${paths[@]}") | tar -C "$1" -xf -
+  (cd "$ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/plans --exclude .agents/work "${paths[@]}") | tar -C "$1" -xf -
 }
 
 hook_count() {  # hook_count <events-log> <event> <awk-condition-on-decision>
