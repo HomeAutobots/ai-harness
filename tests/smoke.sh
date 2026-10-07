@@ -7340,8 +7340,9 @@ if [ "$HAVE_PY" -eq 1 ]; then
   hook "$WR" turn-start claude "$S" >/dev/null 2>&1
   mkdir -p "$WR/.agents/work/scratch/fix"; echo x > "$WR/.agents/work/scratch/fix/try.py"
   echo x > "$WR/cache.tmp"
+  echo x > "$WR/made.py"; git -C "$WR" add made.py && git -C "$WR" -c core.hooksPath=/dev/null commit -qm made
   echo x > "$WR/staged.py"; git -C "$WR" add staged.py
-  echo x > "$WR/made.py"; commit "$WR" made
+  t    "...(the setup: old.txt untracked, staged.py only staged)" bash -c "cd '$WR' && test \"\$(git status --porcelain -- old.txt staged.py made.py | tr '\n' ' ')\" = 'A  staged.py ?? old.txt '"
   trc  "not named: .agents/work, gitignored, staged, committed, or there before the turn" 0 hook "$WR" stop-gate claude "$S"
   git -C "$WR" rm -q --cached staged.py; rm -f "$WR/staged.py" "$WR/cache.tmp" "$WR/old.txt"
 
