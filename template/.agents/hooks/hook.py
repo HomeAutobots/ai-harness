@@ -102,7 +102,7 @@ def log_event(tool, event, decision, detail=""):
     try:
         os.makedirs(CACHE, exist_ok=True)
         with open(os.path.join(CACHE, "hook-events.log"), "a", encoding="utf-8") as fh:
-            fh.write("%d\t%s\t%s\t%s\t%s\n" % (time.time(), tool, event, decision, detail[:200].replace("\n", " ")))
+            fh.write("%d\t%s\t%s\t%s\t%s\n" % (time.time(), tool, event, decision, re.sub(r"[\x00-\x1f\x7f]", " ", detail[:200])))
         return True
     except OSError:
         return False
@@ -770,6 +770,13 @@ def remove_file(path):
 WORK_NAMES_SHOWN = 10
 
 
+def work_name(f):
+    """A file name as the reminder shows it: printable ASCII only (no bidi overrides or zero-width
+    characters in what the agent reads), cut at 80 characters."""
+    f = re.sub(r"[^\x20-\x7e]", "?", f)
+    return f if len(f) <= 80 else f[:77] + "..."
+
+
 def work_reminder(tool, key, conf):
     """The reminder about untracked files this turn made outside .agents/work/ (gitignored, so git
     never lists what's in it), each named once per session; '' when there's nothing to say. Runs
@@ -788,7 +795,7 @@ def work_reminder(tool, key, conf):
         return ""
     write_names(seen_path, sorted(seen | set(new)))
     log_event(tool, "stop-gate", "work-reminder", " ".join(new))
-    shown = ", ".join(re.sub(r"[\x00-\x1f\x7f]", "?", f) for f in new[:WORK_NAMES_SHOWN])
+    shown = ", ".join(work_name(f) for f in new[:WORK_NAMES_SHOWN])
     if len(new) > WORK_NAMES_SHOWN:
         shown += " and %d more" % (len(new) - WORK_NAMES_SHOWN)
     return ("New untracked files this turn: %s. If any are scratch, move them to .agents/work/scratch/<slug>/; "

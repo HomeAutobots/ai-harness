@@ -7353,6 +7353,16 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "12 files: 10 names, then and 2 more" bash -c "printf '%s' \"\$1\" | grep -qF 'n09.py, n10.py and 2 more. If any are scratch'" _ "$out"
   rm -f "$WR"/n*.py
 
+  S='{"session_id":"w11"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  long="$(printf 'l%.0s' $(seq 1 196)).txt"
+  echo x > "$WR/$long"; echo x > "$WR/"$'zw\xe2\x80\x8bsp.py'; echo x > "$WR/"$'\xe2\x80\xaereversed.py'; echo x > "$WR/"$'a-tab\there.py'
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "odd names: shown in printable ASCII" bash -c "printf '%s' \"\$1\" | grep -qF 'this turn: a-tab?here.py, l' && printf '%s' \"\$1\" | grep -qF '..., zw?sp.py, ?reversed.py. If any' && ! printf '%s' \"\$1\" | LC_ALL=C grep -q '[^ -~]'" _ "$out"
+  t    "...a long one cut at 80 characters" bash -c "printf '%s' \"\$1\" | grep -qF 'here.py, '\"\$(printf 'l%.0s' \$(seq 1 77))\"'..., zw'" _ "$out"
+  t    "...and hook-events.log keeps its five fields" bash -c "grep 'work-reminder' '$WR/.agents/cache/hook-events.log' | tail -1 | awk -F '\t' '{ exit NF == 5 ? 0 : 1 }'"
+  rm -f "$WR/$long" "$WR/"$'zw\xe2\x80\x8bsp.py' "$WR/"$'\xe2\x80\xaereversed.py' "$WR/"$'a-tab\there.py'
+
   S='{"session_id":"w4"}'
   hook "$WR" turn-start claude "$S" >/dev/null 2>&1
   echo x > "$WR/FAIL"; echo x > "$WR/new.py"
