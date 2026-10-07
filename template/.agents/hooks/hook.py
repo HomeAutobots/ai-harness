@@ -627,11 +627,15 @@ def post_edit(tool, data, conf):
 
 def turn_start(tool, data, conf):
     key = session_key(data)
-    # Codex and Gemini continue a blocked stop as a new prompt, which may fire this hook again; a fresh
-    # snapshot then would let the next stop through with verify still failing. The counter goes back
-    # to 0 on a pass, a pause, or giving up, so the next real prompt snapshots as usual.
-    if tool in ("codex", "gemini") and int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0:
+    # Codex and Gemini continue a blocked stop (or the workspace reminder) as a new prompt, which may
+    # fire this hook again; a fresh snapshot then would let the next stop through with verify still
+    # failing, or lose the settings note the next stop owes the human. The counter goes back to 0, and
+    # the nudged- marker goes, when a stop is allowed, so the next real prompt snapshots as usual.
+    nudged = os.path.join(CACHE, "nudged-" + key)
+    if tool in ("codex", "gemini") and (int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0
+                                        or os.path.exists(nudged)):
         return allow(tool, "turn-start")
+    remove_file(nudged)
     write_file(os.path.join(CACHE, "turn-" + key), tree_state())
     files = untracked_files()
     if files is None:
@@ -777,14 +781,12 @@ def work_name(f):
     return f if len(f) <= 80 else f[:77] + "..."
 
 
-def work_reminder(tool, key, conf):
+def work_reminder(tool, key, now):
     """The reminder about untracked files this turn made outside .agents/work/ (gitignored, so git
-    never lists what's in it), each named once per session; '' when there's nothing to say. Runs
-    only after verify passed, and never counts as one of the stop gate's tries."""
-    if conf.get("WORK_REMIND", "on") == "off":
-        return ""
+    never lists what's in it), each named once per session and at most one reminder per turn; ''
+    when there's nothing to say. now is the untracked list from before verify ran (None: no
+    reminder). Never counts as one of the stop gate's tries."""
     before = read_names(os.path.join(CACHE, "turn-untracked-" + key))
-    now = untracked_files()
     if before is None or now is None:
         return ""
     seen_path = os.path.join(CACHE, "work-reminded-" + key)
@@ -794,6 +796,7 @@ def work_reminder(tool, key, conf):
     if not new:
         return ""
     write_names(seen_path, sorted(seen | set(new)))
+    write_file(os.path.join(CACHE, "nudged-" + key), "1")
     log_event(tool, "stop-gate", "work-reminder", " ".join(new))
     shown = ", ".join(work_name(f) for f in new[:WORK_NAMES_SHOWN])
     if len(new) > WORK_NAMES_SHOWN:
@@ -842,7 +845,10 @@ def stop_gate(tool, data, conf):
     # changed.
     conf_note, conf_keys, conf_now = gate_conf_changed(key)
 
+    nudged = os.path.join(CACHE, "nudged-" + key)
+
     def allow_noted(note=""):
+        remove_file(nudged)   # the turn is over: the next one may remind again
         if conf_note:
             write_file(os.path.join(CACHE, "conf-" + key), conf_now)
             log_event(tool, "stop-gate", "conf-changed", conf_keys)
@@ -878,9 +884,20 @@ def stop_gate(tool, data, conf):
                            "run .agents/bin/verify%s to see what is left."
                            % (blocks, " --since=" + since[0][:12] if since else ""))
 
+    # The workspace reminder's list of untracked files is taken before verify runs, and what verify
+    # itself writes (caches, test reports) joins the turn's starting list, so it's never named.
+    listed = os.path.join(CACHE, "turn-untracked-" + key)
+    untracked = None
+    if conf.get("WORK_REMIND", "on") != "off" and not os.path.exists(nudged) and os.path.exists(listed):
+        untracked = untracked_files()
     budget = int(conf.get("TURN_BUDGET", "300") or 300) + 30
     rc, out = run_tool(harness_cmd("verify", "--tier=turn", *["--since=" + s for s in since]), budget)
     log_event(tool, "stop-gate", str(rc))
+    if untracked is not None:
+        had = set(untracked)
+        made = [f for f in (untracked_files() or []) if f not in had]
+        if made:
+            write_names(listed, (read_names(listed) or []) + made)
     if rc == 0:
         write_file(counter, "0")
         remove_file(pending_file)
@@ -888,7 +905,7 @@ def stop_gate(tool, data, conf):
         write_file(os.path.join(CACHE, "head-" + key), refs_state())
         # The reminder goes to the agent; a settings note waits for the next stop, which runs
         # verify again (the settings still differ from the turn's start) and tells the human.
-        nudge = work_reminder(tool, key, conf)
+        nudge = work_reminder(tool, key, untracked)
         if nudge:
             return send_back(tool, nudge)
         return allow_noted()

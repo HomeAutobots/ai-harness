@@ -7392,6 +7392,43 @@ if [ "$HAVE_PY" -eq 1 ]; then
   t    "...and the settings note still reaches the human at the next stop" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'harness.conf changed during this turn: FDD_REMIND_T'" _ "$out"
   edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf.py"
 
+  for tool in codex gemini; do   # their continuation is a new prompt, which runs turn-start again
+    S="{\"session_id\":\"n-$tool\"}"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    printf 'FDD_REMIND_T="1"\n' >> "$WR/.agents/harness.conf"; echo x > "$WR/conf-$tool.py"
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>/dev/null)" || true
+    t  "$tool: a settings change and a new file: the reminder" bash -c "printf '%s' \"\$1\" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d[\"decision\"]==\"block\" and \"conf-$tool.py\" in d[\"reason\"]'" _ "$out"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>/dev/null)" || true
+    t  "...$tool: after the continuation's turn-start, the settings note reaches the human" bash -c "printf '%s' \"\$1\" | python3 -c 'import json,sys; assert \"harness.conf changed\" in json.load(sys.stdin)[\"systemMessage\"]'" _ "$out"
+    edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf-$tool.py"
+  done
+
+  S='{"session_id":"w12"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/first.py"
+  trc  "one reminder per turn: the first" 2 hook "$WR" stop-gate claude "$S"
+  echo x > "$WR/second.py"
+  trc  "...another new file at a later stop of the turn passes" 0 hook "$WR" stop-gate claude "$S"
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/third.py"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "...a new turn can remind again" bash -c "printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: third.py.'" _ "$out"
+  rm -f "$WR/first.py" "$WR/second.py" "$WR/third.py"
+
+  printf '#!/usr/bin/env bash\necho x > "out-$$.junit"\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  S='{"session_id":"w13"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo more >> "$WR/README.md"
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "a file verify writes is never named" bash -c "[ '$rc' = 0 ] && ! printf '%s' \"\$1\" | grep -q junit && ls '$WR' | grep -q '^out-.*junit\$'" _ "$out"
+  echo x > "$WR/FAIL"
+  trc  "...(verify fails, writing another)" 2 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/FAIL"
+  trc  "...nor at a later stop of the same turn" 0 hook "$WR" stop-gate claude "$S"
+  printf '#!/usr/bin/env bash\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  rm -f "$WR"/out-*.junit; git -C "$WR" checkout -q README.md
+
   for tool in copilot codex gemini; do
     hook "$WR" turn-start "$tool" "{\"session_id\":\"t-$tool\"}" >/dev/null 2>&1
     echo x > "$WR/$tool.py"
