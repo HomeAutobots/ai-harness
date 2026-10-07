@@ -7464,6 +7464,24 @@ if [ "$HAVE_PY" -eq 1 ]; then
   edit "$WR/.agents/harness.conf" 's/^HOOKS=.*/HOOKS="policy edit questions"/'
   trc  "stop gate off in HOOKS: no reminder" 0 hook "$WR" stop-gate claude '{"session_id":"w9"}'
   rm -f "$WR/hooksoff.py"
+
+  W3=$(repo workremind-fresh)   # turn.sh left as installed: verify can't run (exit 3)
+  "$HARNESS/install.sh" --team "$W3" >/dev/null 2>&1
+  commit "$W3" harness
+  S='{"session_id":"f1"}'
+  hook "$W3" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$W3/try.py"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "verify can't run (exit 3): a new file still gets the reminder" bash -c "[ '$rc' = 2 ] && printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: try.py.' && ! printf '%s' \"\$1\" | grep -q 'could not verify'" _ "$out"
+  mkdir -p "$W3/.agents/work/scratch/t"; mv "$W3/try.py" "$W3/.agents/work/scratch/t/"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "...and the human hears verify couldn't run at the next stop, after the agent moves it" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)'" _ "$out"
+  trc  "...once"                        0 bash -c "! (printf '%s' '$S' | (cd '$W3' && .agents/hooks/run stop-gate --tool=claude) 2>&1 | grep -q 'could not verify')"
+  S='{"session_id":"f2"}'
+  hook "$W3" turn-start claude "$S" >/dev/null 2>&1
+  echo more >> "$W3/README.md"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "...with no new file, at this stop" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)'" _ "$out"
 else
   echo "work: the stop gate's reminder (skipped: needs python3)"; SKIP=$((SKIP + 1))
 fi

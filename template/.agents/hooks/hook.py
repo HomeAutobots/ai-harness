@@ -13,9 +13,9 @@ Translates each tool's hook protocol into the harness's tool-agnostic checks:
                 and WORKFLOWS, STACKS, FDD_* and DEBUG_* in harness.conf) when a prompt arrives
   stop-gate     run .agents/bin/verify when the agent tries to finish, if this turn changed
                 anything; block with the findings until it passes (bounded retries). Once it
-                passes, name new untracked files outside .agents/work/ once (WORK_REMIND). A
-                simulated-human switch that appeared or changed during the turn is marked flagged;
-                a change to those settings gets a note for the human
+                passes or can't run, name new untracked files outside .agents/work/, once a turn
+                (WORK_REMIND). A simulated-human switch that appeared or changed during the turn
+                is marked flagged; a change to those settings gets a note for the human
 
 Usage: hook.py <event> --tool=<claude|copilot|cursor|codex|gemini>   (JSON payload on stdin)
 
@@ -846,9 +846,16 @@ def stop_gate(tool, data, conf):
     conf_note, conf_keys, conf_now = gate_conf_changed(key)
 
     nudged = os.path.join(CACHE, "nudged-" + key)
+    CANT_VERIFY = "Stop gate could not verify"
 
-    def allow_noted(note=""):
-        remove_file(nudged)   # the turn is over: the next one may remind again
+    def allow_noted(note="", passed=False):
+        # The turn is over: the next one may remind again. A reminder sent where verify couldn't run
+        # left that note in the marker; it goes to the human now, unless verify since passed or this
+        # stop has its own.
+        held = read_file(nudged)
+        remove_file(nudged)
+        if held.startswith(CANT_VERIFY) and not passed and not note.startswith(CANT_VERIFY):
+            note = "\n".join(x for x in (held, note) if x)
         if conf_note:
             write_file(os.path.join(CACHE, "conf-" + key), conf_now)
             log_event(tool, "stop-gate", "conf-changed", conf_keys)
@@ -908,11 +915,18 @@ def stop_gate(tool, data, conf):
         nudge = work_reminder(tool, key, untracked)
         if nudge:
             return send_back(tool, nudge)
-        return allow_noted()
+        return allow_noted(passed=True)
     if rc not in (1, 2):
         write_file(counter, "0")
         keep_range()
-        return allow_noted("Stop gate could not verify (exit %d): %s" % (rc, out.splitlines()[-1] if out else ""))
+        # A fresh install's unconfigured checks exit 3, where agents leave the most files about. The
+        # human's note waits in the marker for the stop that ends the turn.
+        note = "%s (exit %d): %s" % (CANT_VERIFY, rc, out.splitlines()[-1] if out else "")
+        nudge = work_reminder(tool, key, untracked)
+        if nudge:
+            write_file(nudged, note)
+            return send_back(tool, nudge)
+        return allow_noted(note)
 
     write_file(counter, str(blocks + 1))
     reason = ("The stop gate ran .agents/bin/verify and it failed. Fix these, then finish:\n\n%s\n\n"
