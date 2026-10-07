@@ -58,6 +58,11 @@ warn()  { printf 'sync: warning: %s\n' "$*" >&2; }
 die()   { printf 'sync: error: %s\n' "$*" >&2; exit 2; }
 drift() { say "out of date: $*"; DRIFT=1; }
 
+case "${WORK_REMIND:-on}" in
+  on|off) ;;
+  *) warn "WORK_REMIND=\"$WORK_REMIND\" isn't on or off; the stop gate treats it as on" ;;
+esac
+
 tracked() { git ls-files --error-unmatch -- "$1" >/dev/null 2>&1; }
 # claude_stub <file>: true if the file holds only what the harness writes (imports, blank lines,
 # the marker comment), so regenerating it loses nothing.

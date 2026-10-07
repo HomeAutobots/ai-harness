@@ -7302,6 +7302,11 @@ mkdir -p "$W3/.agents/work/scratch/y"; echo hi > "$W3/.agents/work/scratch/y/out
 t    "local mode: git doesn't see it"  bash -c "cd '$W3' && test -z \"\$(git status --porcelain --untracked-files=all -- .agents/work)\""
 t    "AGENTS.md has the workspace rule" grep -qF 'Throwaway files (scripts, logs, notes, drafts) go in `.agents/work/scratch/<slug>/`' "$W/AGENTS.md"
 t    "plan-task points at the plan's scratch folder" grep -qF '.agents/work/scratch/<slug>/' "$W/.agents/builtin/skills/plan-task/SKILL.md"
+t    "harness.conf seeds WORK_REMIND=\"on\"" grep -qx 'WORK_REMIND="on"' "$W/.agents/harness.conf"
+edit "$W/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="maybe"/'
+t    "sync warns about a WORK_REMIND that isn't on or off" bash -c "cd '$W' && .agents/bin/sync 2>&1 | grep -qF 'warning: WORK_REMIND=\"maybe\" isn'\''t on or off; the stop gate treats it as on'"
+edit "$W/.agents/harness.conf" 's/^WORK_REMIND=.*/WORK_REMIND="on"/'
+t    "...and is quiet about on"        bash -c "cd '$W' && ! .agents/bin/sync 2>&1 | grep -q WORK_REMIND"
 }
 group grp_work
 
