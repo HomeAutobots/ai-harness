@@ -251,6 +251,9 @@ printf 'x \363\240\201\201 tag chars\n' > "$P/.agents/context/sneaky.md"
 tnot "tag chars fail --check"          "$P/.agents/bin/sync" --check
 rm "$P/.agents/context/sneaky.md"
 t    "clean again"                     "$P/.agents/bin/sync" --check
+mkdir -p "$P/.agents/work/references"; printf '\357\273\277{"doc": "vendor\342\200\213dump"}\n' > "$P/.agents/work/references/x.json"
+t    "...not counting .agents/work (vendor dumps aren't instructions)" "$P/.agents/bin/sync" --check
+rm "$P/.agents/work/references/x.json"
 }
 group grp_fresh
 
@@ -4485,6 +4488,16 @@ EOF
   R=$(ls -d "$EL"/.agents/evals/results/*/ | tail -1)
   t  "eval copies CLAUDE.local.md into its worktrees" grep -q '^add-fix,C,1,1,' "$R/results.csv"
   t  "...git status still clean"      test -z "$(git -C "$EL" status --porcelain)"
+  mkdir -p "$EL/.agents/work/scratch/add-fix"; echo 'the fix is in calc.sh' > "$EL/.agents/work/scratch/add-fix/notes.md"
+  cat > "$WORK/agent-work.sh" <<EOF
+#!/usr/bin/env bash
+[ -d .agents/bin ] && : > "$WORK/eval-saw-bin"
+[ -e .agents/work ] && : > "$WORK/eval-saw-work"
+printf '{"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}\n'
+EOF
+  chmod +x "$WORK/agent-work.sh"
+  (cd "$EL" && EVAL_AGENT_CMD="$WORK/agent-work.sh" .agents/bin/eval run --arms=C --runs=1 >/dev/null 2>&1) || true
+  t  "eval's worktree copy leaves out .agents/work" bash -c "test -e '$WORK/eval-saw-bin' && test ! -e '$WORK/eval-saw-work'"
 fi
 }
 group grp_local6
@@ -4780,7 +4793,11 @@ printf 'deny-cmd make deploy   # humans deploy\n' >> "$BK/.agents/policy.conf"
 printf '\nThe parser is safety critical.\n' >> "$BK/AGENTS.md"
 mkdir -p "$BK/.agents/cache" "$BK/.agents/evals/results" "$BKD.new.123"
 echo junk > "$BK/.agents/cache/junk.log"; echo '{}' > "$BK/.agents/evals/results/run.json"
+mkdir -p "$BK/.agents/work/scratch/x" "$BK/.agents/work/references"
+echo n > "$BK/.agents/work/scratch/x/notes.md"; echo '{}' > "$BK/.agents/work/references/api.json"
 t    "local sync exits 0"              "$BK/.agents/bin/sync"
+t    "backup skips .agents/work/scratch" test ! -e "$BKD/.agents/work/scratch"
+t    "...and keeps the rest of .agents/work" test -f "$BKD/.agents/work/references/api.json"
 t    "backup kept in the git dir"      test -f "$BKD/.agents/context/parser.md"
 t    "backup skips the cache"          test ! -e "$BKD/.agents/cache"
 t    "backup skips eval results"       test ! -e "$BKD/.agents/evals/results"

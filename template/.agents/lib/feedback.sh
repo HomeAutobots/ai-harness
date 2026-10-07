@@ -72,8 +72,9 @@ agents_backup_dir() {
   printf '%s/backup%s\n' "$gd" "${pfx:+-$(printf '%s' "$pfx" | tr '/' '_')}"
 }
 
-# agents_backup [quiet]: local mode only. Copies .agents/ (minus the cache, eval results, and
-# builtin/, which install.sh rebuilds on every run, restores included) and the untracked root
+# agents_backup [quiet]: local mode only. Copies .agents/ (minus the cache, eval results, the
+# agents' throwaway .agents/work/scratch/, and builtin/, which install.sh rebuilds on every run,
+# restores included) and the untracked root
 # instruction files into agents_backup_dir, replacing the previous copy.
 # A local AGENTS.md the project has since started tracking is kept aside once, as
 # AGENTS.md.before-tracked, with a warning. Only sync does that: with quiet (verify), the old
@@ -93,7 +94,7 @@ agents_backup() {
   rm -rf "$dest".new.* "$dest".old.* 2>/dev/null || true
   tmp="$dest.new.$$"
   mkdir -p "$tmp" 2>/dev/null || return 0
-  if ! (cd "$AGENTS_ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/builtin .agents) 2>/dev/null \
+  if ! (cd "$AGENTS_ROOT" && tar -cf - --exclude .agents/cache --exclude .agents/evals/results --exclude .agents/builtin --exclude .agents/work/scratch .agents) 2>/dev/null \
        | tar -C "$tmp" -xf - 2>/dev/null || [ ! -d "$tmp/.agents" ]; then
     rm -rf "$tmp"; return 0
   fi
