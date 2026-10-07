@@ -71,7 +71,7 @@ work_last() {
   [ -d "$SCRATCH/_done/$1" ] && { m=1; name="$1"; }
   for f in "$SCRATCH/_done/$1".*; do
     [ -e "$f" ] || continue
-    n="${f##*.}"
+    n="${f#"$SCRATCH/_done/$1".}"   # fix.2.3, made by hand, is "2.3": not ours
     case "$n" in ''|*[!0-9]*|0*) continue ;; esac
     [ "$n" -gt "$m" ] && { m="$n"; name="$1.$n"; }
   done
@@ -79,7 +79,9 @@ work_last() {
 }
 # work_slug <slug>: only a plan named the way tasks new names them has its folder moved; a dotted
 # plan made by hand could otherwise take another plan's archive.
-work_slug() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'; }
+work_slug() {   # letters spelled out: a range in a pattern can take in capitals outside the C locale
+  case "$1" in ''|[!abcdefghijklmnopqrstuvwxyz0123456789]*|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) return 1 ;; esac
+}
 # work_taken <path>: something is there already (mv into an existing folder would nest inside it)
 work_taken() { [ -e "$1" ] || [ -L "$1" ]; }
 # work_archive <slug>: the plan is closed; its scratch folder moves to scratch/_done/, never over another

@@ -627,13 +627,17 @@ def post_edit(tool, data, conf):
 
 def turn_start(tool, data, conf):
     key = session_key(data)
-    # Codex and Gemini continue a blocked stop (or the workspace reminder) as a new prompt, which may
-    # fire this hook again; a fresh snapshot then would let the next stop through with verify still
-    # failing, or lose the settings note the next stop owes the human. The counter goes back to 0, and
-    # the nudged- marker goes, when a stop is allowed, so the next real prompt snapshots as usual.
+    # Codex and Gemini continue a blocked stop as a new prompt, which may fire this hook again; a fresh
+    # snapshot then would let the next stop through with verify still failing. The counter goes back
+    # to 0 on a pass, a pause, or giving up, so the next real prompt snapshots as usual. The same goes
+    # for the workspace reminder's continuation (the nudged- marker, gone once a stop is allowed) in
+    # every tool but Claude Code, whose stop hook continues without a new prompt: a snapshot then
+    # would lose the settings note the turn's last stop owes the human. Cursor's followup_message and
+    # Copilot's block reason may well arrive as a prompt; their docs don't say.
     nudged = os.path.join(CACHE, "nudged-" + key)
-    if tool in ("codex", "gemini") and (int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0
-                                        or os.path.exists(nudged)):
+    if tool in ("codex", "gemini") and int(read_file(os.path.join(CACHE, "stop-" + key), "0") or 0) > 0:
+        return allow(tool, "turn-start")
+    if tool != "claude" and os.path.exists(nudged):
         return allow(tool, "turn-start")
     remove_file(nudged)
     write_file(os.path.join(CACHE, "turn-" + key), tree_state())
@@ -792,7 +796,8 @@ def work_reminder(tool, key, now):
     seen_path = os.path.join(CACHE, "work-reminded-" + key)
     seen = set(read_names(seen_path) or [])
     old = set(before)
-    new = [f for f in now if f not in old and f not in seen]
+    # .agents/work/'s own .gitignore keeps it out of git's list; this covers a clone without one.
+    new = [f for f in now if f not in old and f not in seen and not f.startswith(".agents/work/")]
     if not new:
         return ""
     write_names(seen_path, sorted(seen | set(new)))
@@ -925,10 +930,13 @@ def stop_gate(tool, data, conf):
         nudge = work_reminder(tool, key, untracked)
         if nudge:
             write_file(nudged, note)
+            write_file(os.path.join(CACHE, "turn-" + key), tree_state())   # nothing more done: no rerun
             return send_back(tool, nudge)
         return allow_noted(note)
 
     write_file(counter, str(blocks + 1))
+    if read_file(nudged).startswith(CANT_VERIFY):
+        write_file(nudged, "1")   # verify ran this time: the held "could not verify" no longer holds
     reason = ("The stop gate ran .agents/bin/verify and it failed. Fix these, then finish:\n\n%s\n\n"
               "(Attempt %d of %d. If a finding is wrong or out of scope, say so plainly instead of "
               "suppressing it.)" % (out, blocks + 1, max_blocks))

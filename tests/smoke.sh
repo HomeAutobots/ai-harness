@@ -252,8 +252,11 @@ tnot "tag chars fail --check"          "$P/.agents/bin/sync" --check
 rm "$P/.agents/context/sneaky.md"
 t    "clean again"                     "$P/.agents/bin/sync" --check
 mkdir -p "$P/.agents/work/references"; printf '\357\273\277{"doc": "vendor\342\200\213dump"}\n' > "$P/.agents/work/references/x.json"
-t    "...not counting .agents/work (vendor dumps aren't instructions)" "$P/.agents/bin/sync" --check
+t    "...not counting .agents/work's folders (vendor dumps aren't instructions)" "$P/.agents/bin/sync" --check
 rm "$P/.agents/work/references/x.json"
+cp "$P/.agents/work/README.md" "$WORK/work-readme"; printf '\342\200\213 x\n' >> "$P/.agents/work/README.md"
+tnot "...but .agents/work/README.md counts" "$P/.agents/bin/sync" --check
+cp "$WORK/work-readme" "$P/.agents/work/README.md"
 }
 group grp_fresh
 
@@ -7424,6 +7427,35 @@ if [ "$HAVE_PY" -eq 1 ]; then
     t  "...$tool: after the continuation's turn-start, the settings note reaches the human" bash -c "printf '%s' \"\$1\" | python3 -c 'import json,sys; assert \"harness.conf changed\" in json.load(sys.stdin)[\"systemMessage\"]'" _ "$out"
     edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf-$tool.py"
   done
+  for tool in copilot cursor; do   # whether theirs runs turn-start again isn't documented: assume it may
+    S="{\"session_id\":\"n-$tool\",\"loop_count\":0}"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    printf 'FDD_REMIND_T="1"\n' >> "$WR/.agents/harness.conf"; echo x > "$WR/conf-$tool.py"
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>&1)" || true
+    t  "$tool: a settings change and a new file: the reminder" bash -c "printf '%s' \"\$1\" | grep -qF 'conf-$tool.py' && ! printf '%s' \"\$1\" | grep -q 'harness.conf changed'" _ "$out"
+    hook "$WR" turn-start "$tool" "$S" >/dev/null 2>&1
+    out="$(hook "$WR" stop-gate "$tool" "$S" 2>&1)" || true
+    t  "...$tool: a turn-start before the next stop keeps the settings note" bash -c "printf '%s' \"\$1\" | grep -qF 'harness.conf changed'" _ "$out"
+    edit "$WR/.agents/harness.conf" '/^FDD_REMIND_T=/d'; rm -f "$WR/conf-$tool.py"
+  done
+
+  S='{"session_id":"w14"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/again.py"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  mkdir -p "$WR/.agents/work/scratch/a"; mv "$WR/again.py" "$WR/.agents/work/scratch/a/"
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  mv "$WR/.agents/work/scratch/a/again.py" "$WR/"
+  trc  "a file named once this session isn't named again in a later turn" 0 hook "$WR" stop-gate claude "$S"
+  rm -f "$WR/again.py"
+
+  rm "$WR/.agents/work/.gitignore"
+  S='{"session_id":"w15"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/.agents/work/scratch/fix/later.md"
+  trc  "a file in .agents/work isn't named even without its .gitignore" 0 hook "$WR" stop-gate claude "$S"
+  git -C "$WR" checkout -q .agents/work/.gitignore
 
   S='{"session_id":"w12"}'
   hook "$WR" turn-start claude "$S" >/dev/null 2>&1
@@ -7436,6 +7468,19 @@ if [ "$HAVE_PY" -eq 1 ]; then
   out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
   t    "...a new turn can remind again" bash -c "printf '%s' \"\$1\" | grep -qF 'New untracked files this turn: third.py.'" _ "$out"
   rm -f "$WR/first.py" "$WR/second.py" "$WR/third.py"
+
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=1/'
+  printf '#!/usr/bin/env bash\n[ -e CANT ] && { echo "no tool"; exit 3; }\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
+  S='{"session_id":"w16"}'
+  hook "$WR" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$WR/CANT"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  rm -f "$WR/CANT"; echo x > "$WR/FAIL"
+  hook "$WR" stop-gate claude "$S" >/dev/null 2>&1 || true
+  out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
+  t    "verify couldn't run, then it ran and failed: the give-up doesn't say it couldn't" bash -c "printf '%s' \"\$1\" | grep -q 'verify still failing' && ! printf '%s' \"\$1\" | grep -q 'could not verify'" _ "$out"
+  rm -f "$WR/FAIL"
+  edit "$WR/.agents/harness.conf" 's/^TURN_MAX_BLOCKS=.*/TURN_MAX_BLOCKS=3/'
 
   printf '#!/usr/bin/env bash\necho x > "out-$$.junit"\n[ -e FAIL ] && { echo "FAIL:1:1: error: failing on purpose [t]"; exit 1; }\nexit 0\n' > "$WR/.agents/checks/turn.sh"
   S='{"session_id":"w13"}'
@@ -7497,7 +7542,15 @@ if [ "$HAVE_PY" -eq 1 ]; then
   mkdir -p "$W3/.agents/work/scratch/t"; mv "$W3/try.py" "$W3/.agents/work/scratch/t/"
   out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
   t    "...and the human hears verify couldn't run at the next stop, after the agent moves it" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)'" _ "$out"
-  trc  "...once"                        0 bash -c "! (printf '%s' '$S' | (cd '$W3' && .agents/hooks/run stop-gate --tool=claude) 2>&1 | grep -q 'could not verify')"
+  t    "...once, not twice"             bash -c "[ \"\$(printf '%s\n' \"\$1\" | grep -o 'could not verify' | wc -l | tr -d ' ')\" = 1 ]" _ "$out"
+  S='{"session_id":"f3"}'
+  hook "$W3" turn-start claude "$S" >/dev/null 2>&1
+  echo x > "$W3/again3.py"
+  hook "$W3" stop-gate claude "$S" >/dev/null 2>&1 || true
+  n1="$(grep -c 'stop-gate	3' "$W3/.agents/cache/hook-events.log")"
+  out="$(hook "$W3" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
+  t    "...a stop with nothing changed since gets the note without running verify again" bash -c "[ '$rc' = 0 ] && printf '%s' \"\$1\" | grep -qF 'Stop gate could not verify (exit 3)' && [ \"\$(grep -c 'stop-gate	3' '$W3/.agents/cache/hook-events.log')\" = '$n1' ]" _ "$out"
+  rm -f "$W3/again3.py"
   S='{"session_id":"f2"}'
   hook "$W3" turn-start claude "$S" >/dev/null 2>&1
   echo more >> "$W3/README.md"
@@ -7545,7 +7598,7 @@ if [ "$(id -u)" != 0 ]; then
   t  "a move that fails warns and still exits 0" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'tasks: warning: couldn'\''t move .agents/work/scratch/fix' && test -f '$WS/fix/fresh.md'" _ "$out"
 fi
 (cd "$TK" && "$X" new solo "Solo" >/dev/null && "$X" add solo a >/dev/null && "$X" set solo T1 "done" >/dev/null)
-mkdir -p "$WS/_done/solo.1"; echo s > "$WS/_done/solo.1/s.md"
+mkdir -p "$WS/_done/solo.1" "$WS/_done/solo.1.5"; echo s > "$WS/_done/solo.1/s.md"   # solo.1.5: made by hand, not ours
 out="$(cd "$TK" && "$X" set solo T1 todo 2>&1)"
 t    "only an archive named <slug>.1: reopening restores it" bash -c "test -f '$WS/solo/s.md' && printf '%s\n' \"\$1\" | grep -qxF 'restored .agents/work/scratch/_done/solo.1 to .agents/work/scratch/solo'" _ "$out"
 (cd "$TK" && "$X" new zero "Zero" >/dev/null && "$X" add zero a >/dev/null)

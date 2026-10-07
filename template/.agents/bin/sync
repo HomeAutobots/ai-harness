@@ -1187,10 +1187,11 @@ fi
 printf '\342\200\213\n\342\200\214\n\342\200\215\n\342\200\216\n\342\200\217\n\342\200\252\n\342\200\253\n\342\200\254\n\342\200\255\n\342\200\256\n\342\201\240\n\342\201\241\n\342\201\242\n\342\201\243\n\342\201\244\n\342\201\246\n\342\201\247\n\342\201\250\n\342\201\251\n\357\273\277\n\363\240\200\n\363\240\201\n' > "$WORK/hidden.pat"
 {
   for f in AGENTS.md AGENTS.override.md CLAUDE.md CLAUDE.local.md GEMINI.md .github/copilot-instructions.md .mcp.json; do if [ -f "$f" ]; then echo "$f"; fi; done
-  # .agents/work/ is left out: vendor dumps and notes there aren't instructions the harness loads.
+  # .agents/work/'s folders are left out: vendor dumps and notes aren't instructions the harness
+  # loads. Its README, which agents read, is checked.
   find .agents .claude .cursor .github/hooks .github/agents .codex .gemini -type f \
     \( -name '*.md' -o -name '*.conf' -o -name '*.json' -o -name '*.sh' -o -name '*.py' -o -name '*.rules' -o -name '*.toml' -o -name '*.patterns' -o -name '*.allow' \) \
-    -not -path '.agents/cache/*' -not -path '.agents/plans/*' -not -path '.agents/evals/results/*' -not -path '.agents/work/*' 2>/dev/null || true
+    -not -path '.agents/cache/*' -not -path '.agents/plans/*' -not -path '.agents/evals/results/*' -not -path '.agents/work/*/*' 2>/dev/null || true
   # Skills and active packs are instructions too, wherever their library is: outside the project
   # (personal, listed), in it but outside .agents/, or a link the find above doesn't follow.
   { cut -f2 "$SKILL_SET"
