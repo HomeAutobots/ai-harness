@@ -7329,7 +7329,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   echo x > "$WR/debug_parse.py"
   out="$(hook "$WR" stop-gate claude "$S" 2>&1)" && rc=0 || rc=$?
   t    "a new untracked file: one continuation (claude, 2)" test "$rc" = 2
-  t    "...naming it, with where scratch goes" bash -c "printf '%s' \"\$1\" | grep -qxF 'New untracked files this turn: debug_parse.py. Scratch goes in .agents/work/scratch/<slug>/; move these there, or say in one line why each belongs in the repo.'" _ "$out"
+  t    "...naming it, with where scratch goes" bash -c "printf '%s' \"\$1\" | grep -qxF 'New untracked files this turn: debug_parse.py. If any are scratch, move them to .agents/work/scratch/<slug>/; say in one line why the rest belong in the repo.'" _ "$out"
   t    "...logged as work-reminder"    grep -q 'stop-gate	work-reminder	debug_parse.py' "$WR/.agents/cache/hook-events.log"
   echo more >> "$WR/README.md"
   trc  "...named once: a later stop that runs verify passes" 0 hook "$WR" stop-gate claude "$S"
@@ -7350,7 +7350,7 @@ if [ "$HAVE_PY" -eq 1 ]; then
   hook "$WR" turn-start claude "$S" >/dev/null 2>&1
   for i in 01 02 03 04 05 06 07 08 09 10 11 12; do echo x > "$WR/n$i.py"; done
   out="$(hook "$WR" stop-gate claude "$S" 2>&1)" || true
-  t    "12 files: 10 names, then and 2 more" bash -c "printf '%s' \"\$1\" | grep -qF 'n09.py, n10.py and 2 more. Scratch goes'" _ "$out"
+  t    "12 files: 10 names, then and 2 more" bash -c "printf '%s' \"\$1\" | grep -qF 'n09.py, n10.py and 2 more. If any are scratch'" _ "$out"
   rm -f "$WR"/n*.py
 
   S='{"session_id":"w4"}'

@@ -791,8 +791,8 @@ def work_reminder(tool, key, conf):
     shown = ", ".join(re.sub(r"[\x00-\x1f\x7f]", "?", f) for f in new[:WORK_NAMES_SHOWN])
     if len(new) > WORK_NAMES_SHOWN:
         shown += " and %d more" % (len(new) - WORK_NAMES_SHOWN)
-    return ("New untracked files this turn: %s. Scratch goes in .agents/work/scratch/<slug>/; move these "
-            "there, or say in one line why each belongs in the repo." % shown)
+    return ("New untracked files this turn: %s. If any are scratch, move them to .agents/work/scratch/<slug>/; "
+            "say in one line why the rest belong in the repo." % shown)
 
 
 def send_back(tool, reason):

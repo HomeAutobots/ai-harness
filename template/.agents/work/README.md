@@ -11,4 +11,4 @@ Where agents (and you) put the files made on the way to the real change, so the 
 
 Promote what the team needs: a script into a tracked place in the repo (`scripts/`, `tools/`), a report into your docs or Confluence. Then it's reviewed and committed like any other change.
 
-When a turn leaves new untracked files outside this folder, the stop gate names them once and asks the agent to move them here or say why they belong in the repo. `WORK_REMIND="off"` in `.agents/harness.conf` turns that off.
+When a turn leaves new untracked files outside this folder, the stop gate names them once and asks the agent to move any scratch here and say why the rest belong in the repo. `WORK_REMIND="off"` in `.agents/harness.conf` turns that off.

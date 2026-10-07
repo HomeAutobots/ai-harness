@@ -165,7 +165,7 @@ Agents make files on the way to a change: repro scripts, logs, notes, review not
 - `scratch/<slug>/` for one piece of work (the plan's slug, or a short name). When the plan's last task is done, `tasks` moves it to `scratch/_done/<slug>/`, and reopening the plan moves it back.
 - `scripts/` for scripts worth reusing, `references/` for outside material, `reports/` for finished write-ups, `requirements/` for requirement exports and drafts.
 
-A core rule tells agents to use it. When a turn leaves new untracked files elsewhere, the stop gate (after verify passes) names them once and asks the agent to move scratch into `.agents/work/` or say why each file belongs in the repo. That's one continuation, not a block, and it doesn't count toward the stop gate's tries. `WORK_REMIND="off"` in `.agents/harness.conf` turns it off. Anything the team needs gets promoted out: a script into a tracked folder, a report into your docs.
+A core rule tells agents to use it. When a turn leaves new untracked files elsewhere, the stop gate (after verify passes) names them once and asks the agent to move any scratch into `.agents/work/scratch/<slug>/` and say in one line why the rest belong in the repo. That's one continuation, not a block, and it doesn't count toward the stop gate's tries. `WORK_REMIND="off"` in `.agents/harness.conf` turns it off. Anything the team needs gets promoted out: a script into a tracked folder, a report into your docs.
 
 ## Evals
 
