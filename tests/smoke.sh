@@ -7313,6 +7313,10 @@ printf '# ours\n' > "$W/.agents/work/README.md"; rm -rf "$W/.agents/work/reports
 t    "upgrade: an existing README is kept" grep -qx '# ours' "$W/.agents/work/README.md"
 t    "...a missing folder comes back"  test -d "$W/.agents/work/reports"
 t    "...and scratch is untouched"     test -f "$W/.agents/work/scratch/x/notes.md"
+rm -rf "$W/.agents/work/scripts"; echo mine > "$W/.agents/work/scripts"
+out="$("$HARNESS/install.sh" --team "$W" 2>&1)" && rc=0 || rc=$?
+t    "a file where a folder goes: install warns and carries on" bash -c "test $rc = 0 && printf '%s' \"\$1\" | grep -qF 'install: warning: ' && grep -qx mine '$W/.agents/work/scripts' && test -d '$W/.agents/work/reports'" _ "$out"
+rm -f "$W/.agents/work/scripts"; mkdir "$W/.agents/work/scripts"; echo hi > "$W/.agents/work/scripts/tool.sh"
 W2=$(repo work-old)
 "$HARNESS/install.sh" --team "$W2" >/dev/null 2>&1
 rm -rf "$W2/.agents/work"

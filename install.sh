@@ -265,7 +265,7 @@ seed .agents/evals
 seed .agents/library
 seed .agents/work
 for d in scratch scripts references reports requirements; do
-  mkdir -p "$DEST/.agents/work/$d"
+  mkdir -p "$DEST/.agents/work/$d" 2>/dev/null || say "warning: couldn't create .agents/work/$d/ (a file by that name?); move it aside and re-run install.sh"
 done
 for tier in edit turn full; do
   seed ".agents/checks/$tier.sh"
