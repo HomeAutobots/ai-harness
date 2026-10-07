@@ -165,7 +165,7 @@ Agents make files on the way to a change: repro scripts, logs, notes, review not
 - `scratch/<slug>/` for one piece of work (the plan's slug, or a short name). When the plan's last task is done, `tasks` moves it to `scratch/_done/<slug>/`, and reopening the plan moves it back.
 - `scripts/` for scripts worth reusing, `references/` for outside material, `reports/` for finished write-ups, `requirements/` for requirement exports and drafts.
 
-A core rule tells agents to use it. When a turn leaves new untracked files elsewhere, the stop gate (after verify passes) names them once and asks the agent to move any scratch into `.agents/work/scratch/<slug>/` and say in one line why the rest belong in the repo. That's one continuation, not a block, and it doesn't count toward the stop gate's tries. `WORK_REMIND="off"` in `.agents/harness.conf` turns it off. Anything the team needs gets promoted out: a script into a tracked folder, a report into your docs.
+A core rule tells agents to use it. When a turn leaves new untracked files elsewhere, the stop gate (once verify passes, or can't run because the checks aren't set up yet) names them and asks the agent to move any scratch into `.agents/work/scratch/<slug>/` and say in one line why the rest belong in the repo. Each file is named once per session, at most one reminder a turn, and never while verify has findings. That's one continuation, not a block, and it doesn't count toward the stop gate's tries. `WORK_REMIND="off"` in `.agents/harness.conf` turns it off. Anything the team needs gets promoted out: a script into a tracked folder, a report into your docs.
 
 ## Evals
 
@@ -399,7 +399,7 @@ Keep `template/.agents/core/AGENTS.core.md` tight. Every line there loads in eve
 - Codex has no `${VAR}` expansion: an env value it can't pass by name (a renamed variable, text around a reference, a default) or a header other than `Bearer ${VAR}` / `${VAR}` is left out for codex with a warning, and a reference in `command`, `args`, `cwd`, or `url` keeps the server out of codex entirely. An `sse` server gets a plain `url` there.
 - The MCP secrets check for `args` and `url` is a heuristic. These get through: a literal secret after a flag whose name doesn't end in a secret word (`--creds-value abc...`), a short non-password value, a value that looks like a path or file name, a bare positional value or a url username (`https://<token>@host`) that isn't a key shape guard knows, and a secret inside `command` that isn't one either. Review server files like any other code that runs commands.
 - sync rewrites an MCP config it changes with its own JSON formatting (two-space indent); comments aren't JSON, so a config with them is reported as invalid and left alone.
-- The workspace reminder needs a stop hook: in a tool without one, agents get only the core rule. In Cursor, which counts its own stop loops, a reminder uses one of the stop gate's 3 tries.
+- The workspace reminder needs a stop hook: in a tool without one, agents get only the core rule. Cursor's `loop_count` (its count of stop-hook loops) is what the stop gate reads for its 3 tries there, so in Cursor a reminder may use one of them. Without a session id in the payload, a file is reminded about once ever, not once per session.
 
 ## Roadmap
 
